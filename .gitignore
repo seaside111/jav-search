@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行时配置（含密钥/密码，切勿提交）
+config/settings.json
+_previewcfg/
+
+# 编辑器 / 工具
+.claude/
+.idea/
+.vscode/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,40 @@
+services:
+  jav-search:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jav-search:latest
+    container_name: jav-search
+    restart: unless-stopped
+    # ── host 网络模式 ──
+    # 容器直接共用群晖的网络栈，与宿主机网络完全一致。
+    # 适用场景：代理 / Jackett 在其他网段，bridge 网络的容器路由不到时。
+    # 注意：host 模式下不能用 ports 映射，容器直接占用宿主机的 8085 端口。
+    network_mode: host
+    volumes:
+      - jav-config:/config
+      # 如需把配置放到群晖文件夹方便编辑（需先 mkdir 该目录）：
+      # - /volume1/docker/jav-search/config:/config
+      # ── V1.4 媒体库刮削目录映射（按需启用，冒号右侧为容器内路径，需与「设置 → 刮削」一致）──
+      # - /volume1/downloads/jav:/downloads/jav        # 下载器保存目录（监控源）
+      # - /volume1/media/jav:/media/jav                # 刮削后归档目录（按 YYYYMM 建子目录）
+    environment:
+      - CONFIG_DIR=/config
+      - PORT=8085
+      - TZ=Asia/Shanghai
+      # ── 登录认证 ──（部署前务必修改下面的账号密码与密钥）
+      - AUTH_USERNAME=admin
+      - AUTH_PASSWORD=change_me_please
+      # 会话签名密钥：随便填一串长随机字符串，改它会让所有人重新登录
+      - AUTH_SECRET=please-change-this-to-a-long-random-string
+      # 会话有效期（秒），默认 7 天
+      - AUTH_SESSION_TTL=604800
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  jav-config:

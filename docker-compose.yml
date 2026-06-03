@@ -1,0 +1,54 @@
+services:
+  jav-search:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jav-search:latest
+    container_name: jav-search
+    restart: unless-stopped
+    ports:
+      - "8085:8085"               # 修改左侧端口以避免冲突
+    volumes:
+      # ── 配置持久化 ──
+      # 默认用命名卷（Docker 自动管理，无需手动建目录）
+      - jav-config:/config
+      #
+      # 如果你想把配置直接放到群晖某个文件夹里方便编辑，
+      # 注释掉上面一行，改用下面的绑定挂载，并务必先手动建好该目录：
+      #   mkdir -p /volume1/docker/jav-search/config
+      # - /volume1/docker/jav-search/config:/config
+      #
+      # ── V1.4 媒体库刮削目录映射 ──
+      # 让容器能访问 qBittorrent 的下载目录（监控）与媒体归档目录（移动目标）。
+      # 路径需与「设置 → 刮削」里填写的容器内路径一致（即冒号右侧）。
+      # 监控目录建议与 qBittorrent 的保存目录指向同一份宿主机数据：
+      # - /volume1/downloads/jav:/downloads/jav        # 下载器保存目录（监控源）
+      # - /volume1/media/jav:/media/jav                # 刮削后归档目录（按 YYYYMM 建子目录）
+    environment:
+      - CONFIG_DIR=/config
+      - PORT=8085
+      - TZ=Asia/Shanghai
+      # ── 登录认证 ──（在此设置网页登录的账号密码）
+      - AUTH_USERNAME=admin
+      - AUTH_PASSWORD=change_me_please
+      - AUTH_SECRET=please-change-this-to-a-long-random-string
+      - AUTH_SESSION_TTL=604800
+      # ── 新增数据源域名（AVSOX/AVMOO 域名常变，失效时改这里）──
+      # - AVSOX_BASE=https://avsox.click
+      # - AVMOO_BASE=https://avmoo.website
+    # 若 Jackett / 代理跑在群晖宿主机上，用 host.docker.internal 访问宿主机
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  jav-config:
+
+networks:
+  default:
+    name: jav-search-net

@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>登录 · JAV Search</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
+  :root {
+    --bg-deep: #0a0a0f; --bg-card: #111119; --accent: #e8a020; --accent2: #c05020;
+    --text-main: #e8e4dc; --text-muted: #7a7a8c; --text-dim: #4a4a5c; --border: #252535; --red: #cc3344;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: var(--bg-deep); color: var(--text-main); font-family: 'Noto Sans SC', sans-serif;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  body::before {
+    content: ''; position: fixed; inset: 0;
+    background: radial-gradient(ellipse at 50% 30%, rgba(232,160,32,.06), transparent 60%);
+    pointer-events: none;
+  }
+  .login-box {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px;
+    padding: 40px 36px; width: 100%; max-width: 380px; position: relative; z-index: 1;
+    box-shadow: 0 24px 80px rgba(0,0,0,.5);
+  }
+  .logo {
+    font-family: 'Bebas Neue', sans-serif; font-size: 38px; letter-spacing: 3px; text-align: center;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+  }
+  .subtitle { text-align: center; color: var(--text-muted); font-size: 12px; letter-spacing: 1px; margin-top: -4px; margin-bottom: 30px; }
+  .field { margin-bottom: 16px; }
+  .field label { display: block; font-size: 13px; color: var(--text-muted); margin-bottom: 6px; }
+  .field input {
+    width: 100%; background: var(--bg-deep); border: 1px solid var(--border); border-radius: 9px;
+    padding: 12px 14px; color: var(--text-main); font-family: 'Noto Sans SC', sans-serif; font-size: 14px;
+    outline: none; transition: border-color .2s;
+  }
+  .field input:focus { border-color: var(--accent); }
+  .login-btn {
+    width: 100%; background: linear-gradient(135deg, var(--accent), var(--accent2)); border: none;
+    border-radius: 9px; color: #fff; font-weight: 700; font-family: 'Noto Sans SC', sans-serif;
+    padding: 13px; font-size: 15px; cursor: pointer; margin-top: 8px; transition: opacity .2s, transform .1s;
+  }
+  .login-btn:hover { opacity: .92; transform: translateY(-1px); }
+  .login-btn:active { transform: translateY(0); }
+  .login-btn:disabled { opacity: .5; cursor: wait; }
+  .err-msg { color: var(--red); font-size: 13px; text-align: center; min-height: 20px; margin-top: 14px; }
+  .hint { text-align: center; color: var(--text-dim); font-size: 11px; margin-top: 18px; line-height: 1.6; }
+</style>
+</head>
+<body>
+  <div class="login-box">
+    <div class="logo">JAV Search</div>
+    <div class="subtitle">影片信息检索</div>
+    <div class="field">
+      <label>用户名</label>
+      <input type="text" id="username" autocomplete="username" placeholder="请输入用户名">
+    </div>
+    <div class="field">
+      <label>密码</label>
+      <input type="password" id="password" autocomplete="current-password" placeholder="请输入密码">
+    </div>
+    <button class="login-btn" id="loginBtn" onclick="doLogin()">登 录</button>
+    <div class="err-msg" id="errMsg"></div>
+    <div class="hint">账号密码在 docker-compose.host.yml 中配置</div>
+  </div>
+
+<script>
+const usernameEl = document.getElementById('username');
+const passwordEl = document.getElementById('password');
+const btn = document.getElementById('loginBtn');
+const errMsg = document.getElementById('errMsg');
+
+async function doLogin() {
+  const username = usernameEl.value.trim();
+  const password = passwordEl.value;
+  if (!username || !password) { errMsg.textContent = '请输入用户名和密码'; return; }
+
+  btn.disabled = true;
+  btn.textContent = '登录中…';
+  errMsg.textContent = '';
+
+  try {
+    const resp = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const text = await resp.text();
+    let data = {};
+    try { data = JSON.parse(text); } catch(e) {}
+
+    if (resp.ok && data.success) {
+      // 登录成功，跳转主页
+      window.location.href = '/';
+    } else {
+      errMsg.textContent = data.detail || '登录失败';
+      btn.disabled = false;
+      btn.textContent = '登 录';
+    }
+  } catch (err) {
+    errMsg.textContent = '网络错误：' + err.message;
+    btn.disabled = false;
+    btn.textContent = '登 录';
+  }
+}
+
+// 回车登录
+[usernameEl, passwordEl].forEach(el =>
+  el.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); })
+);
+usernameEl.focus();
+</script>
+</body>
+</html>
