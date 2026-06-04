@@ -1198,7 +1198,7 @@ function renderDrawer(idx) {
     return;
   }
 
-  list.innerHTML = filtered.map((r, i) => renderResourceItem(r, i)).join('');
+  list.innerHTML = filtered.map((r, i) => renderResourceItem(r, i, idx)).join('');
 }
 
 function setDrawerFilter(idx, quality) {
@@ -1206,13 +1206,22 @@ function setDrawerFilter(idx, quality) {
   renderDrawer(idx);
 }
 
-function renderResourceItem(r, i) {
-  // 构造迅雷下载 URL
-  // 迅雷协议：thunder://base64(AA + url + ZZ)
-  const downloadUrl = r.magnet || r.link || '';
-  const thunderUrl = downloadUrl ? buildThunderUrl(downloadUrl) : '';
+function renderResourceItem(r, i, idx) {
+  const m = (typeof idx === 'number' && currentResults[idx]) ? currentResults[idx] : null;
+  const code = m ? (m.code || '') : '';
+
   const hasMagnet = !!r.magnet;
   const hasTorrent = !!r.link && !r.link.startsWith('magnet:');
+
+  // 种子直链经后端代理回传，规避 Jackett 返回 http://localhost 外网打不开的问题
+  const torrentProxy = hasTorrent
+    ? `${API}/api/jackett/download?url=${encodeURIComponent(r.link)}&name=${encodeURIComponent(code || r.title || 'download')}`
+    : '';
+
+  // 构造迅雷下载 URL（迅雷协议：thunder://base64(AA + url + ZZ)）
+  // 磁力优先；仅种子时用「绝对路径的后端代理直链」，避免迅雷拿到 localhost 地址
+  const downloadUrl = r.magnet || (torrentProxy ? (location.origin + torrentProxy) : r.link) || '';
+  const thunderUrl = downloadUrl ? buildThunderUrl(downloadUrl) : '';
 
   const qualityBadge = r.quality ? `<span class="res-badge badge-quality">${r.quality}</span>` : '';
   const codecBadge   = r.codec   ? `<span class="res-badge badge-codec">${r.codec}</span>` : '';
@@ -1239,7 +1248,7 @@ function renderResourceItem(r, i) {
     : '';
 
   const torrentBtn = hasTorrent
-    ? `<a class="btn-torrent" href="${escAttr(r.link)}" target="_blank" title="下载 .torrent 文件">
+    ? `<a class="btn-torrent" href="${escAttr(torrentProxy)}" title="下载 .torrent 文件">
         <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
           <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
@@ -1248,10 +1257,10 @@ function renderResourceItem(r, i) {
        </a>`
     : '';
 
-  // 推送到 qBittorrent（优先磁力，其次种子直链）
+  // 推送到 qBittorrent（优先磁力，其次种子直链；种子由后端代取上传）
   const qbUrl = r.magnet || r.link || '';
   const qbBtn = qbUrl
-    ? `<button class="btn-qb" id="qb-${i}" onclick="pushToQb('${escAttr(qbUrl)}', 'qb-${i}')" title="推送到 qBittorrent 下载器">
+    ? `<button class="btn-qb" id="qb-${i}" onclick="pushToQb('${escAttr(qbUrl)}', 'qb-${i}', ${typeof idx === 'number' ? idx : -1})" title="推送到 qBittorrent 下载器">
         <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/>
           <path d="M5 21h14"/>
@@ -1276,15 +1285,19 @@ function renderResourceItem(r, i) {
 }
 
 // 推送磁力/种子到 qBittorrent
-async function pushToQb(downloadUrl, btnId) {
+async function pushToQb(downloadUrl, btnId, idx) {
   const btn = document.getElementById(btnId);
   if (btn) { btn.disabled = true; btn.classList.remove('failed','pushed'); }
   const orig = btn ? btn.innerHTML : '';
   if (btn) btn.innerHTML = '<span class="drawer-spinner" style="width:11px;height:11px;margin:0 4px 0 0"></span>推送中';
+  // 带上该影片的番号/标题，供下载完成后刮削时精确识别番号
+  const m = (typeof idx === 'number' && idx >= 0 && currentResults[idx]) ? currentResults[idx] : null;
+  const code = m ? (m.code || '') : '';
+  const title = m ? (m.title || '') : '';
   try {
     const resp = await fetch(`${API}/api/qbittorrent/add`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ download_url: downloadUrl }),
+      body: JSON.stringify({ download_url: downloadUrl, code, title }),
     });
     const data = await safeJson(resp);
     if (resp.ok && data.success) {

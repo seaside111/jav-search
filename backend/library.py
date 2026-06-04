@@ -31,6 +31,7 @@ from pydantic import BaseModel
 from config_manager import load as load_config
 from scrapers import search, SEARCH_MODE_CODE
 from translator import translate
+import push_hints
 
 router = APIRouter(prefix="/api/library")
 
@@ -54,9 +55,28 @@ def _log(msg: str):
 # 支持的视频扩展名
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".wmv", ".mov", ".ts", ".m2ts", ".rmvb", ".flv", ".iso"}
 
-# 番号正则：匹配 ABP-123、SSIS001、FC2-PPV-1234567 等格式
+# 文件名里常见的站点/广告前缀噪声（会污染番号识别），如
+#   hhd800.com@ / [javbus.com] / www.xxx.cc- / (98tang.com)
+_SITE_NOISE = re.compile(
+    r'(?:www\.)?[a-z0-9][a-z0-9-]*\.'
+    r'(?:com|net|cc|xyz|tv|me|app|org|co|info|vip|club|site|top|fun|gg|la|cn|io|onl)'
+    r'(?:@|[-_\s.])*',
+    re.IGNORECASE,
+)
+
+
+def _clean_noise(stem: str) -> str:
+    """去掉文件名里的方括号/圆括号标签与站点域名前缀，留下真正的番号上下文。"""
+    s = re.sub(r'\[[^\]]*\]', ' ', stem)
+    s = re.sub(r'\([^)]*\)', ' ', s)
+    s = _SITE_NOISE.sub(' ', s)
+    return s
+
+
+# 番号正则：匹配 ABP-123、SSIS001、FC2-PPV-1234567、390JAC-234 等格式
 _CODE_PATTERNS = [
-    re.compile(r'\b(FC2-PPV-\d{5,8})\b', re.IGNORECASE),           # FC2-PPV-1234567
+    re.compile(r'\b(FC2-?PPV-?\d{5,8})\b', re.IGNORECASE),         # FC2-PPV-1234567
+    re.compile(r'\b(\d{3,4}[A-Z]{2,6}-\d{2,5})\b', re.IGNORECASE), # 390JAC-234 / 259LUXU-1234
     re.compile(r'\b([A-Z]{2,8}-\d{2,6})\b', re.IGNORECASE),        # ABP-123
     re.compile(r'\b([A-Z]{2,8})[-_]?(\d{2,6})\b', re.IGNORECASE),  # ABP123 / ABP_123
 ]
@@ -104,15 +124,36 @@ class ScrapeRequest(BaseModel):
 # 工具函数：番号/解析/NFO
 # ─────────────────────────────────────────
 
-def _extract_code(filename: str) -> str:
-    stem = Path(filename).stem
+def _match_code(text: str) -> str:
     for pat in _CODE_PATTERNS:
-        m = pat.search(stem)
+        m = pat.search(text)
         if m:
             if len(m.groups()) == 2:
                 return f"{m.group(1).upper()}-{m.group(2)}"
             return m.group(1).upper()
     return ""
+
+
+def _extract_code(filename: str) -> str:
+    """从文件名解析番号：先剔除站点前缀等噪声再匹配，失败时回退原始文件名。"""
+    stem = Path(filename).stem
+    return _match_code(_clean_noise(stem)) or _match_code(stem)
+
+
+def _resolve_code(video_path: Path, config: dict) -> str:
+    """
+    优先用「推送时标记的准确番号」反查（点推送下载时已知搜索结果番号），
+    命中则采用；未命中再回退到文件名正则解析。
+    """
+    try:
+        hinted = push_hints.resolve(video_path, config.get("scrape_watch_dir", ""))
+    except Exception as e:
+        hinted = ""
+        _log(f"推送番号反查失败（忽略，回退文件名解析）：{e}")
+    if hinted:
+        _log(f"命中推送标记番号：{video_path.name} → {hinted}")
+        return hinted
+    return _extract_code(video_path.name)
 
 
 # 日文（含假名/汉字）检测：用于判断是否需要翻译
@@ -283,7 +324,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         _log(f"刮削跳过：文件不存在 {filepath}")
         return {"success": False, "filepath": filepath, "error": "文件不存在"}
 
-    code = _extract_code(path.name)
+    code = _resolve_code(path, config)
     if not code:
         _log(f"刮削失败：无法从文件名提取番号 → {path.name}")
         return {"success": False, "filepath": filepath, "error": "无法从文件名提取番号"}
@@ -501,7 +542,7 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
     except Exception as e:
         # 刮削过程意外报错也不应阻止移动归档（符合「刮削正常运行但刮不到也移动」）
         _log(f"刮削过程异常（将按失败处理）：{video_path.name} — {e}")
-        scrape_res = {"success": False, "filepath": fp, "code": _extract_code(video_path.name),
+        scrape_res = {"success": False, "filepath": fp, "code": _resolve_code(video_path, config),
                       "error": f"刮削异常: {e}"}
     # success 含「已跳过」；真正失败（找不到番号/影片信息）才是 success=False
     failed = not scrape_res.get("success")
@@ -522,7 +563,7 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
             _log(f"刮削未成功但按配置仍移动归档：{video_path.name}")
         watch_dir = Path(config.get("scrape_watch_dir", ""))
         min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
-        code = scrape_res.get("code", "") or _extract_code(video_path.name)
+        code = scrape_res.get("code", "") or _resolve_code(video_path, config)
         src_parent = video_path.parent
         mv = _archive_file(video_path, output_dir, code)
         record["moved"] = mv.get("moved", False)

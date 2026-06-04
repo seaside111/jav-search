@@ -24,6 +24,23 @@ def _headers(qb_url: str) -> dict:
     }
 
 
+async def _fetch_torrent_bytes(url: str, timeout: int = 20) -> Optional[bytes]:
+    """
+    后端代取 .torrent 文件内容。
+    用途：当 Jackett/索引器返回的种子直链是 http://localhost:9117/... 这类
+    「仅 jav-search 后端可达」的地址时，直接把 URL 交给 qB 会因 qB 端解析不到
+    localhost 而失败。改由后端（与 Jackett 同网/同机）取回字节再上传给 qB。
+    """
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200 and resp.content:
+                return resp.content
+    except Exception as e:
+        print(f"[qB] 代取种子文件失败 {url[:80]}: {e}", flush=True)
+    return None
+
+
 async def _login(client: httpx.AsyncClient, qb_url: str,
                  username: str, password: str) -> tuple[bool, str]:
     """登录获取 SID Cookie。无密码（局域网白名单）时也允许直接通过。"""
@@ -100,22 +117,35 @@ async def add_torrent(
         if not ok:
             return {"success": False, "error": msg}
 
+        # 关闭自动种子管理，savepath 才会生效
         data = {
-            "urls": download_url,
             "paused": "true" if paused else "false",
+            "autoTMM": "false",
         }
         if save_path:
             data["savepath"] = save_path
-            data["autoTMM"] = "false"   # 关闭自动种子管理，savepath 才会生效
-        else:
-            data["autoTMM"] = "false"
         if category:
             data["category"] = category
+
+        # 磁力链直接交给 qB；http(s) 种子直链先由后端代取文件再上传，
+        # 规避 qB 端无法解析 localhost / 内网地址导致的下载失败。
+        files = None
+        if download_url.lower().startswith("magnet:"):
+            data["urls"] = download_url
+        else:
+            content = await _fetch_torrent_bytes(download_url, timeout)
+            if content:
+                files = {"torrents": ("download.torrent", content,
+                                      "application/x-bittorrent")}
+            else:
+                # 代取失败则退回让 qB 自行抓取（地址若不可达可能仍会失败）
+                data["urls"] = download_url
 
         try:
             resp = await client.post(
                 f"{base}/api/v2/torrents/add",
                 data=data,
+                files=files,
                 headers=_headers(qb_url),
             )
         except Exception as e:

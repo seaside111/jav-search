@@ -2,6 +2,7 @@
 JAV Search — FastAPI 后端主程序
 """
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -25,9 +26,10 @@ from config_manager import load as load_config, save as save_config, MAX_RESULTS
 from jackett import search_jackett
 import qbittorrent
 import library
+import push_hints
 import auth
 
-app = FastAPI(title="JAV Search", version="1.4.0")
+app = FastAPI(title="JAV Search", version="1.4.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,7 +45,7 @@ app.include_router(library.router)
 @app.on_event("startup")
 async def _on_startup():
     # 按配置拉起后台刮削监控
-    print("[启动] JAV Search 1.4.0 启动完成，初始化刮削监控…", flush=True)
+    print("[启动] JAV Search 1.4.1 启动完成，初始化刮削监控…", flush=True)
     try:
         library.start_monitor()
     except Exception as e:
@@ -201,7 +203,7 @@ class ConfigUpdateRequest(BaseModel):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "1.4.0"}
+    return {"status": "ok", "version": "1.4.1"}
 
 
 # 图片缓存（内存，简单 LRU 效果）
@@ -430,6 +432,37 @@ async def api_jackett_status():
         return {"configured": True, "online": False, "message": str(e)}
 
 
+@app.get("/api/jackett/download")
+async def api_jackett_download(
+    url: str = Query(..., description="原始 .torrent 直链"),
+    name: str = Query("download", description="保存文件名（通常用番号）"),
+):
+    """
+    种子直链代理下载。
+    Jackett 返回的 .torrent 直链常带其自身地址（如 http://localhost:9117/...），
+    外网浏览器点击打不开。改由后端（与 Jackett 同网/同机）取回，再以附件形式
+    回传给浏览器，从而在任意网络下都能下载到种子文件。
+    """
+    if not url or not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="无效的种子地址")
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            resp = await client.get(url)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"种子下载失败: {e}")
+    if resp.status_code != 200 or not resp.content:
+        raise HTTPException(status_code=502, detail=f"种子下载失败 HTTP {resp.status_code}")
+
+    safe = re.sub(r'[^\w.\-]', '_', name).strip("_") or "download"
+    if not safe.lower().endswith(".torrent"):
+        safe += ".torrent"
+    return Response(
+        content=resp.content,
+        media_type="application/x-bittorrent",
+        headers={"Content-Disposition": f'attachment; filename="{safe}"'},
+    )
+
+
 @app.post("/api/translate")
 async def api_translate(req: TranslateRequest):
     config = load_config()
@@ -488,6 +521,8 @@ class QbAddRequest(BaseModel):
     download_url: str                  # 磁力链或 .torrent 链接
     save_path: Optional[str] = None    # 覆盖默认保存目录
     category: Optional[str] = None     # 覆盖默认分类
+    code: Optional[str] = None         # 该影片番号（来自搜索结果，用于刮削时精确识别）
+    title: Optional[str] = None        # 该影片标题（辅助匹配）
 
 
 @app.post("/api/qbittorrent/add")
@@ -514,6 +549,14 @@ async def api_qb_add(req: QbAddRequest):
         print(f"[qB推送] 失败：{result.get('error', '')}", flush=True)
         raise HTTPException(status_code=502, detail=result.get("error", "推送失败"))
     print("[qB推送] 成功", flush=True)
+    # 记录「番号 ↔ 资源」标记：刮削下载完成的文件时据此精确识别番号，
+    # 避免靠文件名「字母+数字」误判（如 hhd800.com@390JAC-234 被猜成 HHD-800）。
+    if req.code:
+        try:
+            if push_hints.record(req.code, req.download_url, req.title or ""):
+                print(f"[qB推送] 已标记番号 {req.code} 供刮削识别", flush=True)
+        except Exception as e:
+            print(f"[qB推送] 番号标记失败（不影响推送）：{e}", flush=True)
     return result
 
 
