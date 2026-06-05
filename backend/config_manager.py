@@ -10,6 +10,11 @@ CONFIG_PATH = Path(os.getenv("CONFIG_DIR", "/config")) / "settings.json"
 DEFAULT_CONFIG = {
     "proxy": "",                         # HTTP代理，如 http://192.168.1.1:7890
     "sources": ["javbus", "javdb"],      # 启用的数据源: javbus/javdb/avsox/avmoo
+    # V1.4.2：JavDB 反爬增强
+    "javdb_flaresolverr_url": "",        # FlareSolverr 地址（如 http://192.168.1.100:8191），填了则 JavDB 走它过 CF 盾
+    "javdb_flaresolverr_use_proxy": True, # FlareSolverr 是否复用主代理；其自带出口（如 WARP）时应关掉走直连
+    "javdb_cookie": "",                  # 手动填入浏览器导出的 JavDB Cookie（如 cf_clearance=xxx; _jdb_session=yyy）
+    "javdb_prefetch_extras": False,      # 翻页预取时是否顺带预取合并卡的 JavDB 样品图/磁力（默认关，开则更耗资源）
     "baidu_app_id": "",                  # 百度翻译 AppID
     "baidu_secret_key": "",              # 百度翻译 SecretKey
     "aliyun_access_key_id": "",          # 阿里云 AccessKeyId

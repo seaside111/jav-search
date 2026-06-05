@@ -54,18 +54,49 @@ def _merge_lists(lists_by_source: list[tuple[str, list[dict]]]) -> list[dict]:
             if key not in merged:
                 merged[key] = dict(item)
                 merged[key]["sources"] = [item.get("source", "")]
+                # 记录各来源各自的详情页 URL（供合并卡按需补抓非主来源的样品图/磁力）
+                merged[key]["source_urls"] = {item.get("source", ""): item.get("url", "")}
                 order.append(key)
             else:
                 ex = merged[key]
                 if item.get("source") and item["source"] not in ex.get("sources", []):
                     ex.setdefault("sources", []).append(item["source"])
-                # 补充缺失字段
-                for f in ("cover", "title", "release_date", "score",
+                if item.get("source"):
+                    ex.setdefault("source_urls", {})[item["source"]] = item.get("url", "")
+                # 补充缺失的标量字段（含 1.4.2 新增的评分人数）
+                for f in ("cover", "title", "release_date", "score", "score_count",
                           "duration", "director", "studio", "label", "series"):
+                    if not ex.get(f) and item.get(f):
+                        ex[f] = item[f]
+                # 列表级磁力角标：任一来源有磁力即标记（JavDB 才提供）
+                if item.get("has_magnet"):
+                    ex["has_magnet"] = True
+                # 补充缺失的列表型字段（演员/标签/样品图/磁力）
+                for f in ("actors", "tags", "samples", "magnets"):
                     if not ex.get(f) and item.get(f):
                         ex[f] = item[f]
 
     return [merged[k] for k in order]
+
+
+# 单个来源列表抓取的超时（秒）。防止某个慢源（如 JavDB 走 FlareSolverr）
+# 把整个结果拖住——超时的源直接丢弃，其余源照常合并返回。
+# 搜索要快，超时短些；首页最新是后台加载，可多等以便慢源（JavDB/FlareSolverr）也能进来。
+_PER_SOURCE_TIMEOUT = 25.0          # 搜索用
+_PER_SOURCE_TIMEOUT_LATEST = 40.0   # 首页最新用
+
+
+async def _run_source(label: str, coro, timeout: float):
+    """给单个来源套超时，超时/异常都返回 (label, None)，不拖累其它来源。"""
+    try:
+        res = await asyncio.wait_for(coro, timeout=timeout)
+        return label, res
+    except asyncio.TimeoutError:
+        print(f"[source] {label} 超时（>{timeout}s），已跳过")
+        return label, None
+    except Exception as e:
+        print(f"[source] {label} 失败: {e!r}")
+        return label, None
 
 
 async def search(
@@ -84,17 +115,17 @@ async def search(
         mod = SOURCE_MODULES.get(src)
         if not mod:
             continue
-        tasks.append(mod.search_list(query, mode, proxy, max_results))
+        tasks.append(_run_source(src, mod.search_list(query, mode, proxy, max_results), _PER_SOURCE_TIMEOUT))
         labels.append(src)
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    paired = await asyncio.gather(*tasks, return_exceptions=True)
 
     collected = []
-    for label, res in zip(labels, results):
-        if isinstance(res, list):
-            collected.append((label, res))
-        else:
-            print(f"[search] source {label} failed: {res!r}")
+    for item in paired:
+        if isinstance(item, tuple):
+            label, res = item
+            if isinstance(res, list) and res:
+                collected.append((label, res))
 
     if not collected:
         return []
@@ -115,8 +146,17 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
 
     单条超时（默认 9s）确保每条都能在限定时间内返回，
     避免个别慢/挂起的详情请求拖垮整批、导致前端长时间等待。
+    JavDB 走 FlareSolverr 时单条更慢，单独给更长超时（否则必然超时失败）。
     """
     sem = asyncio.Semaphore(concurrency)
+
+    # 是否启用了 JavDB FlareSolverr（影响 JavDB 详情的单条超时）
+    flaresolverr_on = False
+    try:
+        from config_manager import load as load_config
+        flaresolverr_on = bool((load_config().get("javdb_flaresolverr_url") or "").strip())
+    except Exception:
+        pass
 
     async def one(item):
         url = item.get("url", "")
@@ -124,10 +164,12 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
         mod = SOURCE_MODULES.get(source)
         if not mod or not url:
             return None
+        # JavDB + FlareSolverr 单条放宽到 32s，其余来源保持快速超时
+        timeout = 32.0 if (source == "javdb" and flaresolverr_on) else per_timeout
         async with sem:
             await asyncio.sleep(0.05)
             try:
-                return await asyncio.wait_for(mod.fetch_detail(url, proxy), timeout=per_timeout)
+                return await asyncio.wait_for(mod.fetch_detail(url, proxy), timeout=timeout)
             except asyncio.TimeoutError:
                 print(f"[enrich] {source} {url} timeout")
                 return None
@@ -159,16 +201,16 @@ async def get_latest(
         if not mod or not hasattr(mod, "get_latest"):
             continue
         lim = int(limits.get(src, per_source))
-        tasks.append(mod.get_latest(proxy, lim))
+        tasks.append(_run_source(src, mod.get_latest(proxy, lim), _PER_SOURCE_TIMEOUT_LATEST))
         labels.append(src)
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    paired = await asyncio.gather(*tasks, return_exceptions=True)
     collected = []
-    for label, res in zip(labels, results):
-        if isinstance(res, list):
-            collected.append((label, res))
-        else:
-            print(f"[latest] source {label} failed: {res!r}")
+    for item in paired:
+        if isinstance(item, tuple):
+            label, res = item
+            if isinstance(res, list) and res:
+                collected.append((label, res))
 
     if not collected:
         return []

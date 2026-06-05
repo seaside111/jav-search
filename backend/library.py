@@ -140,20 +140,98 @@ def _extract_code(filename: str) -> str:
     return _match_code(_clean_noise(stem)) or _match_code(stem)
 
 
-def _resolve_code(video_path: Path, config: dict) -> str:
+async def _qb_hash_for_file(video_path: Path, config: dict) -> str:
     """
-    优先用「推送时标记的准确番号」反查（点推送下载时已知搜索结果番号），
-    命中则采用；未命中再回退到文件名正则解析。
+    查 qB 找到「拥有该视频文件」的种子，返回其 infohash。
+    跨容器路径映射不可靠，故用「basename 名称相关性」匹配：
+    qB 的 content_path 末段（单文件=文件名 / 多文件=种子文件夹名）
+    与视频文件名或其某级父目录名一致即认定。失败返回 ""。
     """
+    qb_url = (config.get("qb_url") or "").strip()
+    if not qb_url:
+        return ""
+    try:
+        import qbittorrent
+        torrents = await qbittorrent.list_torrents(
+            qb_url, config.get("qb_username", ""), config.get("qb_password", ""))
+    except Exception as e:
+        _log(f"qB 列种子失败（忽略）：{e}")
+        return ""
+    if not torrents:
+        return ""
+
+    norm = push_hints._norm
+    # 候选名：文件名 / 去扩展名 / 各级父目录名（截至监控根，最多上溯 6 级）
+    cand = {norm(video_path.name), norm(video_path.stem)}
+    watch = config.get("scrape_watch_dir", "")
+    try:
+        watch_resolved = Path(watch).resolve() if watch else None
+    except Exception:
+        watch_resolved = None
+    parent = video_path.parent
+    for _ in range(6):
+        try:
+            if watch_resolved and parent.resolve() == watch_resolved:
+                break
+        except Exception:
+            pass
+        if parent == parent.parent:
+            break
+        if parent.name:
+            cand.add(norm(parent.name))
+        parent = parent.parent
+    cand.discard("")
+    if not cand:
+        return ""
+
+    for t in torrents:
+        targets = set()
+        cpath = t.get("content_path", "")
+        if cpath:
+            targets.add(norm(Path(cpath).name))
+        if t.get("name"):
+            targets.add(norm(t["name"]))
+        targets.discard("")
+        if cand & targets:
+            return t.get("hash", "")
+    return ""
+
+
+async def _resolve_code(video_path: Path, config: dict) -> str:
+    """
+    番号识别（按可靠度递进）：
+      1. 推送下载：查 qB 用文件对应种子的 infohash 精确反查推送时记录的番号（最可靠）；
+      2. 推送下载兜底：按文件名/目录名与推送记录的番号/显示名匹配反查；
+      3. 迅雷下载 / 手动复制到监控目录：无推送标记，直接按文件名正则识别番号。
+    """
+    # 1) qB infohash 精确反查
+    try:
+        info_hash = await _qb_hash_for_file(video_path, config)
+        if info_hash:
+            code = push_hints.resolve_by_hash(info_hash)
+            if code:
+                _log(f"命中推送标记番号(infohash)：{video_path.name} → {code}")
+                return code
+    except Exception as e:
+        _log(f"qB infohash 反查失败（忽略）：{e}")
+
+    # 2) 名称相关性反查推送标记
     try:
         hinted = push_hints.resolve(video_path, config.get("scrape_watch_dir", ""))
     except Exception as e:
         hinted = ""
         _log(f"推送番号反查失败（忽略，回退文件名解析）：{e}")
     if hinted:
-        _log(f"命中推送标记番号：{video_path.name} → {hinted}")
+        _log(f"命中推送标记番号(名称)：{video_path.name} → {hinted}")
         return hinted
-    return _extract_code(video_path.name)
+
+    # 3) 文件名正则识别（迅雷/手动复制场景）
+    code = _extract_code(video_path.name)
+    if code:
+        _log(f"按文件名识别番号：{video_path.name} → {code}")
+    else:
+        _log(f"文件名未能识别番号：{video_path.name}")
+    return code
 
 
 # 日文（含假名/汉字）检测：用于判断是否需要翻译
@@ -324,7 +402,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         _log(f"刮削跳过：文件不存在 {filepath}")
         return {"success": False, "filepath": filepath, "error": "文件不存在"}
 
-    code = _resolve_code(path, config)
+    code = await _resolve_code(path, config)
     if not code:
         _log(f"刮削失败：无法从文件名提取番号 → {path.name}")
         return {"success": False, "filepath": filepath, "error": "无法从文件名提取番号"}
@@ -542,7 +620,7 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
     except Exception as e:
         # 刮削过程意外报错也不应阻止移动归档（符合「刮削正常运行但刮不到也移动」）
         _log(f"刮削过程异常（将按失败处理）：{video_path.name} — {e}")
-        scrape_res = {"success": False, "filepath": fp, "code": _resolve_code(video_path, config),
+        scrape_res = {"success": False, "filepath": fp, "code": await _resolve_code(video_path, config),
                       "error": f"刮削异常: {e}"}
     # success 含「已跳过」；真正失败（找不到番号/影片信息）才是 success=False
     failed = not scrape_res.get("success")
@@ -563,7 +641,7 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
             _log(f"刮削未成功但按配置仍移动归档：{video_path.name}")
         watch_dir = Path(config.get("scrape_watch_dir", ""))
         min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
-        code = scrape_res.get("code", "") or _resolve_code(video_path, config)
+        code = scrape_res.get("code", "") or await _resolve_code(video_path, config)
         src_parent = video_path.parent
         mv = _archive_file(video_path, output_dir, code)
         record["moved"] = mv.get("moved", False)

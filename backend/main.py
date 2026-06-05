@@ -21,6 +21,7 @@ from scrapers import (
     search, enrich, get_latest, detect_search_mode,
     SEARCH_MODE_CODE, SEARCH_MODE_ACTOR, SEARCH_MODE_KEYWORD,
 )
+from scrapers import javdb as javdb_scraper
 from translator import translate
 from config_manager import load as load_config, save as save_config, MAX_RESULTS_HARD_CAP
 from jackett import search_jackett
@@ -29,7 +30,7 @@ import library
 import push_hints
 import auth
 
-app = FastAPI(title="JAV Search", version="1.4.1")
+app = FastAPI(title="JAV Search", version="1.4.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,7 +46,7 @@ app.include_router(library.router)
 @app.on_event("startup")
 async def _on_startup():
     # 按配置拉起后台刮削监控
-    print("[启动] JAV Search 1.4.1 启动完成，初始化刮削监控…", flush=True)
+    print("[启动] JAV Search 1.4.2 启动完成，初始化刮削监控…", flush=True)
     try:
         library.start_monitor()
     except Exception as e:
@@ -163,6 +164,11 @@ class JackettSearchRequest(BaseModel):
 class ConfigUpdateRequest(BaseModel):
     proxy: Optional[str] = ""
     sources: Optional[list[str]] = None
+    # V1.4.2 JavDB 反爬增强
+    javdb_flaresolverr_url: Optional[str] = None
+    javdb_flaresolverr_use_proxy: Optional[bool] = None
+    javdb_cookie: Optional[str] = None
+    javdb_prefetch_extras: Optional[bool] = None
     baidu_app_id: Optional[str] = ""
     baidu_secret_key: Optional[str] = ""
     aliyun_access_key_id: Optional[str] = ""
@@ -203,12 +209,15 @@ class ConfigUpdateRequest(BaseModel):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "1.4.1"}
+    return {"status": "ok", "version": "1.4.2"}
 
 
 # 图片缓存（内存，简单 LRU 效果）
 _img_cache: dict[str, tuple[bytes, str]] = {}
-_IMG_CACHE_MAX = 200
+_IMG_CACHE_MAX = 800
+# 图片代理并发上限：防止一页十几张封面 + 详情样品图同时打满代理导致整体超时。
+import asyncio as _asyncio
+_img_semaphore = _asyncio.Semaphore(12)
 
 
 def _img_referer_candidates(url: str) -> list[str]:
@@ -266,31 +275,38 @@ async def api_img_proxy(url: str = Query(..., description="原始图片 URL")):
     proxy_opts = [proxy, None] if proxy else [None]
 
     last_status = None
-    for pxy in proxy_opts:
-        try:
-            async with httpx.AsyncClient(proxy=pxy, timeout=20, follow_redirects=True) as client:
-                for ref in referers:
-                    headers = dict(base_headers)
-                    if ref:
-                        headers["Referer"] = ref
-                    try:
-                        resp = await client.get(url, headers=headers)
-                    except Exception:
-                        continue
-                    last_status = resp.status_code
-                    ctype = resp.headers.get("content-type", "")
-                    # 必须是 200 且确实是图片（防盗链常返回 HTML 验证页）
-                    if resp.status_code == 200 and resp.content and \
-                       (ctype.startswith("image/") or "image" in ctype or not ctype):
-                        content = resp.content
-                        ctype = ctype or "image/jpeg"
-                        if len(_img_cache) >= _IMG_CACHE_MAX:
-                            _img_cache.pop(next(iter(_img_cache)))
-                        _img_cache[url] = (content, ctype)
-                        return Response(content=content, media_type=ctype,
-                                        headers={"Cache-Control": "public, max-age=86400"})
-        except Exception:
-            continue
+    # 并发上限 + 单次较短超时：失败快速放行让浏览器自然重试，避免请求堆积拖死整页
+    async with _img_semaphore:
+        # 再次检查缓存（排队期间可能已被其它请求填充）
+        if url in _img_cache:
+            content, ctype = _img_cache[url]
+            return Response(content=content, media_type=ctype,
+                            headers={"Cache-Control": "public, max-age=86400"})
+        for pxy in proxy_opts:
+            try:
+                async with httpx.AsyncClient(proxy=pxy, timeout=12, follow_redirects=True) as client:
+                    for ref in referers:
+                        headers = dict(base_headers)
+                        if ref:
+                            headers["Referer"] = ref
+                        try:
+                            resp = await client.get(url, headers=headers)
+                        except Exception:
+                            continue
+                        last_status = resp.status_code
+                        ctype = resp.headers.get("content-type", "")
+                        # 必须是 200 且确实是图片（防盗链常返回 HTML 验证页）
+                        if resp.status_code == 200 and resp.content and \
+                           (ctype.startswith("image/") or "image" in ctype or not ctype):
+                            content = resp.content
+                            ctype = ctype or "image/jpeg"
+                            if len(_img_cache) >= _IMG_CACHE_MAX:
+                                _img_cache.pop(next(iter(_img_cache)))
+                            _img_cache[url] = (content, ctype)
+                            return Response(content=content, media_type=ctype,
+                                            headers={"Cache-Control": "public, max-age=86400"})
+            except Exception:
+                continue
 
     raise HTTPException(status_code=404, detail=f"图片获取失败 (HTTP {last_status})")
 
@@ -369,6 +385,21 @@ async def api_latest():
     except Exception as e:
         # 首页最新失败不应阻塞使用，返回空列表 + 错误信息
         return {"success": False, "results": [], "detail": str(e)}
+
+
+@app.get("/api/javdb/test")
+async def api_javdb_test():
+    """
+    JavDB 连通诊断（V1.4.2）。
+    返回是否可达 / 是否命中 Cloudflare 盾 / 出口 IP 所在国（判断是否需要日本 IP）/ 解析条数。
+    """
+    config = load_config()
+    proxy = config.get("proxy") or None
+    try:
+        result = await javdb_scraper.diagnose(proxy=proxy)
+        return {"success": True, **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"JavDB 诊断失败: {str(e)}")
 
 
 @app.post("/api/jackett/search")
@@ -484,7 +515,7 @@ async def api_get_config():
     config = load_config()
     # 脱敏返回（隐藏密钥）
     safe_config = dict(config)
-    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password"]:
+    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "javdb_cookie"]:
         if safe_config.get(key):
             v = safe_config[key]
             safe_config[key] = "***" + v[-4:] if len(v) > 4 else "****"
@@ -498,7 +529,7 @@ async def api_set_config(req: ConfigUpdateRequest):
 
     update = req.dict(exclude_none=True)
     # 如果是脱敏值则不更新
-    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password"]:
+    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "javdb_cookie"]:
         v = update.get(key, "")
         if v and v.startswith("***"):
             update.pop(key, None)

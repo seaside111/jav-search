@@ -108,14 +108,33 @@ def record(code: str, download_url: str, title: str = "") -> bool:
     }
 
     entries = _load()
-    # 去重：同 hash 或同 番号 的旧记录先移除，再插到最前
+    # 去重策略：
+    #   - 有 infohash（磁力）：仅移除「完全相同 infohash」的旧记录，
+    #     保留同一番号的不同磁力（用户可能为一部影片推送多个版本，
+    #     按 infohash 反查时每个都要能命中）。
+    #   - 无 infohash（.torrent 直链）：移除同番号且同样无 hash 的旧记录。
     def _dup(e):
-        if info_hash and e.get("hash") == info_hash:
-            return True
-        return e.get("code_norm") == code_norm
+        if info_hash:
+            return (e.get("hash") or "") == info_hash
+        return e.get("code_norm") == code_norm and not e.get("hash")
     entries = [e for e in entries if not _dup(e)]
     entries.insert(0, entry)
     return _save(_prune(entries))
+
+
+def resolve_by_hash(info_hash: str) -> str:
+    """
+    按磁力 infohash 精确反查推送时记录的番号（最可靠，不依赖文件名）。
+    命中返回番号，否则返回 ""。
+    """
+    h = (info_hash or "").lower().strip()
+    if not h:
+        return ""
+    for e in _load():
+        eh = (e.get("hash") or "").lower()
+        if eh and eh == h:
+            return e.get("code", "")
+    return ""
 
 
 def _candidate_keys(video_path: Path, watch_dir: str) -> list:

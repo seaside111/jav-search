@@ -113,7 +113,7 @@
   .card:hover { border-color: var(--accent); transform: translateY(-3px); box-shadow: 0 8px 32px rgba(232,160,32,.12); }
 
   .card-cover { position: relative; width: 100%; padding-top: 62%; overflow: hidden; background: #0d0d16; flex-shrink: 0; }
-  .card-cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transition: transform .3s; }
+  .card-cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; transition: transform .3s; }
   .card:hover .card-cover img { transform: scale(1.04); }
   .card-cover .no-cover { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 40px; }
   .source-badge { position: absolute; top: 8px; right: 8px; background: rgba(10,10,15,.8); border: 1px solid var(--border); border-radius: 4px; padding: 2px 7px; font-size: 10px; color: var(--text-muted); letter-spacing: .5px; backdrop-filter: blur(4px); }
@@ -408,6 +408,20 @@
   .detail-tag:hover { border-color: var(--accent); color: var(--accent); }
   .detail-desc { font-size: 14px; color: var(--text-muted); line-height: 1.8; white-space: pre-wrap; }
   .detail-desc.zh { color: #90cca0; }
+  /* 1.4.2：磁力链 + 样品图 */
+  .detail-magnets { display: flex; flex-direction: column; gap: 6px; }
+  .detail-magnet { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
+  .mag-link { color: var(--text-muted); text-decoration: none; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mag-link:hover { color: var(--accent); }
+  .mag-meta { color: var(--text-dim); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+  .mag-badge { font-size: 10px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border); flex-shrink: 0; }
+  .mag-badge.hd { color: #33aa66; border-color: rgba(51,170,102,.4); }
+  .mag-badge.sub { color: #e8a020; border-color: rgba(232,160,32,.4); }
+  /* 磁力每条的操作按钮组（与磁力信息同一行，靠右对齐） */
+  .mag-actions { display: flex; gap: 6px; margin-left: auto; flex-shrink: 0; }
+  .detail-samples { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px; }
+  .detail-sample { display: block; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
+  .detail-sample img { width: 100%; height: 80px; object-fit: cover; display: block; }
   .detail-actions { display: flex; gap: 10px; flex-wrap: wrap; padding-top: 6px; }
   .detail-btn {
     display: flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 8px; font-size: 13px;
@@ -542,6 +556,36 @@
             <label class="source-chk"><input type="checkbox" id="srcAvmoo"> AVMOO</label>
           </div>
           <span class="setting-hint">JavBus / JavDB 为主；AVSOX 专收无码、AVMOO 收录大量旧番号，可作补充</span>
+        </div>
+
+        <div class="setting-group">
+          <h3>JavDB 反爬（1.4.2）</h3>
+          <div class="setting-row">
+            <label class="setting-label">FlareSolverr 地址</label>
+            <input class="setting-input" id="cfgJavdbFlare" type="text" placeholder="http://192.168.1.100:8191">
+            <span class="setting-hint">填了则 JavDB 请求改走 FlareSolverr 过 Cloudflare 盾；留空走增强直连</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">FlareSolverr 复用代理</label>
+            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgJavdbFlareProxy" checked> 让 FlareSolverr 走主代理</label>
+            <span class="setting-hint">默认开。若 FlareSolverr 报 ERR_NO_SUPPORTED_PROXIES，或它自带网络出口（如 WARP），请关掉走直连</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">JavDB Cookie</label>
+            <input class="setting-input" id="cfgJavdbCookie" type="text" placeholder="cf_clearance=xxx; _jdb_session=yyy">
+            <span class="setting-hint">可选。浏览器登录 JavDB 后导出的 Cookie，用于过盾/提升抓取成功率</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">样品图预取</label>
+            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgJavdbPrefetch"> 翻页时预取合并卡的 JavDB 样品图/磁力</label>
+            <span class="setting-hint">默认关：点开「JavBus+JavDB」详情时才补抓样品图（省资源）。开启后翻页就后台提前抓好，点开即时显示，但 FlareSolverr 请求更多、更耗资源</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">连通测试</label>
+            <button class="btn" id="btnJavdbTest" type="button" onclick="testJavdb()">测试 JavDB 连通</button>
+            <span class="setting-hint">检测是否可达 / 是否被 CF 拦截 / 出口 IP 所在国（判断是否需要日本 IP）</span>
+          </div>
+          <div id="javdbTestResult" style="display:none;margin-top:8px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;line-height:1.7;"></div>
         </div>
 
         <div class="setting-group">
@@ -752,6 +796,8 @@
 <script>
 const API = '';
 let currentProvider = 'baidu';
+// 是否在翻页预取时顺带预取合并卡的 JavDB 样品图/磁力（默认关；开则点开详情即时显示，但后台请求更多）
+let prefetchJavdbExtras = false;
 let translatingCards = new Set();
 const cardProviders = {};
 // 每张卡片已加载的资源缓存
@@ -866,17 +912,41 @@ function renderResults(results) {
   showPage(1);
 }
 
+// 后台预取的「向前页数」窗口：当前页之后多预取几页详情，翻页更顺。
+const PREFETCH_AHEAD = 3;
+
 // V1.3：切换到第 p 页。先用列表级信息即时渲染（快），
-// 再异步补全本页详情并就地升级；同时后台预取下一页详情。
+// 再异步补全本页详情并就地升级；同时后台预取后续多页详情。
 function showPage(p) {
   const totalPages = Math.ceil(currentResults.length / PAGE_SIZE) || 1;
   currentPage = Math.min(Math.max(p, 1), totalPages);
   renderPage();
-  // 补全当前页详情 → 完成后就地升级卡片；并预取下一页
+  // 优先补全当前页 → 完成后就地升级卡片；再依次后台预取后续 PREFETCH_AHEAD 页
   ensurePageDetails(currentPage).then(() => {
     if (currentPage === p) upgradePageCards(currentPage);
-    ensurePageDetails(currentPage + 1);   // 预取下一页，翻页更快
+    // 串行预取后续几页：避免一次性并发太多 /api/details 批次压垮抓取/代理
+    (async () => {
+      if (prefetchJavdbExtras) await prefetchJavdbExtrasForPage(currentPage);
+      for (let k = 1; k <= PREFETCH_AHEAD; k++) {
+        const np = currentPage + k;
+        if (np > totalPages) break;
+        await ensurePageDetails(np);
+        // 若预取期间用户已翻到正在预取的页，就地升级其卡片
+        if (currentPage === np) upgradePageCards(np);
+        if (prefetchJavdbExtras) await prefetchJavdbExtrasForPage(np);
+      }
+    })();
   });
+}
+
+// 开启「预取补抓」时：后台串行把本页合并卡的 JavDB 样品图/磁力提前抓好
+async function prefetchJavdbExtrasForPage(p) {
+  for (const i of pageIndices(p)) {
+    const m = currentResults[i];
+    if (m && detailNeedsJavdbExtra(m)) {
+      await ensureJavdbExtras(i);   // 串行，避免同时打太多 FlareSolverr 请求
+    }
+  }
 }
 
 function renderPage() {
@@ -1433,9 +1503,85 @@ async function ensureItemDetail(idx) {
   currentResults[idx].detail_loaded = true;
 }
 
+// 当前打开的详情卡索引（用于异步补抓回来时确认弹窗未被切走）
+let currentDetailIdx = -1;
+
+// 合并卡（如 JavBus+JavDB）是否还需按需补抓 JavDB 独有的样品图/磁力
+function detailNeedsJavdbExtra(m) {
+  const su = m.source_urls || {};
+  return !!su['JavDB'] && (m.source || '') !== 'JavDB' && !m._javdb_extra_loaded;
+}
+
+// 渲染详情里的「磁力 + 样品图」区块（JavDB 独有）；补抓中时显示提示
+function renderDetailExtra(m, idx) {
+  const di = (typeof idx === 'number') ? idx : -1;
+  const samplesHtml = (m.samples || []).map(s =>
+    `<a class="detail-sample" href="${escAttr(s)}" target="_blank">
+      <img src="${escAttr(API + '/api/img?url=' + encodeURIComponent(s))}" loading="lazy" onerror="this.parentNode.style.display='none'">
+    </a>`).join('');
+  const magnetsHtml = (m.magnets || []).map((g, j) => {
+    const badges = [];
+    if (g.hd) badges.push('<span class="mag-badge hd">高清</span>');
+    if (g.subtitle) badges.push('<span class="mag-badge sub">字幕</span>');
+    // 每条磁力的操作按钮：推送下载(qB) / 迅雷 / 复制磁链（复用资源条目同款函数）
+    const thunderUrl = buildThunderUrl(g.link);
+    const qbBtn = `<button class="btn-qb" id="jdmag-qb-${di}-${j}" onclick="pushToQb('${escAttr(g.link)}', 'jdmag-qb-${di}-${j}', ${di})" title="推送到 qBittorrent 下载器">
+        <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M5 21h14"/></svg>
+        推送下载</button>`;
+    const thunderBtn = thunderUrl
+      ? `<a class="btn-thunder" href="${escAttr(thunderUrl)}" title="用迅雷下载">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2L4.5 13.5H11L10 22L19.5 10.5H13L13 2Z"/></svg>
+          迅雷</a>`
+      : '';
+    const copyBtn = `<button class="btn-magnet" id="jdmag-copy-${di}-${j}" onclick="copyMagnet('${escAttr(g.link)}', 'jdmag-copy-${di}-${j}')">
+        <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+        磁链</button>`;
+    return `<div class="detail-magnet">
+      <a class="mag-link" href="${escAttr(g.link)}" title="点击用本地下载器打开磁力链">🧲 ${escHtml(g.name || g.link.slice(0, 50))}</a>
+      <span class="mag-meta">${escHtml(g.size || '')} ${escHtml(g.date || '')}</span>
+      ${badges.join('')}
+      <div class="mag-actions">${qbBtn}${thunderBtn}${copyBtn}</div>
+    </div>`;
+  }).join('');
+  let html = '';
+  if (magnetsHtml) html += `<div><div class="detail-section-label">磁力资源（JavDB）</div><div class="detail-magnets">${magnetsHtml}</div></div>`;
+  if (samplesHtml) html += `<div><div class="detail-section-label">样品图</div><div class="detail-samples">${samplesHtml}</div></div>`;
+  // 还没补抓且当前没有样品图/磁力时，显示加载提示（JavDB 走 FlareSolverr 较慢）
+  if (detailNeedsJavdbExtra(m) && !samplesHtml && !magnetsHtml) {
+    html += `<div><div class="detail-section-label">JavDB 样品图 / 磁力</div>
+      <div style="color:var(--text-dim);font-size:13px"><span class="drawer-spinner"></span> 正在抓取 JavDB 样品图/磁力（FlareSolverr 较慢，请稍候）…</div></div>`;
+  }
+  return html;
+}
+
+// 按需补抓合并卡里 JavDB 的样品图/磁力（仅在打开详情时触发，避免拖慢翻页）
+async function ensureJavdbExtras(idx) {
+  const m = currentResults[idx];
+  if (!m || !detailNeedsJavdbExtra(m)) return;
+  const javdbUrl = (m.source_urls || {})['JavDB'];
+  try {
+    const resp = await fetch(`${API}/api/details`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: [{ url: javdbUrl, source: 'JavDB' }] }),
+    });
+    const data = await safeJson(resp);
+    const d = data.success && data.results && data.results[0];
+    if (d) {
+      // 只并入 JavDB 独有/更全的字段，不覆盖主来源（JavBus）的封面/标题
+      if (d.samples && d.samples.length) m.samples = d.samples;
+      if (d.magnets && d.magnets.length) m.magnets = d.magnets;
+      if (!m.score && d.score) m.score = d.score;
+      if (!m.score_count && d.score_count) m.score_count = d.score_count;
+      if ((!m.tags || !m.tags.length) && d.tags && d.tags.length) m.tags = d.tags;
+    }
+  } catch (e) { /* 忽略：补抓失败不影响主详情 */ }
+  m._javdb_extra_loaded = true;
+}
+
 async function openDetail(idx) {
   const m0 = currentResults[idx];
   if (!m0) return;
+  currentDetailIdx = idx;
 
   // 详情未加载：先打开弹窗显示加载态，再补全
   if (!m0.detail_loaded) {
@@ -1456,10 +1602,12 @@ async function openDetail(idx) {
     ? `<img class="detail-cover" src="${escAttr(coverSrc)}" alt="" onerror="this.outerHTML='<div class=detail-no-cover>🎬</div>'">`
     : `<div class="detail-no-cover">🎬</div>`;
 
+  const scoreText = m.score ? (m.score + (m.score_count ? ` (${m.score_count}人评)` : '')) : '';
+  const srcText = (m.sources && m.sources.length > 1) ? m.sources.join(' / ') : (m.source || '');
   const metaItems = [
     ['番号', m.code], ['发行日期', m.release_date], ['时长', m.duration],
     ['导演', m.director], ['出品商', m.studio], ['发行商', m.label],
-    ['系列', m.series], ['评分', m.score], ['来源', m.source],
+    ['系列', m.series], ['评分', scoreText], ['来源', srcText],
   ].filter(([,v]) => v).map(([k, v]) =>
     `<div class="detail-meta-item"><span class="k">${k}</span><span class="v">${escHtml(v)}</span></div>`
   ).join('');
@@ -1489,6 +1637,7 @@ async function openDetail(idx) {
       ${metaItems ? `<div><div class="detail-section-label">基本信息</div><div class="detail-meta-grid">${metaItems}</div></div>` : ''}
       ${actorsHtml ? `<div><div class="detail-section-label">演员</div><div class="detail-actors">${actorsHtml}</div></div>` : ''}
       ${tagsHtml ? `<div><div class="detail-section-label">类型标签</div><div class="detail-tags">${tagsHtml}</div></div>` : ''}
+      <div id="detail-extra">${renderDetailExtra(m, idx)}</div>
       ${descHtml}
       <div class="detail-actions">
         <button class="detail-btn primary" onclick="translateDetail(${idx})">
@@ -1509,6 +1658,18 @@ async function openDetail(idx) {
   document.getElementById('detailContent').innerHTML = content;
   document.getElementById('detailModal').scrollTop = 0;
   document.getElementById('detailOverlay').classList.add('open');
+
+  // 合并卡：后台补抓 JavDB 样品图/磁力，仅刷新该区块（保留已有翻译等状态）
+  if (detailNeedsJavdbExtra(currentResults[idx])) {
+    ensureJavdbExtras(idx).then(() => {
+      const box = document.getElementById('detail-extra');
+      // 弹窗仍开着且仍是同一条时，局部刷新样品图/磁力
+      if (box && currentDetailIdx === idx &&
+          document.getElementById('detailOverlay').classList.contains('open')) {
+        box.innerHTML = renderDetailExtra(currentResults[idx], idx);
+      }
+    });
+  }
 }
 
 function closeDetail() {
@@ -1570,6 +1731,10 @@ async function openSettings() {
     document.getElementById('srcJavdb').checked  = (cfg.sources || []).includes('javdb');
     document.getElementById('srcAvsox').checked  = (cfg.sources || []).includes('avsox');
     document.getElementById('srcAvmoo').checked  = (cfg.sources || []).includes('avmoo');
+    document.getElementById('cfgJavdbFlare').value  = cfg.javdb_flaresolverr_url || '';
+    document.getElementById('cfgJavdbFlareProxy').checked = cfg.javdb_flaresolverr_use_proxy !== false;
+    document.getElementById('cfgJavdbCookie').value = cfg.javdb_cookie || '';
+    document.getElementById('cfgJavdbPrefetch').checked = cfg.javdb_prefetch_extras === true;
     document.getElementById('cfgMaxResults').value = cfg.max_results || 300;
     document.getElementById('cfgShowLatest').checked = cfg.show_latest !== false;
     const ll = cfg.latest_limits || {};
@@ -1695,6 +1860,53 @@ async function testJackett() {
   await checkJackettStatus();
 }
 
+// JavDB 连通诊断（1.4.2）
+async function testJavdb() {
+  const box = document.getElementById('javdbTestResult');
+  const btn = document.getElementById('btnJavdbTest');
+  box.style.display = 'block';
+  box.style.borderColor = 'var(--border)';
+  box.innerHTML = '正在保存设置并测试…';
+  btn.disabled = true;
+  try {
+    // 先保存，确保后端用最新的 FlareSolverr / Cookie / 代理进行诊断
+    await saveSettings();
+    const resp = await fetch(`${API}/api/javdb/test`, { cache: 'no-store' });
+    const d = await safeJson(resp);
+    const ip = d.exit_ip || {};
+    const ok = d.reachable;
+    box.style.borderColor = ok ? 'var(--green)' : 'var(--red)';
+    const rows = [];
+    rows.push(`<div><b style="color:${ok ? 'var(--green)' : 'var(--red)'}">${ok ? '✓ 可正常访问' : '✗ 无法获取片源'}</b></div>`);
+    rows.push(`<div>结论：${escHtml(d.message || '')}</div>`);
+    rows.push(`<div>取页方式：${escHtml(d.via || '-')}　HTTP：${escHtml(String(d.http_status ?? '-'))}　解析条数：${escHtml(String(d.item_count ?? 0))}</div>`);
+    rows.push(`<div>Cloudflare 拦截：${d.cf_blocked ? '<span style="color:var(--red)">是</span>' : '否'}</div>`);
+    if (ip.country_code) {
+      rows.push(`<div>出口 IP：${escHtml(ip.ip || '')}（${escHtml(ip.country || '')} ${escHtml(ip.country_code || '')}${ip.is_japan ? '，日本节点' : ''}）${ip.isp ? '　' + escHtml(ip.isp) : ''}</div>`);
+    } else if (ip.error) {
+      rows.push(`<div>出口 IP 检测失败：${escHtml(ip.error)}</div>`);
+    }
+    if (d.error && d.error !== 'cf_challenge') {
+      rows.push(`<div style="color:var(--text-dim)">错误：${escHtml(d.error)}</div>`);
+    }
+    // 0 条时回显实际拿到的页面，便于定位（年龄门 / 登录墙 / 地区限制 / 验证）
+    if (!ok && (d.page_title || d.page_snippet)) {
+      const kindMap = { age_gate: '年龄确认门', login_wall: '登录墙', region_block: '地区限制/风控', captcha: '人机验证' };
+      if (d.page_kind && kindMap[d.page_kind]) {
+        rows.push(`<div>页面类型判断：<b style="color:var(--accent)">${kindMap[d.page_kind]}</b></div>`);
+      }
+      if (d.page_title) rows.push(`<div style="color:var(--text-dim)">页面标题：${escHtml(d.page_title)}</div>`);
+      if (d.page_snippet) rows.push(`<div style="color:var(--text-dim);max-height:80px;overflow:auto">页面片段：${escHtml(d.page_snippet)}</div>`);
+    }
+    box.innerHTML = rows.join('');
+  } catch (e) {
+    box.style.borderColor = 'var(--red)';
+    box.innerHTML = '测试出错：' + escHtml(e.message || String(e));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function checkJackettStatus() {
   const dot  = document.getElementById('jackettDot');
   const text = document.getElementById('jackettStatusText');
@@ -1730,6 +1942,10 @@ async function saveSettings() {
   const payload = {
     proxy: document.getElementById('cfgProxy').value.trim(),
     sources,
+    javdb_flaresolverr_url: document.getElementById('cfgJavdbFlare').value.trim(),
+    javdb_flaresolverr_use_proxy: document.getElementById('cfgJavdbFlareProxy').checked,
+    javdb_cookie: document.getElementById('cfgJavdbCookie').value.trim(),
+    javdb_prefetch_extras: document.getElementById('cfgJavdbPrefetch').checked,
     max_results: maxResults,
     show_latest: document.getElementById('cfgShowLatest').checked,
     latest_sources: sources,
@@ -1760,6 +1976,7 @@ async function saveSettings() {
     scrape_move_on_fail: document.getElementById('cfgScrapeMoveOnFail').checked,
   };
   currentProvider = payload.default_translate_provider;
+  prefetchJavdbExtras = payload.javdb_prefetch_extras === true;
   const msg = document.getElementById('saveMsg');
   msg.style.color = 'var(--text-muted)';
   msg.textContent = '保存中…';
@@ -1853,8 +2070,19 @@ async function loadLatest() {
 // ══════════════════════════════════════════
 // 启动
 // ══════════════════════════════════════════
+// 启动时读取少量影响浏览行为的运行配置（如 JavDB 样品图预取开关）
+async function loadRuntimeConfig() {
+  try {
+    const resp = await fetch(`${API}/api/config`, { cache: 'no-store' });
+    const cfg = await safeJson(resp);
+    prefetchJavdbExtras = cfg.javdb_prefetch_extras === true;
+    currentProvider = cfg.default_translate_provider || currentProvider;
+  } catch (e) { /* 忽略：用默认值 */ }
+}
+
 async function init() {
   await checkAuthStatus();   // 未登录会跳转，登录态/免登录则继续
+  await loadRuntimeConfig(); // 读取预取开关等运行配置
   loadLatest();              // 加载首页最新片源
 }
 init();

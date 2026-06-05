@@ -8,7 +8,41 @@ https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-5.0)
 qB 会校验 Referer/Origin，需与 WebUI 地址同源，否则返回 403。
 """
 from typing import Optional
+from urllib.parse import quote
 import httpx
+
+
+# 公共 BT tracker：JavDB 等站点的磁力链常是「只有 hash 无 tracker」的裸磁力，
+# qB 仅靠 DHT 在群晖 NAT 下常找不到节点 → 一直卡在「下载元数据」。
+# 推送前补上这批稳定的公共 tracker，显著提升找到 peer/取到元数据的成功率。
+_PUBLIC_TRACKERS = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.tracker.cl:1337/announce",
+    "udp://open.demonii.com:1337/announce",
+    "udp://tracker.openbittorrent.com:6969/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://explodie.org:6969/announce",
+    "udp://tracker.tiny-vps.com:6969/announce",
+    "udp://opentracker.i2p.rocks:6969/announce",
+    "http://tracker.openbittorrent.com:80/announce",
+    "udp://tracker-udp.gbitt.info:80/announce",
+]
+
+
+def _augment_magnet(magnet: str) -> str:
+    """给磁力链补上公共 tracker（已存在的不重复添加）。非磁力链原样返回。"""
+    if not magnet or not magnet.lower().startswith("magnet:"):
+        return magnet
+    low = magnet.lower()
+    parts = []
+    for tr in _PUBLIC_TRACKERS:
+        enc = quote(tr, safe="")
+        if enc.lower() in low or tr.lower() in low:
+            continue
+        parts.append("&tr=" + enc)
+    return magnet + "".join(parts)
 
 
 def _base(qb_url: str) -> str:
@@ -88,6 +122,36 @@ async def get_version(qb_url: str, username: str, password: str,
             return {"online": False, "message": str(e)}
 
 
+async def list_torrents(qb_url: str, username: str, password: str,
+                        timeout: int = 15) -> list:
+    """
+    列出 qB 所有种子的关键信息，用于刮削时按 infohash 反查推送时记录的番号。
+    返回 [{hash, name, content_path, save_path}]。失败返回 []。
+    """
+    if not qb_url:
+        return []
+    base = _base(qb_url)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            ok, _msg = await _login(client, qb_url, username, password)
+            if not ok:
+                return []
+            resp = await client.get(f"{base}/api/v2/torrents/info",
+                                    headers=_headers(qb_url))
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            return [{
+                "hash": (t.get("hash") or "").lower(),
+                "name": t.get("name", "") or "",
+                "content_path": t.get("content_path", "") or "",
+                "save_path": t.get("save_path", "") or "",
+            } for t in data if isinstance(t, dict)]
+    except Exception as e:
+        print(f"[qB] 列种子失败: {e}", flush=True)
+        return []
+
+
 async def add_torrent(
     qb_url: str,
     username: str,
@@ -131,7 +195,8 @@ async def add_torrent(
         # 规避 qB 端无法解析 localhost / 内网地址导致的下载失败。
         files = None
         if download_url.lower().startswith("magnet:"):
-            data["urls"] = download_url
+            # 裸磁力补 tracker，避免 qB 卡在「下载元数据」
+            data["urls"] = _augment_magnet(download_url)
         else:
             content = await _fetch_torrent_bytes(download_url, timeout)
             if content:
