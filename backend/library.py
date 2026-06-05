@@ -31,7 +31,6 @@ from pydantic import BaseModel
 from config_manager import load as load_config
 from scrapers import search, SEARCH_MODE_CODE
 from translator import translate
-import push_hints
 
 router = APIRouter(prefix="/api/library")
 
@@ -124,6 +123,11 @@ class ScrapeRequest(BaseModel):
 # 工具函数：番号/解析/NFO
 # ─────────────────────────────────────────
 
+def _norm(s: str) -> str:
+    """归一化：转小写、仅保留字母数字（去掉分隔符/符号/空格），便于跨候选名比对去重。"""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
 def _match_code(text: str) -> str:
     for pat in _CODE_PATTERNS:
         m = pat.search(text)
@@ -134,103 +138,157 @@ def _match_code(text: str) -> str:
     return ""
 
 
-def _extract_code(filename: str) -> str:
-    """从文件名解析番号：先剔除站点前缀等噪声再匹配，失败时回退原始文件名。"""
-    stem = Path(filename).stem
-    return _match_code(_clean_noise(stem)) or _match_code(stem)
+def _code_from_name(name: str) -> str:
+    """从单个名字（文件名去扩展 / 目录名）识别番号：先剔除站点前缀等噪声再匹配，失败回退原串。"""
+    return _match_code(_clean_noise(name)) or _match_code(name)
 
 
-async def _qb_hash_for_file(video_path: Path, config: dict) -> str:
+def _candidate_names(video_path: Path, watch_dir: str = "") -> list:
     """
-    查 qB 找到「拥有该视频文件」的种子，返回其 infohash。
-    跨容器路径映射不可靠，故用「basename 名称相关性」匹配：
-    qB 的 content_path 末段（单文件=文件名 / 多文件=种子文件夹名）
-    与视频文件名或其某级父目录名一致即认定。失败返回 ""。
+    收集用于识别番号的候选名（就近优先）：
+      文件名(去扩展) + 各级父目录名（截至监控根，最多上溯 6 级）。
+    qB 单种子单目录场景下，种子文件夹名常等于完整番号，是文件名之外的重要佐证。
     """
-    qb_url = (config.get("qb_url") or "").strip()
-    if not qb_url:
-        return ""
+    names = [video_path.stem]
     try:
-        import qbittorrent
-        torrents = await qbittorrent.list_torrents(
-            qb_url, config.get("qb_username", ""), config.get("qb_password", ""))
-    except Exception as e:
-        _log(f"qB 列种子失败（忽略）：{e}")
-        return ""
-    if not torrents:
-        return ""
-
-    norm = push_hints._norm
-    # 候选名：文件名 / 去扩展名 / 各级父目录名（截至监控根，最多上溯 6 级）
-    cand = {norm(video_path.name), norm(video_path.stem)}
-    watch = config.get("scrape_watch_dir", "")
-    try:
-        watch_resolved = Path(watch).resolve() if watch else None
+        watch = Path(watch_dir).resolve() if watch_dir else None
     except Exception:
-        watch_resolved = None
+        watch = None
     parent = video_path.parent
     for _ in range(6):
         try:
-            if watch_resolved and parent.resolve() == watch_resolved:
+            if watch and parent.resolve() == watch:
                 break
         except Exception:
             pass
-        if parent == parent.parent:
+        if parent == parent.parent:    # 到文件系统根
             break
         if parent.name:
-            cand.add(norm(parent.name))
+            names.append(parent.name)
         parent = parent.parent
-    cand.discard("")
-    if not cand:
-        return ""
+    return [n for n in names if n]
 
-    for t in torrents:
-        targets = set()
-        cpath = t.get("content_path", "")
-        if cpath:
-            targets.add(norm(Path(cpath).name))
-        if t.get("name"):
-            targets.add(norm(t["name"]))
-        targets.discard("")
-        if cand & targets:
-            return t.get("hash", "")
+
+def _recognize_code(video_path: Path, watch_dir: str = "") -> str:
+    """
+    综合「文件名 + 各级父目录名」识别番号（不依赖任何提前标记/下载器）。
+    选取规则（越靠前越优先）：
+      1. 在多个候选名中重复出现的番号最可信（如种子文件夹名与视频文件名一致）；
+      2. 其次取归一化后更长（更具体）的番号；
+      3. 再次按候选顺序（文件名优先于目录名，目录就近优先）。
+    """
+    found = []  # (code, 候选顺序)
+    for idx, n in enumerate(_candidate_names(video_path, watch_dir)):
+        c = _code_from_name(n)
+        if c:
+            found.append((c, idx))
+    if not found:
+        return ""
+    # 按归一化串归并：统计出现次数，记录最靠前的来源顺序
+    stats: dict[str, dict] = {}
+    for code, idx in found:
+        s = stats.setdefault(_norm(code), {"code": code, "count": 0, "first": idx})
+        s["count"] += 1
+        s["first"] = min(s["first"], idx)
+    best = sorted(
+        stats.values(),
+        key=lambda s: (-s["count"], -len(_norm(s["code"])), s["first"]),
+    )[0]
+    return best["code"]
+
+
+def _extract_code(filename: str) -> str:
+    """（兼容旧接口）仅从单个文件名识别番号。需结合目录名时用 _recognize_code。"""
+    return _code_from_name(Path(filename).stem)
+
+
+# 分集/分卷标记：CD1 / DISC2 / PART1 / VOL.1，或纯 "1"/"2"/"A"/"B" 文件名
+_CD_MARKER = re.compile(
+    r'(?:^|[^a-z0-9])(?:cd|dvd|disc|disk|part|pt|vol)[\s._-]?\d{1,2}(?=$|[^a-z0-9])',
+    re.IGNORECASE,
+)
+
+
+def _has_cd_marker(stem: str) -> bool:
+    s = (stem or "").strip()
+    if _CD_MARKER.search(s):
+        return True
+    t = s.lower()
+    return bool(re.fullmatch(r'[a-e]', t) or re.fullmatch(r'\d{1,2}', t))
+
+
+def _folder_code(video_path: Path, watch_dir: str = "") -> str:
+    """仅取「目录名」识别出的番号（就近优先），不看文件名本身。无则返回 ""。"""
+    for n in _candidate_names(video_path, watch_dir)[1:]:   # [0] 是文件名，跳过
+        c = _code_from_name(n)
+        if c:
+            return c
     return ""
+
+
+def _sibling_videos(video_path: Path) -> list:
+    """同一直接父目录下的所有视频文件。"""
+    try:
+        return [p for p in video_path.parent.iterdir()
+                if p.is_file() and p.suffix.lower() in VIDEO_EXTS]
+    except Exception:
+        return []
+
+
+def _looks_primary(video_path: Path, watch_dir: str = "") -> bool:
+    """
+    该视频自身是否「像正片」（用于判断目录是否还有待处理正片，决定能否清理整目录）。
+    判定不依赖兄弟文件，保证文件移动前后结论稳定：
+      - 自身文件名能识别出番号 → 正片；
+      - 带分集标记（CD1/PART2…）→ 正片（分集）；
+      - 所在目录名也无番号 → 信息不足，保守当正片（不误删）；
+      - 否则（目录名有番号，但自身无番号、无分集标记）→ 视为广告/附属，非正片。
+    """
+    if _code_from_name(video_path.stem):
+        return True
+    if _has_cd_marker(video_path.stem):
+        return True
+    if not _folder_code(video_path, watch_dir):
+        return True
+    return False
+
+
+def _is_extra_video(video_path: Path, watch_dir: str = "") -> bool:
+    """
+    是否为「广告/赠片」应跳过不刮削。仅在证据充分时才丢弃，确保正片/分集不被误删：
+      - 自身文件名能识别出番号        → 不是广告（按自身番号刮削）；
+      - 带分集标记（CD1/PART2/纯编号）→ 不是广告（分集保留）；
+      - 目录名无番号                  → 信息不足，不丢弃；
+      - 仅当目录名有番号、自身无番号无分集标记，
+        且同目录确实存在「正片」兄弟（带正确番号或分集标记）时 → 判为广告，跳过。
+    """
+    if _code_from_name(video_path.stem):
+        return False
+    if _has_cd_marker(video_path.stem):
+        return False
+    folder_code = _folder_code(video_path, watch_dir)
+    if not folder_code:
+        return False
+    fc = _norm(folder_code)
+    for s in _sibling_videos(video_path):
+        if s == video_path:
+            continue
+        sc = _code_from_name(s.stem)
+        if (sc and _norm(sc) == fc) or _has_cd_marker(s.stem):
+            return True      # 存在明确正片/分集兄弟 → 本文件是广告
+    return False
 
 
 async def _resolve_code(video_path: Path, config: dict) -> str:
     """
-    番号识别（按可靠度递进）：
-      1. 推送下载：查 qB 用文件对应种子的 infohash 精确反查推送时记录的番号（最可靠）；
-      2. 推送下载兜底：按文件名/目录名与推送记录的番号/显示名匹配反查；
-      3. 迅雷下载 / 手动复制到监控目录：无推送标记，直接按文件名正则识别番号。
+    番号识别：直接分析「文件名 + 各级父目录名」（不做提前标记，不依赖下载器 API）。
+    适用于 qB 推送下载、迅雷下载、手动复制到监控目录等所有场景。
     """
-    # 1) qB infohash 精确反查
-    try:
-        info_hash = await _qb_hash_for_file(video_path, config)
-        if info_hash:
-            code = push_hints.resolve_by_hash(info_hash)
-            if code:
-                _log(f"命中推送标记番号(infohash)：{video_path.name} → {code}")
-                return code
-    except Exception as e:
-        _log(f"qB infohash 反查失败（忽略）：{e}")
-
-    # 2) 名称相关性反查推送标记
-    try:
-        hinted = push_hints.resolve(video_path, config.get("scrape_watch_dir", ""))
-    except Exception as e:
-        hinted = ""
-        _log(f"推送番号反查失败（忽略，回退文件名解析）：{e}")
-    if hinted:
-        _log(f"命中推送标记番号(名称)：{video_path.name} → {hinted}")
-        return hinted
-
-    # 3) 文件名正则识别（迅雷/手动复制场景）
-    code = _extract_code(video_path.name)
+    code = _recognize_code(video_path, config.get("scrape_watch_dir", ""))
     if code:
-        _log(f"按文件名识别番号：{video_path.name} → {code}")
+        _log(f"识别番号：{video_path.name} → {code}")
     else:
-        _log(f"文件名未能识别番号：{video_path.name}")
+        _log(f"未能识别番号（文件名/目录名均无匹配）：{video_path.name}")
     return code
 
 
@@ -572,17 +630,21 @@ def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int):
     if parent == watch_dir or watch_dir not in parent.parents:
         # 视频直接在根目录，或父目录不在监控目录内：不做整目录删除
         return
-    # 找出该子目录内（递归）剩余的达标视频
+    # 找出该子目录内（递归）剩余的、仍待处理的「正片」视频。
+    # 广告/赠片（_looks_primary 为假）不计入，否则真片归档后会被它们长期挡住、
+    # 导致原目录连同广告一直残留。
+    watch_str = str(watch_dir)
     try:
         remaining = [p for p in parent.rglob("*")
                      if p.is_file() and p.suffix.lower() in VIDEO_EXTS
                      and not _is_incomplete(p)
                      and p.stat().st_size >= min_bytes
-                     and str(p) not in _processed]
+                     and str(p) not in _processed
+                     and _looks_primary(p, watch_str)]
     except Exception:
         remaining = []
     if remaining:
-        _log(f"原目录仍有 {len(remaining)} 个待处理视频，暂不删除：{parent.name}")
+        _log(f"原目录仍有 {len(remaining)} 个待处理正片，暂不删除：{parent.name}")
         return
     try:
         shutil.rmtree(parent)
@@ -682,7 +744,7 @@ async def _scan_once(config: dict) -> int:
     out_dir = config.get("scrape_output_dir", "").strip()
     now = time.time()
     processed = 0
-    n_total = n_done_before = n_incomplete = n_small = n_waiting = 0
+    n_total = n_done_before = n_incomplete = n_small = n_waiting = n_extra = 0
 
     _log(f"开始扫描监控目录：{watch}（归档目录：{out_dir or '未配置'}）")
     for vf in _iter_video_files(watch_dir):
@@ -706,6 +768,15 @@ async def _scan_once(config: dict) -> int:
         if size < min_bytes:
             n_small += 1
             _log(f"文件过小忽略：{vf.name}（{round(size/1024/1024,1)}MB < {min_bytes//1024//1024}MB）")
+            continue
+
+        # 广告/赠片过滤：同目录已有带正确番号的正片（或分集），而该文件自身无番号、
+        # 无分集标记 → 判为广告/赠片，跳过刮削（标记为已处理，后续随原目录一并清理）。
+        if _is_extra_video(vf, watch):
+            n_extra += 1
+            _log(f"广告/赠片视频，跳过刮削：{vf.name}")
+            _processed.add(fp)
+            _size_history.pop(fp, None)
             continue
 
         # 完成判定（无 .!qB 前提下，满足任一即视为下载完成）：
@@ -742,7 +813,8 @@ async def _scan_once(config: dict) -> int:
         processed += 1
 
     _log(f"扫描完成：共 {n_total} 个视频 → 本次处理 {processed}，"
-         f"等待稳定 {n_waiting}，下载中 {n_incomplete}，过小 {n_small}，先前已处理 {n_done_before}")
+         f"等待稳定 {n_waiting}，下载中 {n_incomplete}，过小 {n_small}，"
+         f"广告/赠片 {n_extra}，先前已处理 {n_done_before}")
     return processed
 
 
@@ -848,7 +920,7 @@ async def api_scan_folder(req: ScanRequest):
         files.append({
             "filename": f.name,
             "filepath": str(f),
-            "code": _extract_code(f.name),
+            "code": _recognize_code(f),
             "size_mb": round(f.stat().st_size / 1024 / 1024, 1),
             **_get_file_status(f),
         })

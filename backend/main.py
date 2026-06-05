@@ -27,7 +27,6 @@ from config_manager import load as load_config, save as save_config, MAX_RESULTS
 from jackett import search_jackett
 import qbittorrent
 import library
-import push_hints
 import auth
 
 app = FastAPI(title="JAV Search", version="1.4.2")
@@ -580,14 +579,8 @@ async def api_qb_add(req: QbAddRequest):
         print(f"[qB推送] 失败：{result.get('error', '')}", flush=True)
         raise HTTPException(status_code=502, detail=result.get("error", "推送失败"))
     print("[qB推送] 成功", flush=True)
-    # 记录「番号 ↔ 资源」标记：刮削下载完成的文件时据此精确识别番号，
-    # 避免靠文件名「字母+数字」误判（如 hhd800.com@390JAC-234 被猜成 HHD-800）。
-    if req.code:
-        try:
-            if push_hints.record(req.code, req.download_url, req.title or ""):
-                print(f"[qB推送] 已标记番号 {req.code} 供刮削识别", flush=True)
-        except Exception as e:
-            print(f"[qB推送] 番号标记失败（不影响推送）：{e}", flush=True)
+    # 不再做番号提前标记：刮削时直接分析「文件名 + 各级父目录名」识别番号
+    # （站点域名/方括号等噪声已在 library._clean_noise 中剔除）。
     return result
 
 
