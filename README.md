@@ -62,29 +62,21 @@ docker run -d \
   --name jav-search \
   --restart unless-stopped \
   -p 8085:8085 \
-  -v jav-config:/config \
-  -v /volume1/downloads/jav:/downloads/jav \
-  -v /volume1/media/jav:/media/jav \
+  -v jav-config:/config                          `# 配置持久化（命名卷，删容器不丢配置）` \
+  -v /volume1/downloads/jav:/downloads/jav       `# 下载器保存目录＝刮削监控源（冒号左侧改成你的真实路径）` \
+  -v /volume1/media/jav:/media/jav               `# 刮削后归档目录（自动按 YYYYMM/番号/ 建子目录）` \
   -e CONFIG_DIR=/config \
   -e PORT=8085 \
   -e TZ=Asia/Shanghai \
-  -e AUTH_USERNAME=admin \
-  -e AUTH_PASSWORD=改成你的强密码 \
-  -e AUTH_SECRET=一串很长的随机字符串 \
+  -e AUTH_USERNAME=admin                         `# 登录用户名` \
+  -e AUTH_PASSWORD=改成你的强密码                  `# 登录密码，务必修改` \
+  -e AUTH_SECRET=一串很长的随机字符串              `# 会话签名密钥，填长随机串` \
   -e AUTH_SESSION_TTL=604800 \
   --add-host host.docker.internal:host-gateway \
   ghcr.io/seaside111/jav-search:latest
 ```
 
-挂载说明（冒号**左侧**是群晖真实路径按需修改，**右侧**是容器内路径，需与「设置 → 刮削」里填写的一致）：
-
-| 挂载 | 用途 |
-|------|------|
-| `jav-config:/config` | 配置持久化（命名卷，删容器不丢配置） |
-| `/volume1/downloads/jav:/downloads/jav` | 下载器保存目录（刮削**监控源**），通常指向 qBittorrent 的下载目录 |
-| `/volume1/media/jav:/media/jav` | 刮削后**归档目录**（自动按 `YYYYMM/番号/` 建子目录） |
-
-> 不需要刮削功能就删掉中间两行 `-v` 挂载。Windows PowerShell 把行尾 `\` 换成反引号 `` ` `` 或写成一行。
+> 上面 `` `# ...` `` 是行内批注，会被 shell 当空忽略，可整段直接复制运行。挂载冒号**左侧**是宿主机真实路径（按需改），**右侧**是容器内路径，需与「设置 → 刮削」里填的一致。不需要刮削功能就删掉中间两行 `-v`。Windows PowerShell 请去掉行尾 `\` 与批注、写成一行。
 
 **升级 / 重建**（配置在命名卷里，不会丢）：
 
