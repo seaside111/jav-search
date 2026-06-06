@@ -53,6 +53,47 @@ docker compose -f docker-compose.hub.yml logs -f
 
 > 群晖 Container Manager：新增项目 → 来源选「上传 docker-compose.hub.yml」即可，不需要上传整套源码。
 
+### 不用 compose，纯 `docker run` 部署（含刮削目录）
+
+不想用 compose 也行，下面是一条完整命令（已含媒体库刮削的目录挂载），改好账号密码即可直接执行：
+
+```bash
+docker run -d \
+  --name jav-search \
+  --restart unless-stopped \
+  -p 8085:8085 \
+  -v jav-config:/config \
+  -v /volume1/downloads/jav:/downloads/jav \
+  -v /volume1/media/jav:/media/jav \
+  -e CONFIG_DIR=/config \
+  -e PORT=8085 \
+  -e TZ=Asia/Shanghai \
+  -e AUTH_USERNAME=admin \
+  -e AUTH_PASSWORD=改成你的强密码 \
+  -e AUTH_SECRET=一串很长的随机字符串 \
+  -e AUTH_SESSION_TTL=604800 \
+  --add-host host.docker.internal:host-gateway \
+  ghcr.io/seaside111/jav-search:latest
+```
+
+挂载说明（冒号**左侧**是群晖真实路径按需修改，**右侧**是容器内路径，需与「设置 → 刮削」里填写的一致）：
+
+| 挂载 | 用途 |
+|------|------|
+| `jav-config:/config` | 配置持久化（命名卷，删容器不丢配置） |
+| `/volume1/downloads/jav:/downloads/jav` | 下载器保存目录（刮削**监控源**），通常指向 qBittorrent 的下载目录 |
+| `/volume1/media/jav:/media/jav` | 刮削后**归档目录**（自动按 `YYYYMM/番号/` 建子目录） |
+
+> 不需要刮削功能就删掉中间两行 `-v` 挂载。Windows PowerShell 把行尾 `\` 换成反引号 `` ` `` 或写成一行。
+
+**升级 / 重建**（配置在命名卷里，不会丢）：
+
+```bash
+docker pull ghcr.io/seaside111/jav-search:latest
+docker stop jav-search && docker rm jav-search
+# 再次执行上面的 docker run 命令即可
+```
+
 ### 常见部署报错
 
 | 报错 | 原因 | 解决 |
