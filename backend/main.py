@@ -22,6 +22,7 @@ from scrapers import (
     SEARCH_MODE_CODE, SEARCH_MODE_ACTOR, SEARCH_MODE_KEYWORD,
 )
 from scrapers import javdb as javdb_scraper
+from scrapers import fc2 as fc2_scraper
 from translator import translate
 from config_manager import load as load_config, save as save_config, MAX_RESULTS_HARD_CAP
 from jackett import search_jackett
@@ -29,7 +30,11 @@ import qbittorrent
 import library
 import auth
 
-app = FastAPI(title="JAV Search", version="1.4.2")
+APP_VERSION = "1.4.3-beta"
+# 版本更新检测用的 GitHub 仓库（owner/repo）
+GITHUB_REPO = "seaside111/jav-search"
+
+app = FastAPI(title="JAV Search", version=APP_VERSION)
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,7 +50,7 @@ app.include_router(library.router)
 @app.on_event("startup")
 async def _on_startup():
     # 按配置拉起后台刮削监控
-    print("[启动] JAV Search 1.4.2 启动完成，初始化刮削监控…", flush=True)
+    print(f"[启动] JAV Search {APP_VERSION} 启动完成，初始化刮削监控…", flush=True)
     try:
         library.start_monitor()
     except Exception as e:
@@ -168,6 +173,12 @@ class ConfigUpdateRequest(BaseModel):
     javdb_flaresolverr_use_proxy: Optional[bool] = None
     javdb_cookie: Optional[str] = None
     javdb_prefetch_extras: Optional[bool] = None
+    # V1.4.3 FC2 数据源
+    fc2_flaresolverr_url: Optional[str] = None
+    fc2_flaresolverr_use_proxy: Optional[bool] = None
+    fc2_cookie: Optional[str] = None
+    fc2_missav_enabled: Optional[bool] = None
+    fc2_missav_base: Optional[str] = None
     baidu_app_id: Optional[str] = ""
     baidu_secret_key: Optional[str] = ""
     aliyun_access_key_id: Optional[str] = ""
@@ -198,6 +209,7 @@ class ConfigUpdateRequest(BaseModel):
     scrape_settle_seconds: Optional[int] = None
     scrape_stable_checks: Optional[int] = None
     scrape_min_size_mb: Optional[int] = None
+    scrape_translate_enabled: Optional[bool] = None
     scrape_translate_provider: Optional[str] = None
     scrape_move_on_fail: Optional[bool] = None
 
@@ -208,7 +220,75 @@ class ConfigUpdateRequest(BaseModel):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "1.4.2"}
+    return {"status": "ok", "version": APP_VERSION}
+
+
+# ──────────────────────────────────────────────
+# 版本检测：当前版本 vs GitHub 最新 release（带缓存，可走代理）
+# ──────────────────────────────────────────────
+# 内存缓存：避免频繁打 GitHub API（其匿名限流 60 次/小时）
+_version_cache: dict = {"ts": 0.0, "data": None}
+_VERSION_TTL = 3600  # 缓存 1 小时
+
+
+def _parse_semver(tag: str) -> tuple:
+    """把 'V1.4.3' / 'v1.4' / '1.4.2.1' 规整成可比较的整数元组。"""
+    nums = re.findall(r"\d+", tag or "")
+    return tuple(int(n) for n in nums) if nums else (0,)
+
+
+def _cmp_version(a: str, b: str) -> int:
+    """语义化比较：a>b 返回 1，a<b 返回 -1，相等返回 0。短的按 0 补齐。"""
+    ta, tb = _parse_semver(a), _parse_semver(b)
+    n = max(len(ta), len(tb))
+    ta = ta + (0,) * (n - len(ta))
+    tb = tb + (0,) * (n - len(tb))
+    return (ta > tb) - (ta < tb)
+
+
+@app.get("/api/version")
+async def api_version(force: bool = Query(False, description="是否强制刷新缓存")):
+    """
+    返回当前版本与 GitHub 最新 release，判断是否有更新。
+    后端代理 + 缓存 1 小时，避免浏览器跨域/被限流，群晖内网也能用（经配置代理出网）。
+    """
+    import time as _time
+    now = _time.time()
+    if not force and _version_cache["data"] and (now - _version_cache["ts"] < _VERSION_TTL):
+        return _version_cache["data"]
+
+    config = load_config()
+    proxy = config.get("proxy") or None
+    api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    result = {
+        "current": APP_VERSION,
+        "latest": "",
+        "update_available": False,
+        "release_url": f"https://github.com/{GITHUB_REPO}/releases",
+        "error": "",
+    }
+    try:
+        async with httpx.AsyncClient(proxy=proxy, timeout=12, follow_redirects=True) as client:
+            resp = await client.get(api_url, headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "jav-search-version-check",
+            })
+        if resp.status_code == 200:
+            data = resp.json()
+            latest = (data.get("tag_name") or data.get("name") or "").strip()
+            result["latest"] = latest
+            if data.get("html_url"):
+                result["release_url"] = data["html_url"]
+            result["update_available"] = bool(latest) and _cmp_version(latest, APP_VERSION) > 0
+        else:
+            result["error"] = f"GitHub HTTP {resp.status_code}"
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {e}"
+
+    # 仅在成功拿到 latest 时写缓存；失败不缓存，便于下次重试
+    if result["latest"]:
+        _version_cache.update({"ts": now, "data": result})
+    return result
 
 
 # 图片缓存（内存，简单 LRU 效果）
@@ -238,6 +318,10 @@ def _img_referer_candidates(url: str) -> list[str]:
         site = "https://javdb.com/"
     elif "dmm" in host or "fanza" in host:
         site = "https://www.dmm.co.jp/"
+    # MissAV 系 CDN（封面 fourhoi、逐帧样品图 nineyu/surrit/sixyik 等）有防盗链，
+    # 需带 missav 域名作 Referer 才能取（封面 fourhoi 多数无需，但带上无害）。
+    elif any(k in host for k in ("fourhoi", "nineyu", "surrit", "sixyik", "missav")):
+        site = "https://missav.ws/"
 
     cands = []
     for r in (site, origin, ""):
@@ -368,22 +452,37 @@ async def api_details(req: DetailsRequest):
 
 
 @app.get("/api/latest")
-async def api_latest():
-    """首页最新片源（未搜索时展示）。来源/数量取自配置。"""
+async def api_latest(source: str = Query(None, description="只抓单个来源（用于首页边抓边显示）")):
+    """
+    首页最新片源（未搜索时展示）。来源/数量取自配置。
+    - 不带 source：抓取全部启用来源并合并（兼容旧行为）。
+    - 带 source：只抓该来源，前端可对各来源并行请求、边到边显示。
+    """
     config = load_config()
     if not config.get("show_latest", True):
         return {"success": True, "results": [], "disabled": True}
     proxy = config.get("proxy") or None
-    sources = config.get("latest_sources") or config.get("sources", ["javbus", "javdb"])
+    all_sources = config.get("latest_sources") or config.get("sources", ["javbus", "javdb"])
     per_source = int(config.get("latest_per_source", 40))
     limits = config.get("latest_limits") or {}
+
+    # 单来源模式：校验来源在启用列表内，只抓这一个（不合并）
+    if source:
+        if source not in all_sources:
+            return {"success": False, "source": source, "results": [],
+                    "detail": f"来源 {source} 未启用"}
+        sources = [source]
+    else:
+        sources = all_sources
+
     try:
         results = await get_latest(proxy=proxy, sources=sources,
                                    per_source=per_source, limits=limits)
-        return {"success": True, "total": len(results), "results": results}
+        return {"success": True, "source": source or "", "sources": all_sources,
+                "total": len(results), "results": results}
     except Exception as e:
         # 首页最新失败不应阻塞使用，返回空列表 + 错误信息
-        return {"success": False, "results": [], "detail": str(e)}
+        return {"success": False, "source": source or "", "results": [], "detail": str(e)}
 
 
 @app.get("/api/javdb/test")
@@ -399,6 +498,22 @@ async def api_javdb_test():
         return {"success": True, **result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"JavDB 诊断失败: {str(e)}")
+
+
+@app.get("/api/fc2/test")
+async def api_fc2_test():
+    """
+    FC2（fc2ppvdb.com）连通诊断（V1.4.3）。
+    fc2ppvdb 强制 Cloudflare Turnstile，必须走 FlareSolverr；
+    返回是否可达 / 是否命中盾 / 取页方式 / 解析条数。
+    """
+    config = load_config()
+    proxy = config.get("proxy") or None
+    try:
+        result = await fc2_scraper.diagnose(proxy=proxy)
+        return {"success": True, **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"FC2 诊断失败: {str(e)}")
 
 
 @app.post("/api/jackett/search")
@@ -514,7 +629,7 @@ async def api_get_config():
     config = load_config()
     # 脱敏返回（隐藏密钥）
     safe_config = dict(config)
-    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "javdb_cookie"]:
+    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "javdb_cookie", "fc2_cookie"]:
         if safe_config.get(key):
             v = safe_config[key]
             safe_config[key] = "***" + v[-4:] if len(v) > 4 else "****"
@@ -528,7 +643,7 @@ async def api_set_config(req: ConfigUpdateRequest):
 
     update = req.dict(exclude_none=True)
     # 如果是脱敏值则不更新
-    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "javdb_cookie"]:
+    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "javdb_cookie", "fc2_cookie"]:
         v = update.get(key, "")
         if v and v.startswith("***"):
             update.pop(key, None)

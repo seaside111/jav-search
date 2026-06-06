@@ -89,7 +89,41 @@
   }
   .btn-icon:hover { background: var(--bg-hover); color: var(--text-main); }
 
+  /* 版本号小标 + 更新提醒红点 */
+  .version-chip {
+    position: relative; display: flex; align-items: center; gap: 5px;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    color: var(--text-muted); padding: 7px 10px; cursor: default; font-size: 12px;
+    font-family: 'Noto Sans SC', sans-serif; white-space: nowrap; transition: background .2s, color .2s;
+  }
+  .version-chip.clickable { cursor: pointer; }
+  .version-chip.clickable:hover { background: var(--bg-hover); color: var(--text-main); }
+  .version-chip.has-update { border-color: var(--accent); color: var(--accent); }
+  .version-chip .update-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--red);
+    box-shadow: 0 0 0 0 rgba(204,51,68,.6); animation: pulseDot 1.8s infinite;
+  }
+  @keyframes pulseDot {
+    0% { box-shadow: 0 0 0 0 rgba(204,51,68,.6); }
+    70% { box-shadow: 0 0 0 6px rgba(204,51,68,0); }
+    100% { box-shadow: 0 0 0 0 rgba(204,51,68,0); }
+  }
+
   main { padding: 24px; max-width: 1400px; margin: 0 auto; }
+
+  /* 数据源切换过滤条 */
+  .source-filter { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+  .source-filter:empty { display: none; }
+  .src-filter-btn {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 20px;
+    color: var(--text-muted); padding: 6px 14px; cursor: pointer; font-size: 12px;
+    font-family: 'Noto Sans SC', sans-serif; transition: background .2s, color .2s, border-color .2s;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .src-filter-btn:hover { background: var(--bg-hover); color: var(--text-main); }
+  .src-filter-btn.active { background: rgba(232,160,32,.14); border-color: var(--accent); color: var(--accent); }
+  .src-filter-btn .cnt { font-size: 11px; opacity: .7; }
+  .src-filter-btn .loading-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: spin 1s linear infinite; opacity: .8; }
 
   .status-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; min-height: 24px; }
   .status-text { color: var(--text-muted); font-size: 13px; }
@@ -488,6 +522,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
+  <div class="version-chip" id="versionChip" title="当前版本（Beta）">v1.4.3-beta</div>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="3"/>
@@ -508,6 +543,7 @@
     <div class="spinner" id="spinner"></div>
     <div class="status-text" id="statusText">输入番号、演员或关键词开始搜索</div>
   </div>
+  <div class="source-filter" id="sourceFilter"></div>
   <div id="results">
     <div class="empty">
       <div class="big-icon">🎬</div>
@@ -554,8 +590,9 @@
             <label class="source-chk"><input type="checkbox" id="srcJavdb" checked> JavDB</label>
             <label class="source-chk"><input type="checkbox" id="srcAvsox"> AVSOX</label>
             <label class="source-chk"><input type="checkbox" id="srcAvmoo"> AVMOO</label>
+            <label class="source-chk"><input type="checkbox" id="srcFc2"> FC2</label>
           </div>
-          <span class="setting-hint">JavBus / JavDB 为主；AVSOX 专收无码、AVMOO 收录大量旧番号，可作补充</span>
+          <span class="setting-hint">JavBus / JavDB 为主；AVSOX 专收无码、AVMOO 收录大量旧番号；FC2 专收 FC2-PPV 素人/无码（fc2ppvdb.com，须配 FlareSolverr）</span>
         </div>
 
         <div class="setting-group">
@@ -589,6 +626,42 @@
         </div>
 
         <div class="setting-group">
+          <h3>FC2 数据源（1.4.3）</h3>
+          <div class="setting-row">
+            <label class="setting-label">FlareSolverr 地址</label>
+            <input class="setting-input" id="cfgFc2Flare" type="text" placeholder="留空则复用上方 JavDB 的 FlareSolverr">
+            <span class="setting-hint">fc2ppvdb.com 强制 Cloudflare Turnstile 人机验证，必须经 FlareSolverr 才能抓取。留空将自动复用 JavDB 填的地址</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">FlareSolverr 复用代理</label>
+            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgFc2FlareProxy" checked> 让 FlareSolverr 走主代理</label>
+            <span class="setting-hint">默认开。若 FlareSolverr 自带网络出口或报代理错误，请关掉走直连</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">FC2 Cookie</label>
+            <input class="setting-input" id="cfgFc2Cookie" type="text" placeholder="cf_clearance=xxx（可选）">
+            <span class="setting-hint">可选。浏览器过盾后导出的 fc2ppvdb Cookie，用于提升抓取成功率</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">MissAV 补全</label>
+            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgFc2Missav" checked> 用 MissAV 补全 FC2 封面/标题</label>
+            <span class="setting-hint">默认开。fc2ppvdb 对下架条目常无封面/标题，开启后从 MissAV 补全（封面走 fourhoi CDN）。强烈建议保持开启</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">MissAV 镜像</label>
+            <input class="setting-input" id="cfgFc2MissavBase" type="text" placeholder="留空用默认 missav.ws（逗号分隔多个）">
+            <span class="setting-hint">MissAV 域名常变。可填多个镜像（逗号分隔）做兜底，如 https://missav.ws,https://missav123.com</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">连通测试</label>
+            <button class="btn" id="btnFc2Test" type="button" onclick="testFc2()">测试 FC2 连通</button>
+            <span class="setting-hint">检测 fc2ppvdb 是否可达 / 是否被 Turnstile 拦截 / FlareSolverr 是否生效</span>
+          </div>
+          <div id="fc2TestResult" style="display:none;margin-top:8px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;line-height:1.7;"></div>
+          <span class="setting-hint" style="margin-top:6px;display:block">提示：FC2 站点不提供磁力，下载仍用 Jackett/sukebei 按番号「FC2-PPV-xxxxxxx」检索</span>
+        </div>
+
+        <div class="setting-group">
           <h3>抓取与展示</h3>
           <div class="setting-row">
             <label class="setting-label">单源抓取上限（条）</label>
@@ -609,6 +682,11 @@
             <label class="setting-label">首页最新数量 · AVSOX</label>
             <input class="setting-input" id="cfgLatestAvsox" type="number" value="40" min="12" max="200" step="12">
             <span class="setting-hint">AVSOX 详情页较慢，数量不宜过大；演员/标签会在翻到该页时渐进加载</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">首页最新数量 · FC2</label>
+            <input class="setting-input" id="cfgLatestFc2" type="number" value="30" min="12" max="120" step="6">
+            <span class="setting-hint">FC2 走 FlareSolverr 单页过盾较慢，建议 30 条左右</span>
           </div>
         </div>
       </div>
@@ -761,6 +839,12 @@
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
+              <input type="checkbox" id="cfgScrapeTranslate" checked> 刮削时翻译标题/简介
+            </label>
+            <span class="setting-hint">开启：刮削时把日文标题/简介翻译成中文写入 NFO。关闭：直接保留日文原标题（番号始终不翻译）</span>
+          </div>
+          <div class="setting-row">
+            <label class="source-chk" style="font-size:13px">
               <input type="checkbox" id="cfgScrapeMoveOnFail" checked> 刮削失败也照常移动归档
             </label>
             <span class="setting-hint">监控正常但无法刮到内容时，仍把视频移动到归档目录</span>
@@ -813,6 +897,21 @@ const PAGE_SIZE = 12;
 let isHomeLatest = false;
 // V1.3：按页详情补全的在途 Promise，避免重复请求（key = 页码）
 const pageEnrichPromise = {};
+// V1.4.3：数据源过滤 + 视图索引（viewIndices 是「过滤后可见条目」在 currentResults 中的主索引，
+//          卡片始终用主索引补全详情，过滤只改变展示哪些索引，不破坏索引映射）
+let activeSourceFilter = null;     // null = 全部
+let viewIndices = [];
+// V1.4.3：首页最新「边抓边显示」用的代次令牌（搜索/再次加载时失效旧批次）+ 番号去重表
+let latestLoadToken = 0;
+let latestCodeIndex = {};
+let configuredLatestSources = [];  // 配置里启用的首页最新来源
+// V1.4.3：走 FlareSolverr 的「慢源」（详情按需单条补全，不批量预取，避免压垮 FlareSolverr）
+let lazyDetailSources = [];
+// 条目的主来源是否属于慢源（合并卡的主来源是 JavBus 等快源 → 不算慢，JavDB 独有字段仍按需补抓）
+function isLazyItem(m) {
+  const src = (m.source || '').toLowerCase();
+  return lazyDetailSources.includes(src);
+}
 
 // ══════════════════════════════════════════
 // 安全 JSON 解析 —— 避免空响应导致 "Unexpected end of JSON input"
@@ -868,10 +967,13 @@ async function doSearch() {
   const statusText = document.getElementById('statusText');
 
   isHomeLatest = false;
+  latestLoadToken++;            // 使仍在途的首页最新批次失效，避免其结果混入搜索
+  activeSourceFilter = null;
   btn.disabled = true;
   spinner.classList.add('active');
   statusText.innerHTML = `正在搜索 <strong>${escHtml(query)}</strong>…`;
   document.getElementById('results').innerHTML = '';
+  document.getElementById('sourceFilter').innerHTML = '';
 
   try {
     const resp = await fetch(`${API}/api/search`, {
@@ -901,14 +1003,77 @@ async function doSearch() {
 function renderResults(results) {
   currentResults = results || [];
   currentPage = 1;
+  activeSourceFilter = null;
   // 重置详情补全缓存
   for (const k in pageEnrichPromise) delete pageEnrichPromise[k];
   const container = document.getElementById('results');
   if (!results || !results.length) {
     container.innerHTML = `<div class="empty"><div class="big-icon">🔍</div><h3>没有找到结果</h3><p>尝试换个搜索词，或检查代理是否配置正确</p></div>`;
     document.getElementById('pagination').innerHTML = '';
+    renderSourceFilter();
     return;
   }
+  rebuildView();
+  renderSourceFilter();
+  showPage(1);
+}
+
+// ── 数据源过滤 / 视图索引（V1.4.3）──────────────────
+// 单条目命中的数据源（展示名，如 JavBus / FC2）；合并卡可能多源
+function itemSources(m) {
+  const list = (m.sources && m.sources.length) ? m.sources : [m.source];
+  return list.filter(Boolean);
+}
+function itemHasSource(m, src) {
+  const s = (src || '').toLowerCase();
+  return itemSources(m).some(x => (x || '').toLowerCase() === s);
+}
+// 依据当前过滤器重建可见主索引列表（保持原始顺序，索引指向 currentResults）
+function rebuildView() {
+  viewIndices = [];
+  for (let i = 0; i < currentResults.length; i++) {
+    if (!activeSourceFilter || itemHasSource(currentResults[i], activeSourceFilter)) {
+      viewIndices.push(i);
+    }
+  }
+}
+function viewTotalPages() {
+  return Math.ceil(viewIndices.length / PAGE_SIZE) || 1;
+}
+// 渲染数据源切换按钮（首页最新 + 搜索结果通用）
+function renderSourceFilter() {
+  const bar = document.getElementById('sourceFilter');
+  if (!bar) return;
+  if (!currentResults.length) { bar.innerHTML = ''; return; }
+  // 统计各来源条数（合并卡按其每个来源各计一次）
+  const counts = {};
+  for (const m of currentResults) {
+    for (const s of itemSources(m)) counts[s] = (counts[s] || 0) + 1;
+  }
+  const srcNames = Object.keys(counts);
+  // 单一来源时无需过滤条
+  if (srcNames.length <= 1) { bar.innerHTML = ''; return; }
+  // 仍在加载中的来源（首页最新边抓边显示时显示小圈）
+  const loadingSet = (isHomeLatest && window._latestLoadingSources) ? window._latestLoadingSources : new Set();
+
+  let html = `<button class="src-filter-btn ${activeSourceFilter === null ? 'active' : ''}" onclick="setSourceFilter(null)">全部 <span class="cnt">${currentResults.length}</span></button>`;
+  for (const s of srcNames) {
+    const act = (activeSourceFilter && activeSourceFilter.toLowerCase() === s.toLowerCase()) ? 'active' : '';
+    html += `<button class="src-filter-btn ${act}" onclick="setSourceFilter('${escAttr(s)}')">${escHtml(s)} <span class="cnt">${counts[s]}</span></button>`;
+  }
+  // 尚未返回的来源（loading）以占位按钮显示
+  for (const s of loadingSet) {
+    if (counts[s]) continue;  // 已有结果的不重复显示
+    html += `<button class="src-filter-btn" disabled style="opacity:.6">${escHtml(s)} <span class="loading-dot"></span></button>`;
+  }
+  bar.innerHTML = html;
+}
+function setSourceFilter(src) {
+  activeSourceFilter = src;
+  // 过滤后各页条目变化，清空按页补全缓存以便对新可见条目按需补全（补全幂等，已加载的会跳过）
+  for (const k in pageEnrichPromise) delete pageEnrichPromise[k];
+  rebuildView();
+  renderSourceFilter();
   showPage(1);
 }
 
@@ -918,7 +1083,7 @@ const PREFETCH_AHEAD = 3;
 // V1.3：切换到第 p 页。先用列表级信息即时渲染（快），
 // 再异步补全本页详情并就地升级；同时后台预取后续多页详情。
 function showPage(p) {
-  const totalPages = Math.ceil(currentResults.length / PAGE_SIZE) || 1;
+  const totalPages = viewTotalPages();
   currentPage = Math.min(Math.max(p, 1), totalPages);
   renderPage();
   // 优先补全当前页 → 完成后就地升级卡片；再依次后台预取后续 PREFETCH_AHEAD 页
@@ -949,33 +1114,31 @@ async function prefetchJavdbExtrasForPage(p) {
   }
 }
 
-function renderPage() {
+function renderPage(scroll = true) {
   const container = document.getElementById('results');
-  const total = currentResults.length;
-  const totalPages = Math.ceil(total / PAGE_SIZE);
+  const totalPages = viewTotalPages();
   if (currentPage > totalPages) currentPage = totalPages;
   if (currentPage < 1) currentPage = 1;
 
-  const start = (currentPage - 1) * PAGE_SIZE;
-  const end = Math.min(start + PAGE_SIZE, total);
-
   let html = '';
-  for (let idx = start; idx < end; idx++) {
+  for (const idx of pageIndices(currentPage)) {   // idx 为主索引（指向 currentResults）
     html += renderCard(currentResults[idx], idx);
   }
+  if (!html) {
+    html = `<div class="empty"><div class="big-icon">📭</div><h3>该来源暂无可显示的片源</h3><p>点击「全部」查看其它来源</p></div>`;
+  }
   container.innerHTML = html;
-  container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (scroll) container.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   renderPagination(totalPages);
 }
 
-// 列举某页的全局索引
+// 列举某页的「主索引」（经过滤后；索引指向 currentResults，详情补全照旧按主索引）
 function pageIndices(p) {
-  const total = currentResults.length;
   const start = (p - 1) * PAGE_SIZE;
-  const end = Math.min(start + PAGE_SIZE, total);
+  const end = Math.min(start + PAGE_SIZE, viewIndices.length);
   const out = [];
-  for (let i = start; i < end; i++) out.push(i);
+  for (let i = start; i < end; i++) out.push(viewIndices[i]);
   return out;
 }
 
@@ -996,12 +1159,17 @@ function mergeDetail(base, d) {
 
 // 按需补全某页详情（番号搜索的精确条目已自带详情，无需补全）
 function ensurePageDetails(p) {
-  const total = currentResults.length;
-  const totalPages = Math.ceil(total / PAGE_SIZE);
+  const totalPages = viewTotalPages();
   if (p < 1 || p > totalPages) return Promise.resolve();
   if (pageEnrichPromise[p]) return pageEnrichPromise[p];
 
-  const idxs = pageIndices(p).filter(i => currentResults[i] && !currentResults[i].detail_loaded);
+  // 跳过「慢源」（走 FlareSolverr 的 JavDB/FC2）的批量预取：FlareSolverr 单实例不支持并发，
+  // 批量预取会塞满它、且让你点开单条详情时排长队。慢源详情改为「点开时单条按需补全」
+  //（openDetail → ensureItemDetail）。直连快源照常批量预取。
+  const idxs = pageIndices(p).filter(i => {
+    const m = currentResults[i];
+    return m && !m.detail_loaded && !isLazyItem(m);
+  });
   if (!idxs.length) return Promise.resolve();
 
   const items = idxs.map(i => ({ url: currentResults[i].url, source: currentResults[i].source }));
@@ -1078,12 +1246,15 @@ function renderPagination(totalPages) {
   // 下一页
   buttons += `<button class="pg-btn" ${currentPage===totalPages?'disabled':''} onclick="gotoPage(${currentPage+1})">下一页 ›</button>`;
 
-  pg.innerHTML = `<div class="pg-info">第 ${currentPage} / ${totalPages} 页，共 ${currentResults.length} 条</div><div class="pg-buttons">${buttons}</div>`;
+  const cntLabel = activeSourceFilter
+    ? `${viewIndices.length} 条（${escHtml(activeSourceFilter)}） / 共 ${currentResults.length} 条`
+    : `${currentResults.length} 条`;
+  pg.innerHTML = `<div class="pg-info">第 ${currentPage} / ${totalPages} 页，${cntLabel}</div><div class="pg-buttons">${buttons}</div>`;
 }
 
+// 注：上方已有同名 gotoPage，此处统一改为走 showPage（含页码钳制 + 按需补全详情）
 function gotoPage(p) {
-  currentPage = p;
-  renderPage();
+  showPage(p);
 }
 
 // 卡片正文（可在详情补全后单独重渲染，不影响 footer / 资源抽屉 / 翻译态）
@@ -1731,15 +1902,23 @@ async function openSettings() {
     document.getElementById('srcJavdb').checked  = (cfg.sources || []).includes('javdb');
     document.getElementById('srcAvsox').checked  = (cfg.sources || []).includes('avsox');
     document.getElementById('srcAvmoo').checked  = (cfg.sources || []).includes('avmoo');
+    document.getElementById('srcFc2').checked    = (cfg.sources || []).includes('fc2');
     document.getElementById('cfgJavdbFlare').value  = cfg.javdb_flaresolverr_url || '';
     document.getElementById('cfgJavdbFlareProxy').checked = cfg.javdb_flaresolverr_use_proxy !== false;
     document.getElementById('cfgJavdbCookie').value = cfg.javdb_cookie || '';
     document.getElementById('cfgJavdbPrefetch').checked = cfg.javdb_prefetch_extras === true;
+    // V1.4.3 FC2 数据源
+    document.getElementById('cfgFc2Flare').value  = cfg.fc2_flaresolverr_url || '';
+    document.getElementById('cfgFc2FlareProxy').checked = cfg.fc2_flaresolverr_use_proxy !== false;
+    document.getElementById('cfgFc2Cookie').value = cfg.fc2_cookie || '';
+    document.getElementById('cfgFc2Missav').checked = cfg.fc2_missav_enabled !== false;
+    document.getElementById('cfgFc2MissavBase').value = cfg.fc2_missav_base || '';
     document.getElementById('cfgMaxResults').value = cfg.max_results || 300;
     document.getElementById('cfgShowLatest').checked = cfg.show_latest !== false;
     const ll = cfg.latest_limits || {};
     document.getElementById('cfgLatestJavbus').value = ll.javbus || 100;
     document.getElementById('cfgLatestAvsox').value  = ll.avsox || 40;
+    document.getElementById('cfgLatestFc2').value    = ll.fc2 || 30;
     document.getElementById('cfgBaiduId').value  = cfg.baidu_app_id || '';
     document.getElementById('cfgBaiduKey').value = cfg.baidu_secret_key || '';
     document.getElementById('cfgAliyunId').value  = cfg.aliyun_access_key_id || '';
@@ -1763,6 +1942,7 @@ async function openSettings() {
     document.getElementById('cfgScrapeInterval').value    = cfg.scrape_interval || 300;
     document.getElementById('cfgScrapeSettle').value      = cfg.scrape_settle_seconds ?? 60;
     document.getElementById('cfgScrapeMinSize').value     = cfg.scrape_min_size_mb ?? 100;
+    document.getElementById('cfgScrapeTranslate').checked = cfg.scrape_translate_enabled !== false;
     document.getElementById('cfgScrapeMoveOnFail').checked = cfg.scrape_move_on_fail !== false;
     currentProvider = cfg.default_translate_provider || 'baidu';
     // 检测 Jackett 状态
@@ -1907,6 +2087,47 @@ async function testJavdb() {
   }
 }
 
+// FC2（fc2ppvdb）连通诊断（1.4.3）
+async function testFc2() {
+  const box = document.getElementById('fc2TestResult');
+  const btn = document.getElementById('btnFc2Test');
+  box.style.display = 'block';
+  box.style.borderColor = 'var(--border)';
+  box.innerHTML = '正在保存设置并测试…';
+  btn.disabled = true;
+  try {
+    // 先保存，确保后端用最新的 FlareSolverr / Cookie / 代理进行诊断
+    await saveSettings();
+    const resp = await fetch(`${API}/api/fc2/test`, { cache: 'no-store' });
+    const d = await safeJson(resp);
+    const ok = d.reachable;
+    box.style.borderColor = ok ? 'var(--green)' : 'var(--red)';
+    const rows = [];
+    rows.push(`<div><b style="color:${ok ? 'var(--green)' : 'var(--red)'}">${ok ? '✓ 可正常访问' : '✗ 无法获取片源'}</b></div>`);
+    rows.push(`<div>结论：${escHtml(d.message || '')}</div>`);
+    rows.push(`<div>取页方式：${escHtml(d.via || '-')}　HTTP：${escHtml(String(d.http_status ?? '-'))}　解析条数：${escHtml(String(d.item_count ?? 0))}　文章链接：${escHtml(String(d.article_links ?? 0))}</div>`);
+    rows.push(`<div>Cloudflare 拦截：${d.cf_blocked ? '<span style="color:var(--red)">是</span>' : '否'}</div>`);
+    if (d.error && d.error !== 'cf_challenge') {
+      rows.push(`<div style="color:var(--text-dim)">错误：${escHtml(d.error)}</div>`);
+    }
+    // 0 条时回显实际页面，便于定位（真盾 / 登录墙 / 选择器不匹配）
+    if (!ok && (d.page_title || d.page_snippet)) {
+      const kindMap = { cf_interstitial: 'CF 自动挑战页', login_wall: '登录墙' };
+      if (d.page_kind && kindMap[d.page_kind]) {
+        rows.push(`<div>页面类型判断：<b style="color:var(--accent)">${kindMap[d.page_kind]}</b></div>`);
+      }
+      if (d.page_title) rows.push(`<div style="color:var(--text-dim)">页面标题：${escHtml(d.page_title)}</div>`);
+      if (d.page_snippet) rows.push(`<div style="color:var(--text-dim);max-height:80px;overflow:auto">页面片段：${escHtml(d.page_snippet)}</div>`);
+    }
+    box.innerHTML = rows.join('');
+  } catch (e) {
+    box.style.borderColor = 'var(--red)';
+    box.innerHTML = '测试出错：' + escHtml(e.message || String(e));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function checkJackettStatus() {
   const dot  = document.getElementById('jackettDot');
   const text = document.getElementById('jackettStatusText');
@@ -1934,11 +2155,13 @@ async function saveSettings() {
   if (document.getElementById('srcJavdb').checked)  sources.push('javdb');
   if (document.getElementById('srcAvsox').checked)  sources.push('avsox');
   if (document.getElementById('srcAvmoo').checked)  sources.push('avmoo');
+  if (document.getElementById('srcFc2').checked)    sources.push('fc2');
   if (!sources.length) { showToast('至少选择一个数据源'); return; }
   let maxResults = parseInt(document.getElementById('cfgMaxResults').value) || 300;
   maxResults = Math.max(12, Math.min(maxResults, 500));
   const latJb = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestJavbus').value) || 100, 300));
   const latAv = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestAvsox').value) || 40, 200));
+  const latFc2 = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestFc2').value) || 30, 120));
   const payload = {
     proxy: document.getElementById('cfgProxy').value.trim(),
     sources,
@@ -1946,10 +2169,16 @@ async function saveSettings() {
     javdb_flaresolverr_use_proxy: document.getElementById('cfgJavdbFlareProxy').checked,
     javdb_cookie: document.getElementById('cfgJavdbCookie').value.trim(),
     javdb_prefetch_extras: document.getElementById('cfgJavdbPrefetch').checked,
+    // V1.4.3 FC2 数据源
+    fc2_flaresolverr_url: document.getElementById('cfgFc2Flare').value.trim(),
+    fc2_flaresolverr_use_proxy: document.getElementById('cfgFc2FlareProxy').checked,
+    fc2_cookie: document.getElementById('cfgFc2Cookie').value.trim(),
+    fc2_missav_enabled: document.getElementById('cfgFc2Missav').checked,
+    fc2_missav_base: document.getElementById('cfgFc2MissavBase').value.trim(),
     max_results: maxResults,
     show_latest: document.getElementById('cfgShowLatest').checked,
     latest_sources: sources,
-    latest_limits: { javbus: latJb, javdb: 40, avsox: latAv, avmoo: 40 },
+    latest_limits: { javbus: latJb, javdb: 40, avsox: latAv, avmoo: 40, fc2: latFc2 },
     baidu_app_id: document.getElementById('cfgBaiduId').value.trim(),
     baidu_secret_key: document.getElementById('cfgBaiduKey').value.trim(),
     aliyun_access_key_id: document.getElementById('cfgAliyunId').value.trim(),
@@ -1973,6 +2202,7 @@ async function saveSettings() {
     scrape_interval: Math.max(30, parseInt(document.getElementById('cfgScrapeInterval').value) || 300),
     scrape_settle_seconds: Math.max(5, parseInt(document.getElementById('cfgScrapeSettle').value) || 60),
     scrape_min_size_mb: Math.max(0, parseInt(document.getElementById('cfgScrapeMinSize').value) || 0),
+    scrape_translate_enabled: document.getElementById('cfgScrapeTranslate').checked,
     scrape_move_on_fail: document.getElementById('cfgScrapeMoveOnFail').checked,
   };
   currentProvider = payload.default_translate_provider;
@@ -2038,52 +2268,164 @@ document.addEventListener('keydown', e => {
 // ══════════════════════════════════════════
 // 首页最新片源（未搜索时展示）
 // ══════════════════════════════════════════
+// 把一批最新片源按番号去重合并进 currentResults（只新增/补字段，不重排，保证索引稳定）
+function mergeLatestBatch(items) {
+  if (!items || !items.length) return 0;
+  let added = 0;
+  for (const it of items) {
+    const code = (it.code || '').toUpperCase().replace(/\s+/g, '-');
+    const key = code || ('url:' + (it.url || ''));
+    if (!key) continue;
+    const ex = latestCodeIndex[key];
+    if (ex === undefined) {
+      it.sources = (it.sources && it.sources.length) ? it.sources : [it.source];
+      latestCodeIndex[key] = currentResults.length;
+      currentResults.push(it);
+      added++;
+    } else {
+      const cur = currentResults[ex];
+      const set = new Set(itemSources(cur));
+      itemSources(it).forEach(s => set.add(s));
+      cur.sources = [...set];
+      // 补充缺失字段（不覆盖已有）
+      for (const k of ['cover', 'title', 'release_date', 'duration', 'director',
+                       'studio', 'label', 'series', 'score', 'score_count']) {
+        if (!cur[k] && it[k]) cur[k] = it[k];
+      }
+      for (const k of ['actors', 'tags', 'samples', 'magnets']) {
+        if ((!cur[k] || !cur[k].length) && it[k] && it[k].length) cur[k] = it[k];
+      }
+    }
+  }
+  return added;
+}
+
+// 首页最新片源：各来源并行抓取，谁先回来谁先显示，慢源随后补入（V1.4.3）
 async function loadLatest() {
   const statusText = document.getElementById('statusText');
   const spinner = document.getElementById('spinner');
+
+  const sources = (configuredLatestSources && configuredLatestSources.length)
+    ? configuredLatestSources : ['javbus', 'javdb'];
+
+  // 新一轮加载：失效旧批次、重置状态
+  const token = ++latestLoadToken;
+  isHomeLatest = true;
+  currentResults = [];
+  latestCodeIndex = {};
+  viewIndices = [];
+  activeSourceFilter = null;
+  currentPage = 1;
+  for (const k in pageEnrichPromise) delete pageEnrichPromise[k];
+  window._latestLoadingSources = new Set(sources);
+
   spinner.classList.add('active');
-  statusText.innerHTML = '正在加载最新片源…';
-  try {
-    const resp = await fetch(`${API}/api/latest`);
-    const data = await safeJson(resp);
-    if (data.disabled) {
-      statusText.innerHTML = '输入番号、演员或关键词开始搜索';
-      return;
+  statusText.innerHTML = `正在加载最新片源…（0/${sources.length} 个来源）`;
+  document.getElementById('results').innerHTML =
+    `<div class="empty"><div class="big-icon">⏳</div><h3>正在抓取最新片源…</h3><p>各数据源并行加载，先到先显示</p></div>`;
+  renderSourceFilter();
+
+  let done = 0, okSources = 0, firstPaint = false;
+
+  const fetchOne = async (src) => {
+    try {
+      const resp = await fetch(`${API}/api/latest?source=${encodeURIComponent(src)}`);
+      const data = await safeJson(resp);
+      // 本批次已失效（用户已搜索或重新加载）：丢弃
+      if (token !== latestLoadToken || !isHomeLatest) return;
+      if (data.disabled) return;
+      if (data.success && data.results && data.results.length) {
+        okSources++;
+        mergeLatestBatch(data.results);
+        rebuildView();
+        // 首次拿到数据时把「加载中」占位换成卡片并滚动一次；之后只就地刷新不滚动
+        if (!firstPaint) { firstPaint = true; renderPage(true); }
+        else renderPage(false);
+        renderSourceFilter();
+        // 当前页详情按需补全
+        ensurePageDetails(currentPage).then(() => {
+          if (token === latestLoadToken) upgradePageCards(currentPage);
+        });
+      }
+    } catch (e) {
+      /* 单源失败不影响其它源 */
+    } finally {
+      if (token !== latestLoadToken) return;
+      done++;
+      window._latestLoadingSources.delete(src);
+      const srcs = [...new Set(currentResults.flatMap(itemSources))].join(' / ');
+      if (done < sources.length) {
+        statusText.innerHTML =
+          `🆕 最新片源加载中（${done}/${sources.length}）${srcs ? ' · 已到 <strong>' + escHtml(srcs) + '</strong>' : ''}`;
+      } else {
+        // 全部来源返回
+        spinner.classList.remove('active');
+        if (currentResults.length) {
+          statusText.innerHTML = `🆕 最新片源 · 来自 <strong>${escHtml(srcs)}</strong> · 点击数据源标签可切换 · 点击卡片查看详情`;
+        } else {
+          statusText.innerHTML = `<span style="color:var(--text-dim)">最新片源暂时为空，可能是来源被拦截或需配置代理/FlareSolverr · 可直接搜索</span>`;
+          document.getElementById('results').innerHTML =
+            `<div class="empty"><div class="big-icon">🎬</div><h3>暂无最新片源</h3><p>检查代理 / 数据源设置，或直接搜索</p></div>`;
+        }
+        renderSourceFilter();
+      }
     }
-    if (data.success && data.results && data.results.length) {
-      isHomeLatest = true;
-      const srcs = [...new Set(data.results.flatMap(r => r.sources || [r.source]).filter(Boolean))].join(' / ');
-      statusText.innerHTML = `🆕 最新片源 · 来自 <strong>${escHtml(srcs)}</strong> · 点击卡片查看详情`;
-      renderResults(data.results);
-    } else {
-      statusText.innerHTML = data.detail
-        ? `<span style="color:var(--text-dim)">最新片源加载失败：${escHtml(data.detail)} · 可直接搜索</span>`
-        : '输入番号、演员或关键词开始搜索';
-    }
-  } catch (e) {
-    statusText.innerHTML = '输入番号、演员或关键词开始搜索';
-  } finally {
-    spinner.classList.remove('active');
-  }
+  };
+
+  // 并行抓取所有来源
+  await Promise.all(sources.map(fetchOne));
 }
 
 // ══════════════════════════════════════════
 // 启动
 // ══════════════════════════════════════════
 // 启动时读取少量影响浏览行为的运行配置（如 JavDB 样品图预取开关）
+let showLatestCfg = true;
 async function loadRuntimeConfig() {
   try {
     const resp = await fetch(`${API}/api/config`, { cache: 'no-store' });
     const cfg = await safeJson(resp);
     prefetchJavdbExtras = cfg.javdb_prefetch_extras === true;
     currentProvider = cfg.default_translate_provider || currentProvider;
+    showLatestCfg = cfg.show_latest !== false;
+    // 首页最新的来源：优先 latest_sources，回退到 sources
+    configuredLatestSources = (cfg.latest_sources && cfg.latest_sources.length)
+      ? cfg.latest_sources
+      : (cfg.sources && cfg.sources.length ? cfg.sources : ['javbus', 'javdb']);
+    // 慢源（走 FlareSolverr）：配了 FlareSolverr 时，JavDB/FC2 详情改为点开按需补全。
+    // FC2 始终需要 FlareSolverr；二者任一配了 FlareSolverr 即视为慢源开启。
+    const fsOn = !!((cfg.javdb_flaresolverr_url || '').trim() || (cfg.fc2_flaresolverr_url || '').trim());
+    lazyDetailSources = fsOn ? ['javdb', 'fc2'] : ['fc2'];
   } catch (e) { /* 忽略：用默认值 */ }
+}
+
+// 版本检测：显示当前版本，有新版本时标红点并可点击跳转 release（V1.4.3）
+async function checkVersion() {
+  const chip = document.getElementById('versionChip');
+  if (!chip) return;
+  try {
+    const resp = await fetch(`${API}/api/version`, { cache: 'no-store' });
+    const d = await safeJson(resp);
+    chip.textContent = 'v' + (d.current || '1.4.3-beta');
+    if (d.update_available && d.latest) {
+      chip.classList.add('has-update', 'clickable');
+      chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;
+      chip.innerHTML = `v${escHtml(d.current)} <span class="update-dot"></span>`;
+      chip.onclick = () => window.open(d.release_url || `https://github.com/seaside111/jav-search/releases`, '_blank');
+    } else {
+      chip.title = d.latest
+        ? `当前 v${d.current}，已是最新（GitHub: ${d.latest}）`
+        : `当前 v${d.current}`;
+    }
+  } catch (e) { /* 检测失败保留静态版本号 */ }
 }
 
 async function init() {
   await checkAuthStatus();   // 未登录会跳转，登录态/免登录则继续
-  await loadRuntimeConfig(); // 读取预取开关等运行配置
-  loadLatest();              // 加载首页最新片源
+  await loadRuntimeConfig(); // 读取预取开关 / 首页最新来源等运行配置
+  checkVersion();            // 后台检测版本更新（不阻塞）
+  if (showLatestCfg) loadLatest();   // 加载首页最新片源（各源并行、边到边显示）
+  else document.getElementById('statusText').innerHTML = '输入番号、演员或关键词开始搜索';
 }
 init();
 </script>

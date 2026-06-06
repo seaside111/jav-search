@@ -1,0 +1,602 @@
+"""
+FC2-PPV 刮削器（V1.4.3 新增数据源）
+
+数据源：fc2ppvdb.com —— FC2-PPV 专用数据库，字段最规整（番号/标题/封面/女优/卖家/
+        贩卖日/收录时间/标签/马赛克有无）。
+
+与 JavBus 系（avsox/avmoo 复用 _javbus_base）完全不同：fc2ppvdb 是 Laravel + Tailwind
+站点，且强制 Cloudflare Turnstile 人机验证——直连只能拿到验证页。因此本模块复用
+JavDB 那一套「FlareSolverr 优先 + 增强 httpx 兜底」的取页策略；FlareSolverr 地址默认
+复用 JavDB 的配置（javdb_flaresolverr_url），也可用 fc2_flaresolverr_url 单独指定。
+
+FC2 站点不提供磁力；下载链路仍走 Jackett/sukebei（用番号 FC2-PPV-xxxxxxx 检索）。
+"""
+import re
+import asyncio
+from typing import Optional
+import httpx
+from bs4 import BeautifulSoup
+
+from . import _missav
+from ._fsgate import flaresolverr_request as _fs_request
+
+FC2_BASE = "https://fc2ppvdb.com"
+SOURCE = "FC2"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+              "image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "ja,zh-CN;q=0.9,zh;q=0.8,en;q=0.7",
+    "Referer": FC2_BASE + "/",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+}
+
+
+def _abs(href: str) -> str:
+    if not href:
+        return ""
+    if href.startswith("//"):
+        return "https:" + href
+    if href.startswith("http"):
+        return href
+    if href.startswith("/"):
+        return FC2_BASE + href
+    return FC2_BASE + "/" + href
+
+
+def _extract_number(query: str) -> str:
+    """从各种写法里抽取 FC2 纯数字番号：
+       FC2-PPV-1234567 / FC2PPV1234567 / fc2 1234567 / 1234567 → 1234567"""
+    if not query:
+        return ""
+    m = re.search(r"(\d{5,7})", query)
+    return m.group(1) if m else ""
+
+
+def _display_code(num: str) -> str:
+    """统一展示/检索用番号：FC2-PPV-1234567（sukebei/Jackett 最通用的写法）。"""
+    return f"FC2-PPV-{num}" if num else "FC2"
+
+
+# ──────────────────────────────────────────────
+# 运行时配置（FlareSolverr / 手动 Cookie）
+# FlareSolverr 默认复用 JavDB 的配置，免去重复填写
+# ──────────────────────────────────────────────
+def _runtime_options() -> dict:
+    try:
+        from config_manager import load as load_config
+        cfg = load_config()
+        fs = (cfg.get("fc2_flaresolverr_url") or cfg.get("javdb_flaresolverr_url") or "").strip()
+        use_proxy = cfg.get("fc2_flaresolverr_use_proxy",
+                            cfg.get("javdb_flaresolverr_use_proxy", True))
+        return {
+            "flaresolverr_url": fs,
+            "cookie": (cfg.get("fc2_cookie") or "").strip(),
+            "flaresolverr_use_proxy": use_proxy,
+        }
+    except Exception:
+        return {"flaresolverr_url": "", "cookie": "", "flaresolverr_use_proxy": True}
+
+
+def _merge_cookies(extra_cookie: str = "") -> dict:
+    cookies = {}
+    if extra_cookie:
+        for part in extra_cookie.split(";"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if k:
+                    cookies[k] = v
+    return cookies
+
+
+def _is_cf_challenge(html: str, status: int = 200) -> bool:
+    """
+    是否为 Cloudflare 自动验证/拦截页（interstitial），而非真正的 fc2ppvdb 页面。
+
+    关键：fc2ppvdb **正常页面也内嵌 Cloudflare Turnstile 的 widget**
+    （challenges.cloudflare.com/turnstile/v0/api.js、cf-turnstile、turnstile 等），
+    所以绝不能把 'turnstile' 当被盾标记——否则会把 FlareSolverr **过盾后拿到的真实页面**
+    误判成挑战页（HTTP 200 却报 0 条 + cf_blocked）。
+
+    真正的 CF interstitial 特征：
+      - 标题级提示语（just a moment / checking your browser / attention required）；
+      - 注入 /cdn-cgi/challenge-platform/ 脚本或 cf-chl-bypass（这是 CF 自动挑战，
+        区别于站点自带的 challenges.cloudflare.com/turnstile widget）。
+    且页面没有任何业务内容（无 /articles/ 链接）。只要含 /articles/ 文章链接即视为正常页。
+    """
+    if status in (403, 429, 503):
+        return True
+    if not html:
+        return False
+    low = html.lower()
+    # 含真实业务链接（文章）→ 一定是过盾后的真实页面，直接放行
+    if "/articles/" in low:
+        return False
+    head = low[:6000]
+    interstitial = (
+        "just a moment",
+        "checking your browser",
+        "attention required",
+        "enable javascript and cookies to continue",
+        "/cdn-cgi/challenge-platform/",   # CF 自动挑战脚本（非站点 Turnstile widget）
+        "cf-chl-bypass",
+        "cf-browser-verification",
+        "<title>too many requests",
+    )
+    return any(m in head for m in interstitial)
+
+
+# ──────────────────────────────────────────────
+# 取页层：FlareSolverr 优先，否则增强 httpx + 重试
+# 返回 (html, status, error)。error == 'cf_challenge' 表示命中盾。
+# ──────────────────────────────────────────────
+async def _fetch_via_flaresolverr(url: str, flaresolverr_url: str, proxy: Optional[str],
+                                  cookies: Optional[dict] = None) -> tuple[str, int, str]:
+    """统一走 _fsgate 的智能适配 + 全局串行；FC2 用更长的 maxTimeout/读超时（页面较慢）。"""
+    return await _fs_request(url, flaresolverr_url, proxy, cookies,
+                             max_timeout=45000, read_timeout=75.0)
+
+
+async def _fetch_html(url: str, proxy: Optional[str], opts: Optional[dict] = None,
+                      retries: int = 2) -> tuple[str, int, str]:
+    opts = opts or _runtime_options()
+    cookies = _merge_cookies(opts.get("cookie", ""))
+    flaresolverr = opts.get("flaresolverr_url", "")
+    if flaresolverr:
+        fs_proxy = proxy if opts.get("flaresolverr_use_proxy", True) else None
+        html, status, err = await _fetch_via_flaresolverr(url, flaresolverr, fs_proxy,
+                                                          cookies or None)
+        if err and cookies and "flaresolverr:" in err:
+            html2, status2, err2 = await _fetch_via_flaresolverr(url, flaresolverr, fs_proxy, None)
+            if not err2:
+                html, status, err = html2, status2, ""
+        if err:
+            return html, status, err
+        if status and status >= 400:
+            if status in (403, 429, 503) or _is_cf_challenge(html, status):
+                return html, status, "cf_challenge"
+            return html, status, f"HTTP {status}"
+        if _is_cf_challenge(html, status):
+            return html, status or 200, "cf_challenge"
+        return html, status or 200, ""
+
+    proxy_arg = proxy or None
+    last_err, last_status = "", 0
+    for attempt in range(retries + 1):
+        try:
+            async with httpx.AsyncClient(
+                headers=HEADERS, cookies=cookies, proxy=proxy_arg,
+                timeout=20, follow_redirects=True,
+            ) as client:
+                resp = await client.get(url)
+            last_status = resp.status_code
+            if resp.status_code != 200:
+                last_err = f"HTTP {resp.status_code}"
+                await asyncio.sleep(0.6 * (attempt + 1))
+                continue
+            if _is_cf_challenge(resp.text, resp.status_code):
+                last_err = "cf_challenge"
+                await asyncio.sleep(0.6 * (attempt + 1))
+                continue
+            return resp.text, resp.status_code, ""
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            await asyncio.sleep(0.6 * (attempt + 1))
+    return "", last_status, last_err
+
+
+# ──────────────────────────────────────────────
+# 标签字段提取（列表卡 + 详情共用）
+# fc2ppvdb 用「<div>女優：<span>...</span></div>」这种「标签前缀 + span」结构，
+# 这种基于文本前缀的提取对 Tailwind class 频繁变动免疫。
+# ──────────────────────────────────────────────
+_LABELS = {
+    "actress": ("女優：", "女优："),
+    "tags": ("タグ：", "标签："),
+    "release_date": ("販売日：", "贩卖日："),
+    "seller": ("販売者：", "贩卖者："),
+    "duration": ("収録時間：", "收录时间："),
+    "mosaic": ("モザイク：",),
+}
+
+
+def _scan_labels(scope) -> dict:
+    """在给定节点范围内扫描带已知前缀的 div，提取字段。"""
+    out = {"actress": [], "tags": [], "release_date": "", "seller": "",
+           "duration": "", "mosaic": ""}
+    for div in scope.find_all("div"):
+        txt = div.get_text(" ", strip=True)
+        if not txt or "：" not in txt:
+            continue
+        for field, prefixes in _LABELS.items():
+            if any(txt.startswith(p) for p in prefixes):
+                if field in ("actress", "tags"):
+                    if not out[field]:
+                        out[field] = [a.get_text(strip=True)
+                                      for a in div.find_all("a") if a.get_text(strip=True)]
+                else:
+                    if not out[field]:
+                        span = div.find("span")
+                        val = (span.get_text(strip=True) if span
+                               else txt.split("：", 1)[-1].strip())
+                        out[field] = val
+                break
+    return out
+
+
+def _dur_to_text(s: str) -> str:
+    """收录时间原样保留（如 '1:23:45' 或 '83分'），列表/详情直接展示。"""
+    return (s or "").strip()
+
+
+# ──────────────────────────────────────────────
+# 列表页解析（首页最新 / 搜索结果）
+# ──────────────────────────────────────────────
+def _parse_list(html: str, max_results: int = 300) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    items, seen = [], set()
+
+    # 以「指向 /articles/{数字} 的链接」为种子（不强制锚点内含 <img>——首页卡片的
+    # 封面与标题常拆成两个链接，图片也可能是懒加载/背景图），按番号去重。
+    for a in soup.find_all("a", href=True):
+        m = re.search(r"/articles/(\d+)", a["href"])
+        if not m:
+            continue
+        num = m.group(1)
+        if num in seen:
+            continue
+
+        # 向上收敛到「只包含本番号」的最紧凑容器：一旦父节点开始包含其它番号即停止，
+        # 防止把相邻卡片的标签信息混进来。
+        card, parent, hops = a, a.parent, 0
+        while parent is not None and hops < 6:
+            nums = set(re.findall(r"/articles/(\d+)", str(parent)))
+            if len(nums) > 1:
+                break
+            card, parent = parent, parent.parent
+            hops += 1
+
+        # 封面：容器内首张图（含懒加载属性）
+        img = card.find("img")
+        cover = ""
+        if img:
+            cover = _abs(img.get("src") or img.get("data-src")
+                         or img.get("data-original") or img.get("data-lazy-src") or "")
+        # fc2ppvdb 常缺封面（尤其下架条目）→ 用 MissAV 的确定性封面 URL 兜底（零额外请求，
+        # 404 由前端图片代理优雅降级）。
+        if not cover:
+            cover = _missav.cover_url(num)
+
+        # 标题：容器内首个「有文字且非纯番号」的文章链接；兜底 img alt / 番号
+        title = ""
+        for ta in card.find_all("a", href=True):
+            if not re.search(r"/articles/\d+", ta["href"]):
+                continue
+            t = ta.get_text(strip=True)
+            if t and not re.fullmatch(r"\d+", t):
+                title = t
+                break
+        if not title and img:
+            title = img.get("alt", "").strip()
+
+        labels = _scan_labels(card)
+        seen.add(num)
+        items.append({
+            "code": _display_code(num),
+            "title": title or _display_code(num),
+            "cover": cover,
+            "url": f"{FC2_BASE}/articles/{num}",
+            "source": SOURCE,
+            "release_date": labels["release_date"],
+            "duration": _dur_to_text(labels["duration"]),
+            "director": labels["seller"],
+            "studio": labels["seller"],
+            "label": "FC2",
+            "series": "",
+            "score": "",
+            "score_count": "",
+            "has_magnet": False,
+            "actors": [{"name": n, "avatar": ""} for n in labels["actress"]],
+            "tags": labels["tags"],
+            "samples": [],
+            "magnets": [],
+            "description": "",
+            "detail_loaded": False,
+        })
+        if len(items) >= max_results:
+            break
+    return items
+
+
+async def _fetch_list_pages(url_builder, proxy, max_results, max_pages=10) -> list[dict]:
+    opts = _runtime_options()
+    # 走 FlareSolverr 时每页都要过盾、很慢，只抓 1 页（约 20-30 条），避免超单源超时被丢弃。
+    if opts.get("flaresolverr_url"):
+        max_pages = 1
+    all_items, seen = [], set()
+    for page in range(1, max_pages + 1):
+        page_url = url_builder(page)
+        html, status, err = await _fetch_html(page_url, proxy, opts)
+        if err:
+            print(f"[FC2] list page{page} 失败: {err} (HTTP {status}) {page_url}")
+            break
+        page_items = _parse_list(html, max_results)
+        if not page_items:
+            break
+        added = 0
+        for it in page_items:
+            key = it["code"]
+            if key in seen:
+                continue
+            seen.add(key)
+            all_items.append(it)
+            added += 1
+            if len(all_items) >= max_results:
+                break
+        if len(all_items) >= max_results or added == 0:
+            break
+    return all_items[:max_results]
+
+
+# ──────────────────────────────────────────────
+# 列表级搜索
+# ──────────────────────────────────────────────
+async def search_list(query: str, mode: str, proxy: Optional[str] = None,
+                      max_results: int = 300) -> list[dict]:
+    q = (query or "").strip()
+    num = _extract_number(q)
+
+    # 番号搜索：直接命中 /articles/{num} 详情页，解析成单条卡片返回（最稳最快）。
+    # 判定为番号：mode==code，或查询本身就是 FC2 写法 / 纯 6-7 位数字。
+    looks_like_code = bool(num) and (
+        mode == "code"
+        or re.search(r"fc2", q, re.I)
+        or re.fullmatch(r"\d{5,7}", q)
+    )
+    if looks_like_code:
+        detail = await fetch_detail(f"{FC2_BASE}/articles/{num}", proxy)
+        if detail:
+            detail = dict(detail)
+            detail["detail_loaded"] = True
+            return [detail]
+        return []
+
+    # 关键词 / 女优：站内搜索
+    from urllib.parse import quote
+    kw = quote(q)
+
+    def build(page):
+        base = f"{FC2_BASE}/search?stext={kw}"
+        return base if page == 1 else f"{base}&page={page}"
+
+    return await _fetch_list_pages(build, proxy, max_results, max_pages=10)
+
+
+# ──────────────────────────────────────────────
+# 首页最新片源
+# ──────────────────────────────────────────────
+async def get_latest(proxy: Optional[str] = None, max_results: int = 40) -> list[dict]:
+    def build(page):
+        return FC2_BASE + ("/" if page == 1 else f"/?page={page}")
+    pages = max(2, min(max_results // 20 + 1, 6))
+    items = await _fetch_list_pages(build, proxy, max_results, max_pages=pages)
+    if not items:
+        # 兜底：文章列表页
+        items = await _fetch_list_pages(
+            lambda p: f"{FC2_BASE}/articles" + ("" if p == 1 else f"?page={p}"),
+            proxy, max_results, max_pages=pages)
+    return items
+
+
+# ──────────────────────────────────────────────
+# 详情
+# ──────────────────────────────────────────────
+async def fetch_detail(url: str, proxy: Optional[str] = None) -> Optional[dict]:
+    """
+    抓 FC2 详情：fc2ppvdb 为主，**并发**抓 MissAV 补全缺失的封面/标题/女优/标签
+    （fc2ppvdb 对下架条目常只剩番号骨架）。两边并发，几乎不增加额外延迟。
+    """
+    num = _extract_number(url)
+    fc2_task = _fetch_html(url, proxy, _runtime_options())
+    missav_task = _missav.fetch_fc2(num, proxy) if num else _noop()
+    (html, status, err), mv = await asyncio.gather(fc2_task, missav_task,
+                                                   return_exceptions=False)
+
+    info = None
+    if not err and html:
+        info = _parse_detail(html, url)
+    if info is None and not mv:
+        # fc2ppvdb 抓取失败且 MissAV 也无数据
+        print(f"[FC2] detail 失败 {url}: {err} (HTTP {status})")
+        return None
+    if info is None:
+        # fc2ppvdb 没拿到，但 MissAV 有 → 用 MissAV 兜底拼一个最小详情
+        info = {
+            "code": _display_code(num), "title": _display_code(num), "cover": "",
+            "url": url if url.startswith("http") else f"{FC2_BASE}/articles/{num}",
+            "source": SOURCE, "release_date": "", "duration": "", "director": "",
+            "studio": "", "label": "FC2", "series": "", "score": "", "score_count": "",
+            "actors": [], "tags": [], "samples": [], "magnets": [], "description": "",
+            "detail_loaded": True,
+        }
+
+    return _merge_missav(info, mv, num)
+
+
+async def _noop():
+    return None
+
+
+def _merge_missav(info: dict, mv: Optional[dict], num: str) -> dict:
+    """把 MissAV 数据并入 fc2ppvdb 详情：只补缺，不覆盖 fc2ppvdb 已有的结构化字段。"""
+    if not mv:
+        return info
+    real_title = info.get("title") and info["title"] != _display_code(num)
+    if not real_title and mv.get("title"):
+        info["title"] = mv["title"]
+    if not info.get("cover") and mv.get("cover"):
+        info["cover"] = mv["cover"]
+    if not info.get("actors") and mv.get("actors"):
+        info["actors"] = [{"name": n, "avatar": ""} for n in mv["actors"]]
+    if not info.get("tags") and mv.get("tags"):
+        info["tags"] = mv["tags"]
+    # 样品图（MissAV 播放器逐帧截图）：fc2ppvdb 没有时用 MissAV 的
+    if not info.get("samples") and mv.get("samples"):
+        info["samples"] = mv["samples"]
+    if not info.get("preview_video") and mv.get("preview_video"):
+        info["preview_video"] = mv["preview_video"]
+    # 标记来源，便于前端展示「FC2 + MissAV」
+    srcs = info.get("sources") or [info.get("source", SOURCE)]
+    if "MissAV" not in srcs:
+        srcs = list(srcs) + ["MissAV"]
+    info["sources"] = srcs
+    return info
+
+
+def _parse_detail(html: str, url: str) -> Optional[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    m = re.search(r"/articles/(\d+)", url)
+    num = m.group(1) if m else _extract_number(url)
+
+    # 404 / 已删除
+    page_txt = soup.get_text(" ", strip=True)[:400]
+    if any(k in page_txt for k in ("お探しの商品が見つかりません", "404 Not Found",
+                                   "このページは削除されました")):
+        return None
+
+    # 标题：详情页 h2 > a。注意：不要回退 <title>——fc2ppvdb 的 <title> 是站名 "FC2PPVDB"，
+    # 并非影片标题；真实标题缺失时留空，交由 MissAV 补全或回退番号。
+    title = ""
+    h2a = soup.select_one("h2 a")
+    if h2a:
+        title = h2a.get_text(strip=True)
+    if title.strip().upper() in ("FC2PPVDB", "FC2 PPV DB"):
+        title = ""
+
+    # 封面：alt 等于番号的 img，兜底取页面首张文章相关图
+    cover = ""
+    img = soup.select_one(f'img[alt="{num}"]') if num else None
+    if not img:
+        img = soup.select_one("section img, main img, img")
+    if img:
+        cover = _abs(img.get("src") or img.get("data-src") or "")
+
+    labels = _scan_labels(soup)
+
+    # 样品图：典型为指向图片的链接（lightbox），低噪声
+    samples = []
+    for a in soup.select('a[href$=".jpg"], a[href$=".jpeg"], a[href$=".png"], a[href$=".webp"]'):
+        href = _abs(a.get("href", ""))
+        if href and href != cover and href not in samples:
+            samples.append(href)
+    samples = samples[:30]
+
+    # 简介：fc2ppvdb 多为标题即简介，保留标题作为兜底描述
+    info = {
+        "code": _display_code(num),
+        "title": title or _display_code(num),
+        "cover": cover,
+        "url": url if url.startswith("http") else f"{FC2_BASE}/articles/{num}",
+        "source": SOURCE,
+        "release_date": labels["release_date"],
+        "duration": _dur_to_text(labels["duration"]),
+        "director": labels["seller"],
+        "studio": labels["seller"],
+        "label": "FC2",
+        "series": "",
+        "score": "",
+        "score_count": "",
+        "actors": [{"name": n, "avatar": ""} for n in labels["actress"]],
+        "tags": labels["tags"],
+        "samples": samples,
+        "magnets": [],          # FC2 站点不提供磁力，下载走 Jackett/sukebei
+        "description": "",
+        "uncensored": (labels["mosaic"] == "無") if labels["mosaic"] else None,
+        "detail_loaded": True,
+    }
+    return info
+
+
+# ──────────────────────────────────────────────
+# 连通诊断（与 JavDB 一致的接口风格，便于前端复用）
+# ──────────────────────────────────────────────
+def _inspect_page(html: str) -> dict:
+    """解析不到片源时，回显页面标题/可见文本片段/文章链接数，辅助区分
+       「真挑战页 / 登录墙 / 选择器不匹配 / 空页」。"""
+    soup = BeautifulSoup(html or "", "html.parser")
+    t = soup.select_one("title")
+    title = t.get_text(strip=True) if t else ""
+    # 文章链接数：FlareSolverr 真过盾后的列表页应 >0
+    article_links = len(set(re.findall(r"/articles/(\d+)", html or "")))
+    for tag in soup(["script", "style", "noscript"]):
+        tag.extract()
+    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))[:300]
+
+    low = (title + " " + text).lower()
+    kind = ""
+    if any(k in low for k in ("just a moment", "checking your browser",
+                              "attention required", "/cdn-cgi/challenge-platform/")):
+        kind = "cf_interstitial"
+    elif any(k in low for k in ("ログイン", "log in", "sign in", "登录", "登入",
+                                "パスワード", "password", "メールアドレス")):
+        kind = "login_wall"
+    return {"title": title, "snippet": text, "article_links": article_links, "kind": kind}
+
+
+async def diagnose(proxy: Optional[str] = None) -> dict:
+    opts = _runtime_options()
+    via = "flaresolverr" if opts.get("flaresolverr_url") else "httpx"
+    html, status, err = await _fetch_html(FC2_BASE + "/", proxy, opts, retries=1)
+    cf_blocked = (err == "cf_challenge") or _is_cf_challenge(html, status)
+    items = _parse_list(html, 5) if html and not cf_blocked else []
+    reachable = bool(items)
+
+    page = _inspect_page(html) if html else {"title": "", "snippet": "",
+                                             "article_links": 0, "kind": ""}
+
+    if reachable:
+        message = f"连接正常，解析到 {len(items)} 条最新片源。"
+    elif not opts.get("flaresolverr_url"):
+        message = ("FC2PPVDB 启用了 Cloudflare Turnstile 人机验证，直连无法通过。"
+                   "请配置 FlareSolverr（可复用 JavDB 的 FlareSolverr 地址）。")
+    elif err and err.startswith("flaresolverr"):
+        message = f"FlareSolverr 报错：{err.split('flaresolverr:', 1)[-1].strip() or err}"
+    elif cf_blocked:
+        message = ("命中 Cloudflare 自动挑战页，FlareSolverr 未能过验证——"
+                   "建议升级 FlareSolverr 到最新版、确认其内置 Chrome 正常，或更换出口 IP/节点。")
+    elif page.get("article_links", 0) > 0:
+        # FlareSolverr 已过盾拿到真实页面（含文章链接），但列表选择器没匹配到条目
+        message = (f"FlareSolverr 已过盾并拿到页面（检测到 {page['article_links']} 个文章链接），"
+                   "但列表解析未命中条目——可能 fc2ppvdb 列表页结构有变。"
+                   "请把下方「页面标题/片段」反馈以便调整选择器；详情页与番号搜索通常仍可用。")
+    elif page.get("kind") == "login_wall":
+        message = ("返回的是登录页：该出口 IP 被要求登录。可在设置填入浏览器登录后导出的 "
+                   "fc2ppvdb Cookie，或更换出口节点。")
+    elif err:
+        message = f"请求失败：{err}。检查代理与 FlareSolverr 是否可访问 fc2ppvdb.com。"
+    else:
+        message = "未解析到条目，页面结构可能变化或被拦截（见下方页面回显）。"
+
+    return {
+        "reachable": reachable,
+        "cf_blocked": cf_blocked,
+        "http_status": status,
+        "item_count": len(items),
+        "via": via,
+        "error": err,
+        "page_title": page.get("title", ""),
+        "page_snippet": page.get("snippet", ""),
+        "article_links": page.get("article_links", 0),
+        "page_kind": page.get("kind", ""),
+        "message": message,
+    }

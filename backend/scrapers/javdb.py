@@ -20,6 +20,9 @@ from typing import Optional
 import httpx
 from bs4 import BeautifulSoup
 
+from ._fsgate import (flaresolverr_request as _fs_request, fs_candidates as _fs_candidates,
+                      normalize_fs_url as _normalize_fs_url, resolved_endpoint as _fs_resolved)
+
 JAVDB_BASE = "https://javdb.com"
 SOURCE = "JavDB"
 
@@ -78,27 +81,6 @@ def _runtime_options() -> dict:
         return {"flaresolverr_url": "", "cookie": "", "flaresolverr_use_proxy": True}
 
 
-def _split_proxy_auth(proxy: str) -> tuple[str, str, str]:
-    """
-    拆分代理 URL 中的账号密码：
-      http://user:pass@host:port  ->  (http://host:port, user, pass)
-    Chrome（FlareSolverr 用）命令行不支持内联账密，须拆开单独传。
-    """
-    if not proxy:
-        return "", "", ""
-    from urllib.parse import urlsplit, urlunsplit
-    try:
-        p = urlsplit(proxy)
-        user = p.username or ""
-        pwd = p.password or ""
-        # 重建不含账密的 netloc
-        host = p.hostname or ""
-        netloc = host + (f":{p.port}" if p.port else "")
-        clean = urlunsplit((p.scheme, netloc, p.path, p.query, p.fragment))
-        return clean, user, pwd
-    except Exception:
-        return proxy, "", ""
-
 
 def _merge_cookies(extra_cookie: str = "") -> dict:
     """合并基础 Cookie 与用户手动填入的 Cookie 字符串（如 cf_clearance=xxx; ...）。"""
@@ -143,46 +125,11 @@ def _is_cf_challenge(html: str, status: int = 200) -> bool:
 async def _fetch_via_flaresolverr(url: str, flaresolverr_url: str, proxy: Optional[str],
                                   cookies: Optional[dict] = None) -> tuple[str, int, str]:
     """
-    通过 FlareSolverr 获取过盾后的 HTML。cookies 用于传入 over18 等，绕过年龄门。
-    会捕获 FlareSolverr 自身的 status/message，错误时原样回传，便于定位。
-    proxy 若带账号密码会拆成 url/username/password 单独传（否则 Chrome 报 ERR_NO_SUPPORTED_PROXIES）。
+    通过 FlareSolverr 获取过盾后的 HTML（统一走 _fsgate 的智能适配 + 全局串行）。
+    cookies 用于传入 over18 等绕过年龄门；地址智能适配 / 候选回退 / 缓存 / 串行均由共享层处理。
     """
-    endpoint = flaresolverr_url.rstrip("/")
-    if not endpoint.endswith("/v1"):
-        endpoint += "/v1"
-    payload = {"cmd": "request.get", "url": url, "maxTimeout": 40000}
-    if proxy:
-        purl, puser, ppass = _split_proxy_auth(proxy)
-        pobj = {"url": purl}
-        if puser:
-            pobj["username"] = puser
-        if ppass:
-            pobj["password"] = ppass
-        payload["proxy"] = pobj
-    # FlareSolverr 用自己的浏览器会话，须显式传 Cookie 才能带上 over18/locale 绕过年龄门。
-    # 注意：仅传 name/value（不带 domain），部分 FlareSolverr 版本对带 domain 的 cookie 会报 500。
-    if cookies:
-        payload["cookies"] = [{"name": k, "value": v} for k, v in cookies.items()]
-    try:
-        async with httpx.AsyncClient(timeout=70) as client:
-            resp = await client.post(endpoint, json=payload)
-        # 即使 POST 非 200，也尽量解析 JSON 拿到 FlareSolverr 的 message
-        fs_status, fs_msg, html, status = "", "", "", 0
-        try:
-            data = resp.json()
-            fs_status = data.get("status", "") or ""
-            fs_msg = data.get("message", "") or ""
-            sol = data.get("solution") or {}
-            html = sol.get("response", "") or ""
-            status = int(sol.get("status", 0) or 0)
-        except Exception:
-            status = resp.status_code
-        if resp.status_code != 200 or fs_status.lower() == "error":
-            detail = fs_msg or f"HTTP {resp.status_code}"
-            return html, status or resp.status_code, f"flaresolverr: {detail}"
-        return html, status or 200, ""
-    except Exception as e:
-        return "", 0, f"flaresolverr 异常: {type(e).__name__}: {e}"
+    return await _fs_request(url, flaresolverr_url, proxy, cookies,
+                             max_timeout=40000, read_timeout=70.0)
 
 
 async def _fetch_html(url: str, proxy: Optional[str], opts: Optional[dict] = None,
@@ -201,7 +148,9 @@ async def _fetch_html(url: str, proxy: Optional[str], opts: Optional[dict] = Non
         # 带 Cookie 报错时，自动重试一次不带 Cookie：
         # 某些 FlareSolverr 版本对 cookies 字段敏感会直接 500，去掉 Cookie 往往就能过盾
         # （代价是可能停在年龄门，但至少能拿到页面、由上层识别）。
-        if err and cookies and "flaresolverr" in err:
+        # 仅在「确实连上了」FlareSolverr 却报错时重试（err 形如 'flaresolverr: ...'）；
+        # 连不上（'flaresolverr 异常: ConnectTimeout' 等）再探一轮也是白费，跳过。
+        if err and cookies and "flaresolverr:" in err:
             html2, status2, err2 = await _fetch_via_flaresolverr(url, flaresolverr, fs_proxy, None)
             if not err2:
                 html, status, err = html2, status2, ""
@@ -615,11 +564,17 @@ async def diagnose(proxy: Optional[str] = None) -> dict:
       - message:     人类可读结论
     """
     opts = _runtime_options()
-    via = "flaresolverr" if opts.get("flaresolverr_url") else "httpx"
+    fs_raw = opts.get("flaresolverr_url") or ""
+    via = "flaresolverr" if fs_raw else "httpx"
     test_url = f"{JAVDB_BASE}/censored?sort_type=0"
 
     html, status, err = await _fetch_html(test_url, proxy, opts, retries=1)
     exit_ip = await _probe_exit_ip(proxy)
+
+    # FlareSolverr 实际连通的地址（智能适配后）：用于回显，并提示是否做了自动改写
+    fs_endpoint = _fs_resolved(fs_raw) if fs_raw else ""
+    fs_cands = _fs_candidates(fs_raw) if fs_raw else []
+    fs_adapted = bool(fs_endpoint and fs_endpoint != _normalize_fs_url(fs_raw))
 
     cf_blocked = (err == "cf_challenge") or _is_cf_challenge(html, status)
     items = _parse_list(html) if html and not cf_blocked else []
@@ -684,16 +639,25 @@ async def diagnose(proxy: Optional[str] = None) -> dict:
     if not reachable and not cf_blocked and (err or "").startswith("HTTP 5"):
         message = f"上游返回 {err}（多为代理/FlareSolverr 到 JavDB 的链路错误，非 CF 盾）。"
 
+    # FlareSolverr 地址自动适配提示：用户填了 localhost 但实际通过宿主机网关/容器名连上时点明
+    fs_hint = ""
+    if fs_adapted and fs_endpoint:
+        fs_hint = f"已自动把 FlareSolverr 地址适配为 {fs_endpoint} 并连通（建议把设置里的地址直接改成它）。"
+
     return {
         "reachable": reachable,
         "cf_blocked": cf_blocked,
         "http_status": status,
         "item_count": len(items),
         "via": via,
+        "fs_endpoint": fs_endpoint,          # 实际连通的 FlareSolverr 地址（智能适配结果）
+        "fs_candidates": fs_cands,           # 本次自动尝试过的候选地址（按顺序）
+        "fs_adapted": fs_adapted,            # 是否对用户填写的地址做了自动改写
         "error": err,
         "exit_ip": exit_ip,
         "page_title": page.get("title", ""),
         "page_snippet": page.get("snippet", ""),
         "page_kind": page.get("kind", ""),
-        "message": (message + (" " + ip_hint if ip_hint else "")).strip(),
+        "message": (message + (" " + fs_hint if fs_hint else "")
+                    + (" " + ip_hint if ip_hint else "")).strip(),
     }

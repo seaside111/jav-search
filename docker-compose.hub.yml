@@ -1,16 +1,22 @@
-# ── 零构建部署 ──
-# 直接拉取已构建好的镜像，无需下载源码、无需本地 build。
-# 适合给别人快速部署：只需这一个文件，放到任意目录执行：
+# ── 一键部署（Beta，零构建）──
+# 直接拉取已构建好的镜像 + 内置 FlareSolverr，无需源码、无需 build。
+# 给别人快速部署只需这一个文件，放到任意目录执行：
 #   docker compose -f docker-compose.hub.yml up -d
 #
-# 镜像由 GitHub Actions 自动构建并发布在 GHCR（支持 amd64 / arm64）。
-# 如需固定版本，把 :latest 改成 :V1.4.2 之类的具体 tag。
+# 本文件已把 jav-search 与 FlareSolverr 放在同一 Docker 网络，并通过环境变量把
+# FlareSolverr 地址预置成 http://flaresolverr:8191 —— 开箱即用，无需在设置页手填。
+# （用户若在「设置」里另填了地址，则以设置页为准，env 不覆盖。）
+#
+# 这是 Beta 版：镜像 tag 用 :beta（独立于正式版 :latest，不会推给正式用户）。
+# 如需固定某个具体版本，把 :beta 改成 :V1.4.3-beta 之类的具体 tag。
 services:
   jav-search:
-    image: ghcr.io/seaside111/jav-search:latest
+    image: ghcr.io/seaside111/jav-search:beta
     container_name: jav-search
     restart: unless-stopped
-    pull_policy: always          # 每次 up 自动拉取最新镜像（要锁版本可删掉这行并指定 tag）
+    pull_policy: always          # 每次 up 自动拉取最新 beta 镜像（要锁版本可删掉这行并指定 tag）
+    depends_on:
+      - flaresolverr
     ports:
       - "8085:8085"              # 修改左侧端口以避免冲突
     volumes:
@@ -26,6 +32,10 @@ services:
       - CONFIG_DIR=/config
       - PORT=8085
       - TZ=Asia/Shanghai
+      # ── FlareSolverr 地址预置（指向下面的 flaresolverr 容器，同网络用容器名直连）──
+      # 设置页留空时生效；填了则以设置页为准。
+      - JAVDB_FLARESOLVERR_URL=http://flaresolverr:8191
+      - FC2_FLARESOLVERR_URL=http://flaresolverr:8191
       # ── 登录认证 ──（部署前务必修改下面的账号密码与密钥）
       - AUTH_USERNAME=admin
       - AUTH_PASSWORD=change_me_please
@@ -43,6 +53,22 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  # ── FlareSolverr：JavDB/FC2 过 Cloudflare 盾用 ──
+  # 注意：FlareSolverr 的出口 IP = 本机/本服务器 IP。若部署在机房 VPS（数据中心 IP），
+  # JavDB 仍可能按 IP 信誉硬封 403——届时需在「设置 → 主代理」填一个【非日本】住宅代理，
+  # 让 FlareSolverr 透过它出网（保持「FlareSolverr 复用主代理」开启）。
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+      - TZ=Asia/Shanghai
+    # 默认仅在内部网络供 jav-search 调用，无需对外发布端口。
+    # 如需在宿主机上单独调试，取消下面注释把 8191 发布出去：
+    # ports:
+    #   - "8191:8191"
 
 volumes:
   jav-config:

@@ -1,0 +1,64 @@
+# ── 整套部署（从源码本地构建 + 内置 FlareSolverr）──
+# 适合拿到完整源码包后直接一条命令跑起来，不依赖 GHCR 预构建镜像：
+#   docker compose -f docker-compose.flaresolverr.yml up -d --build
+#
+# 与 docker-compose.hub.yml 等价，区别仅在于 jav-search 用本地 Dockerfile 构建。
+# 同样已把 FlareSolverr 地址通过 env 预置为 http://flaresolverr:8191，开箱即用。
+services:
+  jav-search:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jav-search:beta
+    container_name: jav-search
+    restart: unless-stopped
+    depends_on:
+      - flaresolverr
+    ports:
+      - "8085:8085"               # 修改左侧端口以避免冲突
+    volumes:
+      - jav-config:/config
+      # 如需把配置放到群晖文件夹方便编辑（须先 mkdir 该目录）：
+      # - /volume1/docker/jav-search/config:/config
+      # ── 媒体库刮削目录映射（按需启用，冒号右侧为容器内路径，需与「设置 → 刮削」一致）──
+      # - /volume1/downloads/jav:/downloads/jav        # 下载器保存目录（监控源）
+      # - /volume1/media/jav:/media/jav                # 刮削后归档目录（按 YYYYMM 建子目录）
+    environment:
+      - CONFIG_DIR=/config
+      - PORT=8085
+      - TZ=Asia/Shanghai
+      # FlareSolverr 地址预置（设置页留空时生效；填了以设置页为准）
+      - JAVDB_FLARESOLVERR_URL=http://flaresolverr:8191
+      - FC2_FLARESOLVERR_URL=http://flaresolverr:8191
+      # ── 登录认证 ──（部署前务必修改）
+      - AUTH_USERNAME=admin
+      - AUTH_PASSWORD=change_me_please
+      - AUTH_SECRET=please-change-this-to-a-long-random-string
+      - AUTH_SESSION_TTL=604800
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # FlareSolverr：JavDB/FC2 过 Cloudflare 盾用。出口 IP = 本机 IP；
+  # 机房 VPS 仍被 JavDB 硬封时，请在「设置 → 主代理」填非日本住宅代理。
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+      - TZ=Asia/Shanghai
+    # ports:
+    #   - "8191:8191"             # 默认仅内部供 jav-search 调用，需外部调试再发布
+
+volumes:
+  jav-config:
+
+networks:
+  default:
+    name: jav-search-net

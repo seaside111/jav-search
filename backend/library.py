@@ -72,12 +72,18 @@ def _clean_noise(stem: str) -> str:
     return s
 
 
-# 番号正则：匹配 ABP-123、SSIS001、FC2-PPV-1234567、390JAC-234 等格式
+# 番号正则：匹配 ABP-123、SSIS001、FC2-PPV-1234567、390JAC-234，以及无码格式
+# （10musume/1pondo/Carib 060226_01、heydouga-4017-001）等。
+# 顺序很重要：更「专」「长」的格式排在前，避免被宽松规则截断（如 heydouga 不被截成 HEYDOUGA-4017）。
 _CODE_PATTERNS = [
-    re.compile(r'\b(FC2-?PPV-?\d{5,8})\b', re.IGNORECASE),         # FC2-PPV-1234567
-    re.compile(r'\b(\d{3,4}[A-Z]{2,6}-\d{2,5})\b', re.IGNORECASE), # 390JAC-234 / 259LUXU-1234
-    re.compile(r'\b([A-Z]{2,8}-\d{2,6})\b', re.IGNORECASE),        # ABP-123
-    re.compile(r'\b([A-Z]{2,8})[-_]?(\d{2,6})\b', re.IGNORECASE),  # ABP123 / ABP_123
+    re.compile(r'\b(FC2-?PPV-?\d{5,8})\b', re.IGNORECASE),               # FC2-PPV-1234567
+    re.compile(r'\b([A-Z]{3,10}-\d{3,5}-\d{2,4})\b', re.IGNORECASE),     # heydouga-4017-001（厂牌-数字-数字）
+    re.compile(r'\b(\d{3,4}[A-Z]{2,6}-\d{2,5})\b', re.IGNORECASE),       # 390JAC-234 / 259LUXU-1234
+    re.compile(r'\b([A-Z]{2,8}-\d{2,6})\b', re.IGNORECASE),              # ABP-123
+    re.compile(r'\b([A-Z]{2,8})[-_]?(\d{2,6})\b', re.IGNORECASE),        # ABP123 / ABP_123
+    # 无码「日期型」番号：10musume 060226_01 / 1pondo 060226_001 / Caribbean 060226-001 等。
+    # 放最后、纯数字型，优先级最低，避免误吃文件名里的其它数字串；要求 6 位日期 + 分隔符。
+    re.compile(r'\b(\d{6}[-_]\d{2,4})\b'),
 ]
 
 # ─────────────────────────────────────────
@@ -139,8 +145,15 @@ def _match_code(text: str) -> str:
 
 
 def _code_from_name(name: str) -> str:
-    """从单个名字（文件名去扩展 / 目录名）识别番号：先剔除站点前缀等噪声再匹配，失败回退原串。"""
-    return _match_code(_clean_noise(name)) or _match_code(name)
+    """从单个名字（文件名去扩展 / 目录名）识别番号：先剔除站点前缀等噪声再匹配。
+    回退时**仍剥掉站点/广告域名**（只保留方括号内容），避免把 hhd800.com 这类广告域名
+    误当成番号（如 hhd800.com@060226_01 被识别成 HHD-800）。"""
+    cleaned = _clean_noise(name)
+    c = _match_code(cleaned)
+    if c:
+        return c
+    # 回退：不去方括号（番号可能在 []内），但仍去广告域名
+    return _match_code(_SITE_NOISE.sub(' ', name))
 
 
 def _candidate_names(video_path: Path, watch_dir: str = "") -> list:
@@ -514,6 +527,12 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     if desc and _has_jp(desc):
         segments.append(desc); tags.append("desc")
 
+    # 刮削翻译总开关：关闭时直接保留日文原标题/简介，不调翻译服务
+    translate_on = config.get("scrape_translate_enabled", True)
+    if not translate_on:
+        _log(f"刮削翻译已关闭，标题/简介保留日文原文：{code}")
+        segments = []
+
     if segments:
         _log(f"翻译（仅日文部分）：{code}（服务 {provider}，{len(segments)} 段）")
         trans = await translate(text="\n\n".join(segments), provider=provider, config=config)
@@ -528,7 +547,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             _log(f"翻译完成：{code} → 片名《{name_zh[:40]}》")
         else:
             _log(f"翻译失败（保留原文）：{code} — {trans.get('error','')}")
-    else:
+    elif translate_on:
         _log(f"无需翻译（无日文片名/简介）：{code}")
 
     # NFO <title> = 番号 + 中文片名（番号永不翻译）

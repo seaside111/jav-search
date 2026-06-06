@@ -8,9 +8,11 @@
 
 - 🔍 **三种搜索模式**：番号（如 `ABP-123`）、演员名、关键词，自动识别
 - 🖼 **完整信息展示**：封面、演员头像、导演、出品商、发行商、系列、时长、发行日期、标签、简介
-- 🌐 **多数据源**：JavBus + JavDB 为主，可选 AVSOX（无码）/ AVMOO（旧片），并发抓取、按番号去重合并
+- 🌐 **多数据源**：JavBus + JavDB 为主，可选 AVSOX（无码）/ AVMOO（旧片）/ FC2（FC2-PPV 素人无码，V1.4.3），并发抓取、按番号去重合并
+- 🧩 **FC2 封面/标题补全**（V1.4.3）：fc2ppvdb 缺图缺标题时自动用 **MissAV** 补全（封面走 fourhoi CDN，含下架条目）
 - ⚡ **大批量 & 快速**：列表/详情抓取分离，单源最高 500 条，翻页时按需补全详情
-- 🆕 **首页最新片源**：未搜索时自动展示数据源最新片源（可在设置关闭）
+- 🆕 **首页最新片源**：未搜索时自动展示数据源最新片源（可在设置关闭）；V1.4.3 起**各来源并行、边抓边显示**，并提供**数据源切换标签**快速筛选
+- 🔔 **版本更新检测**（V1.4.3）：顶部显示当前版本，后端代理检测 GitHub 最新 release，有新版本时红点提醒
 - 🈳 **翻译功能**：百度 / 阿里云翻译，每条结果独立翻译按钮
 - 🧲 **Jackett 资源搜索**：每张影片卡片一键搜索磁力 / 种子资源
 - 🚀 **qBittorrent 推送**（V1.4）：资源列表「推送下载」按钮，磁力/种子直接加种到指定保存目录
@@ -37,61 +39,59 @@ docker-compose logs -f
 
 > **部署前务必修改 docker-compose 里的 `AUTH_USERNAME` / `AUTH_PASSWORD` / `AUTH_SECRET`！**
 
----
+### 一键部署（含 FlareSolverr · Beta 推荐）
 
-## 零构建部署（推荐给别人用）
-
-上面的方式需要下载完整源码并在本地 `build`（首次还要从 Docker Hub 拉基础镜像，国内易超时）。如果只是想快速跑起来，用**预构建镜像**，无需源码、无需构建：
+JavDB / FC2 需要过 Cloudflare 盾，本版提供**内置 FlareSolverr 的一键包**，无需单独装 FlareSolverr、无需在设置页手填地址（已通过环境变量预置为 `http://flaresolverr:8191`，并对各种填法做了智能适配）：
 
 ```bash
-# 只需 docker-compose.hub.yml 这一个文件，放到任意目录执行
+# 方式 A：零构建，直接拉取 beta 镜像 + FlareSolverr
 docker compose -f docker-compose.hub.yml up -d
-docker compose -f docker-compose.hub.yml logs -f
+
+# 方式 B：拿到源码包后本地构建 + FlareSolverr
+docker compose -f docker-compose.flaresolverr.yml up -d --build
 ```
 
-镜像由 GitHub Actions 自动构建并发布在 **GHCR**（`ghcr.io/seaside111/jav-search`，支持 amd64 / arm64）。要锁版本就把 `:latest` 换成具体 tag（如 `:V1.4.2`）。
+#### 不想用 compose？纯 `docker run` 一键装（含 FlareSolverr）
 
-> 群晖 Container Manager：新增项目 → 来源选「上传 docker-compose.hub.yml」即可，不需要上传整套源码。
-
-### 不用 compose，纯 `docker run` 部署（含刮削目录）
-
-不想用 compose 也行，下面是一条完整命令（已含媒体库刮削的目录挂载），改好账号密码即可直接执行：
+两个容器放在同一自定义网络里，jav-search 用容器名 `flaresolverr` 直连，无需对外发布 8191：
 
 ```bash
-docker run -d \
-  --name jav-search \
-  --restart unless-stopped \
+# 1) 建一个共享网络（已存在会报错，可忽略）
+docker network create jav-search-net
+
+# 2) 起 FlareSolverr（仅供内部调用，不映射端口）
+docker run -d --name flaresolverr --restart unless-stopped \
+  --network jav-search-net \
+  -e LOG_LEVEL=info -e TZ=Asia/Shanghai \
+  ghcr.io/flaresolverr/flaresolverr:latest
+
+# 3) 起 jav-search（通过 env 预置 FlareSolverr 地址＝容器名直连）
+docker run -d --name jav-search --restart unless-stopped \
+  --network jav-search-net \
   -p 8085:8085 \
-  -v jav-config:/config                          `# 配置持久化（命名卷，删容器不丢配置）` \
-  -v /volume1/downloads/jav:/downloads/jav       `# 下载器保存目录＝刮削监控源（冒号左侧改成你的真实路径）` \
-  -v /volume1/media/jav:/media/jav               `# 刮削后归档目录（自动按 YYYYMM/番号/ 建子目录）` \
-  -e CONFIG_DIR=/config \
-  -e PORT=8085 \
-  -e TZ=Asia/Shanghai \
-  -e AUTH_USERNAME=admin                         `# 登录用户名` \
-  -e AUTH_PASSWORD=改成你的强密码                  `# 登录密码，务必修改` \
-  -e AUTH_SECRET=一串很长的随机字符串              `# 会话签名密钥，填长随机串` \
+  -v jav-config:/config \
+  -v /volume1/downloads/jav:/downloads/jav \
+  -v /volume1/media/jav:/media/jav \
+  -e CONFIG_DIR=/config -e PORT=8085 -e TZ=Asia/Shanghai \
+  -e JAVDB_FLARESOLVERR_URL=http://flaresolverr:8191 \
+  -e FC2_FLARESOLVERR_URL=http://flaresolverr:8191 \
+  -e AUTH_USERNAME=admin \
+  -e AUTH_PASSWORD=改成你的强密码 \
+  -e AUTH_SECRET=一串很长的随机字符串 \
   -e AUTH_SESSION_TTL=604800 \
   --add-host host.docker.internal:host-gateway \
-  ghcr.io/seaside111/jav-search:latest
+  ghcr.io/seaside111/jav-search:beta
 ```
 
-> 上面 `` `# ...` `` 是行内批注，会被 shell 当空忽略，可整段直接复制运行。挂载冒号**左侧**是宿主机真实路径（按需改），**右侧**是容器内路径，需与「设置 → 刮削」里填的一致。不需要刮削功能就删掉中间两行 `-v`。Windows PowerShell 请去掉行尾 `\` 与批注、写成一行。
+更省事：项目自带一键脚本（变量在文件开头改）——
+- 群晖 / Linux：`bash install.sh`
+- Windows：`powershell -ExecutionPolicy Bypass -File install.ps1`
 
-**升级 / 重建**（配置在命名卷里，不会丢）：
+> **只想单独跑 jav-search**（FlareSolverr 装在别处）？去掉上面的 `--network` 与 `JAVDB/FC2_FLARESOLVERR_URL` 两行即可；
+> 之后在「设置」里填 FlareSolverr 地址——Docker 内填 `localhost` 也会被**智能适配**自动改连 `host.docker.internal` / 容器名。
 
-```bash
-docker pull ghcr.io/seaside111/jav-search:latest
-docker stop jav-search && docker rm jav-search
-# 再次执行上面的 docker run 命令即可
-```
-
-### 常见部署报错
-
-| 报错 | 原因 | 解决 |
-|------|------|------|
-| `open Dockerfile: no such file or directory` | 用 `build:` 方式部署但目录里没有源码（只贴了 compose 文本） | 改用本节的**零构建部署**；或下载完整项目、在含 `Dockerfile` 的目录里 `docker compose up -d --build` |
-| `registry-1.docker.io ... context deadline exceeded` | 连不上 Docker Hub（国内网络） | 配置镜像加速器：在 `/etc/docker/daemon.json`（群晖在「注册表 → 设置」）加 `{"registry-mirrors":["https://docker.1ms.run"]}` 后重启 Docker |
+> ⚠️ FlareSolverr 的出口 IP = 本机/服务器 IP。若部署在**机房 VPS（数据中心 IP）**，JavDB 仍可能按 IP 信誉**硬封 403**——
+> 此时需在「设置 → 主代理」填一个【**非日本**】住宅代理（保持「FlareSolverr 复用主代理」开启）。
 
 ---
 
@@ -200,22 +200,29 @@ NFO 标题/简介的中文翻译即使用此处配置的翻译服务。
 ```
 jav-search/
 ├── Dockerfile
-├── docker-compose.yml          # bridge 网络（默认）
-├── docker-compose.host.yml     # host 网络（代理跨网段时用）
+├── docker-compose.yml               # bridge 网络（默认）
+├── docker-compose.host.yml          # host 网络（代理跨网段时用）
+├── docker-compose.hub.yml           # 零构建：拉 beta 镜像 + 内置 FlareSolverr
+├── docker-compose.flaresolverr.yml  # 源码构建 + 内置 FlareSolverr
+├── install.sh / install.ps1         # 纯 docker run 一键安装脚本（含 FlareSolverr）
+├── .github/workflows/docker-publish.yml  # 推 tag 自动构建多架构镜像（beta→:beta / 正式→:latest）
 ├── README.md
 ├── config/                     # 占位目录（用命名卷时可忽略）
 ├── backend/
 │   ├── main.py                 # FastAPI 主程序（搜索/翻译/Jackett/qB/配置）
 │   ├── requirements.txt
-│   ├── config_manager.py       # 配置读写
+│   ├── config_manager.py       # 配置读写（含 FlareSolverr 地址 env 兜底）
 │   ├── translator.py           # 百度/阿里云翻译
 │   ├── jackett.py              # Jackett 资源搜索
 │   ├── qbittorrent.py          # qBittorrent WebUI 客户端（推送下载）
 │   ├── library.py              # 媒体库刮削监控 + NFO/封面 + 归档移动
 │   └── scrapers/
 │       ├── __init__.py         # 聚合搜索（列表/详情分离）
+│       ├── _fsgate.py          # FlareSolverr 串行闸 + 地址智能适配（三源共享）
 │       ├── _javbus_base.py
-│       └── javbus.py / javdb.py / avsox.py / avmoo.py
+│       ├── javbus.py / javdb.py / avsox.py / avmoo.py
+│       ├── fc2.py               # FC2-PPV 数据源（fc2ppvdb.com，走 FlareSolverr）
+│       └── _missav.py           # MissAV 补全（给 FC2 补封面/标题，fourhoi CDN 封面）
 └── frontend/
     ├── index.html              # 单页前端（搜索 + 资源抽屉 + 推送 + 分栏设置）
     └── login.html
@@ -229,9 +236,12 @@ jav-search/
 |------|------|------|
 | GET  | `/` | Web 前端 |
 | GET  | `/api/health` | 健康检查 |
+| GET  | `/api/version` | 版本检测（当前版本 vs GitHub 最新 release，带缓存） |
 | POST | `/api/search` | 搜索影片（列表） |
 | POST | `/api/details` | 按需补全详情 |
-| GET  | `/api/latest` | 首页最新片源 |
+| GET  | `/api/latest` | 首页最新片源（`?source=xxx` 可只抓单源，供边抓边显示） |
+| GET  | `/api/javdb/test` | JavDB 连通诊断 |
+| GET  | `/api/fc2/test` | FC2（fc2ppvdb）连通诊断 |
 | POST | `/api/translate` | 翻译文本 |
 | POST | `/api/jackett/search` | Jackett 资源搜索 |
 | GET  | `/api/jackett/status` | Jackett 连接状态 |
@@ -246,6 +256,10 @@ jav-search/
 
 ## 更新日志
 
+> **V1.4.3 首页增强**：① 顶部新增**版本号 + 更新检测**（后端代理 GitHub release，带缓存，有新版红点提醒）；② 首页最新片源改为**各来源并行、边抓边显示**（`/api/latest?source=`），快源先显示、慢源随后补入，不再被慢源拖住整页；③ 列表上方新增**数据源切换标签**（全部/JavBus/JavDB/…/FC2，各带条数），首页与搜索结果均可一键筛选。详见 [`docs_v1.4.3_更新说明.md`](docs_v1.4.3_更新说明.md)。
+>
+> **V1.4.3 新增（FC2 数据源）**：① 新增 **FC2-PPV 专用数据源**（fc2ppvdb.com），收录 FC2 素人/无码片源的番号、标题、封面、女优、卖家、贩卖日、收录时间、标签等；② 番号自动识别扩展，`FC2-PPV-1234567` / `FC2PPV1234567` / 纯数字 均按番号检索，直命中详情页；③ fc2ppvdb 强制 Cloudflare Turnstile，复用 JavDB 那套 FlareSolverr 取页（FC2 地址留空则自动复用 JavDB 的 FlareSolverr）；④ 设置页新增 FC2 数据源勾选、FlareSolverr/Cookie 配置与「FC2 连通测试」。注意：FC2 站点不提供磁力，下载仍走 Jackett/sukebei 按 `FC2-PPV-xxxxxxx` 检索。详见 [`docs_v1.4.3_更新说明.md`](docs_v1.4.3_更新说明.md)。
+>
 > **V1.4.2 优化（JavDB 专项）**：① JavDB 反爬增强——自动携带 `over18`/`locale` Cookie + 完整浏览器请求头 + 失败重试，解决「列表 0 条」；② 可选 FlareSolverr 过 Cloudflare 盾，或手动填入 `cf_clearance` Cookie；③ 设置页新增「JavDB 连通测试」，返回是否可达 / 是否被 CF 拦截 / 出口 IP 所在国（判断是否需要日本 IP）/ 解析条数；④ JavDB 详情扩充磁力链、样品图、评分人数等字段，并在合并去重时补全到主条目。详见 [`docs_v1.4.2_更新说明.md`](docs_v1.4.2_更新说明.md)。
 
 > **V1.4.1 修复**：① 推送下载时记录搜索结果的准确番号，刮削时优先采用，修复 `hhd800.com@390JAC-234` 这类带站点/数字前缀文件名被误判为 `HHD-800` 的问题（文件名正则也同步增强）；② 服务地址填 `http://localhost` 时，种子直链改由后端代取再转交浏览器/qBittorrent，修复外网点击 `.torrent` 打不开、推送种子失败的问题。详见 [`docs_v1.4.1_更新说明.md`](docs_v1.4.1_更新说明.md)。

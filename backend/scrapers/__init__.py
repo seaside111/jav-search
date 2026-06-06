@@ -12,7 +12,7 @@ import asyncio
 import re
 from typing import Optional
 
-from . import javbus, javdb, avsox, avmoo
+from . import javbus, javdb, avsox, avmoo, fc2
 
 SEARCH_MODE_CODE = "code"
 SEARCH_MODE_ACTOR = "actor"
@@ -24,10 +24,12 @@ SOURCE_MODULES = {
     "javdb": javdb,
     "avsox": avsox,
     "avmoo": avmoo,
+    "fc2": fc2,        # V1.4.3：FC2-PPV 专用源（fc2ppvdb.com，无码/素人）
 }
 
 # 合并时来源优先级（数字小者优先，作为主条目保留封面/标题）
-_SOURCE_PRIORITY = {"javbus": 0, "javdb": 1, "avmoo": 2, "avsox": 3}
+# FC2 番号体系独立、不与其它源重叠，优先级随意，置末即可
+_SOURCE_PRIORITY = {"javbus": 0, "javdb": 1, "avmoo": 2, "avsox": 3, "fc2": 4}
 
 
 def _normalize_code(code: str) -> str:
@@ -138,23 +140,34 @@ async def search(
     return _merge_lists(collected)[:max_results]
 
 
+# 走 FlareSolverr 的来源（JavDB/FC2）专用「全局串行闸」。
+# FlareSolverr 是单浏览器实例，不支持并发——多个请求同时打过去只会在它内部排队、
+# 互相挤到全部超时。用进程级 Semaphore(1) 让这些请求一个一个来；
+# 直连来源（JavBus/AVSOX/AVMOO）不受影响，照常并发。
+_FLARESOLVERR_GATE = asyncio.Semaphore(1)
+_FLARESOLVERR_SOURCES = ("javdb", "fc2")
+
+
 async def enrich(items: list[dict], proxy: Optional[str] = None,
                  concurrency: int = 6, per_timeout: float = 9.0) -> list[dict]:
     """
     按需抓取详情。items 为待补全的条目（需含 url + source），
     返回与输入等长、顺序一致的详情列表（失败/超时项为 None）。
 
-    单条超时（默认 9s）确保每条都能在限定时间内返回，
-    避免个别慢/挂起的详情请求拖垮整批、导致前端长时间等待。
-    JavDB 走 FlareSolverr 时单条更慢，单独给更长超时（否则必然超时失败）。
+    并发策略：
+      - 直连来源（JavBus/AVSOX/AVMOO）走 Semaphore(concurrency) 并发，单条快速超时。
+      - 走 FlareSolverr 的来源（JavDB/FC2）走全局 Semaphore(1) 串行，单条放宽到 32s——
+        FlareSolverr 单实例不支持并发，串行才能逐条成功而非集体超时。
     """
     sem = asyncio.Semaphore(concurrency)
 
-    # 是否启用了 JavDB FlareSolverr（影响 JavDB 详情的单条超时）
+    # 是否启用了 FlareSolverr（影响走 FlareSolverr 的来源 JavDB/FC2 的并发与超时）
     flaresolverr_on = False
     try:
         from config_manager import load as load_config
-        flaresolverr_on = bool((load_config().get("javdb_flaresolverr_url") or "").strip())
+        _cfg = load_config()
+        flaresolverr_on = bool((_cfg.get("javdb_flaresolverr_url") or "").strip()
+                               or (_cfg.get("fc2_flaresolverr_url") or "").strip())
     except Exception:
         pass
 
@@ -164,9 +177,11 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
         mod = SOURCE_MODULES.get(source)
         if not mod or not url:
             return None
-        # JavDB + FlareSolverr 单条放宽到 32s，其余来源保持快速超时
-        timeout = 32.0 if (source == "javdb" and flaresolverr_on) else per_timeout
-        async with sem:
+        use_fs = source in _FLARESOLVERR_SOURCES and flaresolverr_on
+        # FlareSolverr 来源：全局串行闸 + 32s 超时；其余：并发信号量 + 快速超时
+        gate = _FLARESOLVERR_GATE if use_fs else sem
+        timeout = 32.0 if use_fs else per_timeout
+        async with gate:
             await asyncio.sleep(0.05)
             try:
                 return await asyncio.wait_for(mod.fetch_detail(url, proxy), timeout=timeout)
@@ -225,6 +240,9 @@ async def get_latest(
 def detect_search_mode(query: str) -> str:
     """自动检测搜索模式"""
     query = query.strip()
+    # FC2 番号：FC2-PPV-1234567 / FC2PPV1234567 / FC2-1234567（含中间数字，不被通用番号正则覆盖）
+    if re.match(r'^(?i:fc2)[-\s]?(?i:ppv)?[-\s]?\d{5,7}$', query):
+        return SEARCH_MODE_CODE
     if re.match(r'^[A-Za-z]{2,8}[-\s]?\d{2,6}$', query):
         return SEARCH_MODE_CODE
     if re.search(r'[぀-ヿ一-鿿]', query) and len(query) <= 10:

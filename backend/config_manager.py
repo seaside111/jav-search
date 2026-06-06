@@ -15,6 +15,13 @@ DEFAULT_CONFIG = {
     "javdb_flaresolverr_use_proxy": True, # FlareSolverr 是否复用主代理；其自带出口（如 WARP）时应关掉走直连
     "javdb_cookie": "",                  # 手动填入浏览器导出的 JavDB Cookie（如 cf_clearance=xxx; _jdb_session=yyy）
     "javdb_prefetch_extras": False,      # 翻页预取时是否顺带预取合并卡的 JavDB 样品图/磁力（默认关，开则更耗资源）
+    # V1.4.3：FC2-PPV 数据源（fc2ppvdb.com，强制 Cloudflare Turnstile，必须走 FlareSolverr）
+    "fc2_flaresolverr_url": "",          # FC2 专用 FlareSolverr 地址；留空则复用 javdb_flaresolverr_url
+    "fc2_flaresolverr_use_proxy": True,  # FlareSolverr 是否复用主代理；其自带出口时关掉走直连
+    "fc2_cookie": "",                    # 可选：手动填入 fc2ppvdb 的 Cookie（如 cf_clearance=xxx）
+    # V1.4.3：用 MissAV 给 FC2 补全封面/标题/女优/标签（fc2ppvdb 对下架条目常缺这些）
+    "fc2_missav_enabled": True,          # 是否启用 MissAV 补全
+    "fc2_missav_base": "",               # MissAV 镜像（逗号分隔，留空用内置默认 missav.ws）
     "baidu_app_id": "",                  # 百度翻译 AppID
     "baidu_secret_key": "",              # 百度翻译 SecretKey
     "aliyun_access_key_id": "",          # 阿里云 AccessKeyId
@@ -31,6 +38,7 @@ DEFAULT_CONFIG = {
         "javdb": 40,
         "avsox": 40,
         "avmoo": 40,
+        "fc2": 30,                       # FC2 走 FlareSolverr 较慢，数量不宜过大
     },
     # Jackett
     "jackett_url": "",                   # Jackett 地址，如 http://192.168.1.100:9117
@@ -52,6 +60,7 @@ DEFAULT_CONFIG = {
     "scrape_settle_seconds": 60,         # 文件 mtime 静置超过此秒数即判定下载完成（快速通道）
     "scrape_stable_checks": 2,           # 兜底：大小连续多少次不变视为完成（mtime 不可靠时）
     "scrape_min_size_mb": 100,           # 小于此大小（MB）的视频忽略（样板/预告）
+    "scrape_translate_enabled": True,    # 刮削时是否翻译标题/简介；关闭则直接用日文原标题写入 NFO
     "scrape_translate_provider": "",     # 刮削翻译服务，留空用默认翻译服务
     "scrape_move_on_fail": True,         # 刮削失败也照常移动归档
 }
@@ -60,16 +69,34 @@ DEFAULT_CONFIG = {
 MAX_RESULTS_HARD_CAP = 500
 
 
+# 环境变量兜底：键 -> 环境变量名。当 settings.json 里该项为空时用环境变量填充，
+# 便于「一键 docker run 安装包」通过 compose env 预置 FlareSolverr 地址（用户零配置即可用）；
+# 用户一旦在设置页填了值，settings.json 非空 → 仍以 UI 为准，env 不覆盖。
+_ENV_FALLBACKS = {
+    "javdb_flaresolverr_url": "JAVDB_FLARESOLVERR_URL",
+    "fc2_flaresolverr_url": "FC2_FLARESOLVERR_URL",
+}
+
+
+def _apply_env_fallbacks(config: dict) -> dict:
+    for key, env_name in _ENV_FALLBACKS.items():
+        if not (config.get(key) or "").strip():
+            env_val = (os.getenv(env_name) or "").strip()
+            if env_val:
+                config[key] = env_val
+    return config
+
+
 def load() -> dict:
     try:
         if CONFIG_PATH.exists():
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             config = {**DEFAULT_CONFIG, **saved}
-            return config
+            return _apply_env_fallbacks(config)
     except Exception as e:
         print(f"[Config] load error: {e}")
-    return dict(DEFAULT_CONFIG)
+    return _apply_env_fallbacks(dict(DEFAULT_CONFIG))
 
 
 def save(config: dict) -> bool:

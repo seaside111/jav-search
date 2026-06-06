@@ -1,8 +1,12 @@
 name: 构建并推送镜像到 GHCR
 
 # 触发时机：
-#   - 推送形如 V1.4.2 / v1.4.2 的 tag 时自动构建发布
+#   - 推送形如 V1.4.3 / v1.4.3 / V1.4.3-beta 的 tag 时自动构建发布
 #   - 也可在 Actions 页面手动触发（workflow_dispatch）
+#
+# Beta 与正式版互不干扰：
+#   - tag 含 beta（如 V1.4.3-beta）→ 镜像打 :V1.4.3-beta 和移动标签 :beta
+#   - 正式 tag（如 V1.4.3）        → 镜像打 :V1.4.3 和 :latest
 on:
   push:
     tags:
@@ -11,7 +15,7 @@ on:
   workflow_dispatch:
 
 env:
-  # 镜像名固定为 ghcr.io/<owner>/<repo>，owner 会自动转小写
+  # 镜像名固定为 ghcr.io/<owner>/jav-search，owner 会自动转小写
   IMAGE: ghcr.io/${{ github.repository_owner }}/jav-search
 
 jobs:
@@ -47,9 +51,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.img.outputs.name }}
+          # 始终打上「具体版本号」标签（取自 git tag）
+          # beta tag 额外打移动标签 :beta；正式 tag 额外打 :latest（beta 不动 latest）
           tags: |
             type=ref,event=tag
-            type=raw,value=latest
+            type=raw,value=beta,enable=${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'Beta') }}
+            type=raw,value=latest,enable=${{ !(contains(github.ref_name, 'beta') || contains(github.ref_name, 'Beta')) }}
 
       - name: 构建并推送（amd64 + arm64）
         uses: docker/build-push-action@v6
