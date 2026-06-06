@@ -1,0 +1,52 @@
+# ── 零构建部署 ──
+# 直接拉取已构建好的镜像，无需下载源码、无需本地 build。
+# 适合给别人快速部署：只需这一个文件，放到任意目录执行：
+#   docker compose -f docker-compose.hub.yml up -d
+#
+# 镜像由 GitHub Actions 自动构建并发布在 GHCR（支持 amd64 / arm64）。
+# 如需固定版本，把 :latest 改成 :V1.4.2 之类的具体 tag。
+services:
+  jav-search:
+    image: ghcr.io/seaside111/jav-search:latest
+    container_name: jav-search
+    restart: unless-stopped
+    pull_policy: always          # 每次 up 自动拉取最新镜像（要锁版本可删掉这行并指定 tag）
+    ports:
+      - "8085:8085"              # 修改左侧端口以避免冲突
+    volumes:
+      # ── 配置持久化（默认命名卷，无需手动建目录）──
+      - jav-config:/config
+      # 如需把配置放到群晖文件夹方便编辑（须先 mkdir 该目录）：
+      # - /volume1/docker/jav-search/config:/config
+      #
+      # ── 媒体库刮削目录映射（按需启用，冒号右侧为容器内路径，需与「设置 → 刮削」一致）──
+      # - /volume1/downloads/jav:/downloads/jav        # 下载器保存目录（监控源）
+      # - /volume1/media/jav:/media/jav                # 刮削后归档目录（按 YYYYMM 建子目录）
+    environment:
+      - CONFIG_DIR=/config
+      - PORT=8085
+      - TZ=Asia/Shanghai
+      # ── 登录认证 ──（部署前务必修改下面的账号密码与密钥）
+      - AUTH_USERNAME=admin
+      - AUTH_PASSWORD=change_me_please
+      - AUTH_SECRET=please-change-this-to-a-long-random-string
+      - AUTH_SESSION_TTL=604800
+      # ── 新增数据源域名（AVSOX/AVMOO 域名常变，失效时改这里）──
+      # - AVSOX_BASE=https://avsox.click
+      # - AVMOO_BASE=https://avmoo.website
+    # 若 Jackett / 代理跑在宿主机上，用 host.docker.internal 访问宿主机
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  jav-config:
+
+networks:
+  default:
+    name: jav-search-net

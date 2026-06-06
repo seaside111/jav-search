@@ -39,6 +39,29 @@ docker-compose logs -f
 
 ---
 
+## 零构建部署（推荐给别人用）
+
+上面的方式需要下载完整源码并在本地 `build`（首次还要从 Docker Hub 拉基础镜像，国内易超时）。如果只是想快速跑起来，用**预构建镜像**，无需源码、无需构建：
+
+```bash
+# 只需 docker-compose.hub.yml 这一个文件，放到任意目录执行
+docker compose -f docker-compose.hub.yml up -d
+docker compose -f docker-compose.hub.yml logs -f
+```
+
+镜像由 GitHub Actions 自动构建并发布在 **GHCR**（`ghcr.io/seaside111/jav-search`，支持 amd64 / arm64）。要锁版本就把 `:latest` 换成具体 tag（如 `:V1.4.2`）。
+
+> 群晖 Container Manager：新增项目 → 来源选「上传 docker-compose.hub.yml」即可，不需要上传整套源码。
+
+### 常见部署报错
+
+| 报错 | 原因 | 解决 |
+|------|------|------|
+| `open Dockerfile: no such file or directory` | 用 `build:` 方式部署但目录里没有源码（只贴了 compose 文本） | 改用本节的**零构建部署**；或下载完整项目、在含 `Dockerfile` 的目录里 `docker compose up -d --build` |
+| `registry-1.docker.io ... context deadline exceeded` | 连不上 Docker Hub（国内网络） | 配置镜像加速器：在 `/etc/docker/daemon.json`（群晖在「注册表 → 设置」）加 `{"registry-mirrors":["https://docker.1ms.run"]}` 后重启 Docker |
+
+---
+
 ## 登录认证（环境变量）
 
 网页需登录才能访问，账号密码在 docker-compose 的 `environment` 中设置，不开放注册。

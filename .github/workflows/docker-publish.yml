@@ -1,0 +1,64 @@
+name: 构建并推送镜像到 GHCR
+
+# 触发时机：
+#   - 推送形如 V1.4.2 / v1.4.2 的 tag 时自动构建发布
+#   - 也可在 Actions 页面手动触发（workflow_dispatch）
+on:
+  push:
+    tags:
+      - 'V*'
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  # 镜像名固定为 ghcr.io/<owner>/<repo>，owner 会自动转小写
+  IMAGE: ghcr.io/${{ github.repository_owner }}/jav-search
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # 推送到 GHCR 需要 packages 写权限
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # owner 可能含大写，GHCR 镜像名必须全小写，这里统一转换
+      - name: 计算小写镜像名
+        id: img
+        run: echo "name=${IMAGE,,}" >> "$GITHUB_OUTPUT"
+
+      - name: 配置 QEMU（多架构构建）
+        uses: docker/setup-qemu-action@v3
+
+      - name: 配置 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # 内置令牌，无需额外配置
+
+      - name: 生成镜像标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.name }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+
+      - name: 构建并推送（amd64 + arm64）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
