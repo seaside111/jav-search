@@ -132,7 +132,8 @@ def resolved_endpoint(raw: str) -> str:
 # 探到就正缓存复用、探不到就负缓存一段时间，期间不再重扫（即「不通则不再尝试」，避免每次请求都全网段扫）。
 _AUTO_TTL = 300.0                 # 探到地址的缓存时长（秒）
 _AUTO_NEG_TTL = 300.0             # 没探到的负缓存时长（秒）——这段时间内不再全网段重扫
-_FS_PROBE_TIMEOUT = 1.2          # 单个候选的探测超时（秒）
+_FS_PROBE_TIMEOUT = 1.2          # 常见地址 HTTP 探测超时（秒）
+_SCAN_TIMEOUT = 0.8              # 网段粗扫单个 TCP 连接超时（秒）——全并发，一个超时窗口扫完整段
 _auto_state = {"endpoint": "", "ts": 0.0}   # ts=0 表示从未探测
 _auto_lock = asyncio.Lock()       # 单飞：避免多个请求同时触发全网段重扫
 
@@ -177,6 +178,21 @@ async def _probe_is_fs(host_port: str, timeout: float = _FS_PROBE_TIMEOUT) -> bo
         return False
 
 
+async def _tcp_open(host: str, port: int, timeout: float = _SCAN_TIMEOUT) -> bool:
+    """只测 TCP 端口是否打开（比完整 HTTP GET 轻得多）。用于网段粗扫，筛出极少数开放 IP 再做 HTTP 确认。"""
+    try:
+        fut = asyncio.open_connection(host, port)
+        _reader, writer = await asyncio.wait_for(fut, timeout=timeout)
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
 async def discover_auto(force: bool = False) -> str:
     """
     自动探测可达的 FlareSolverr，返回规整 URL（如 http://172.17.0.3:8191）；探不到返回 ''。
@@ -210,22 +226,21 @@ async def discover_auto(force: bool = False) -> str:
                 return ep
 
         # 2) 扫描本容器所在 /24 网段（找 sibling 容器 IP，如 172.17.0.3）
+        #    两段式、更快更轻：先「全并发 TCP 连扫」一个超时窗口扫完整段（不是分批），
+        #    只挑出极少数 8191 开放的 IP，再对它们做 HTTP 确认是不是 FlareSolverr。
         own = _own_ipv4()
         found = ""
         if own.count(".") == 3:
             base = own.rsplit(".", 1)[0]
             skip = {own, gw}
             hosts = [f"{base}.{i}" for i in range(1, 255) if f"{base}.{i}" not in skip]
-            sem = asyncio.Semaphore(64)
-
-            async def _scan(h: str) -> str:
-                async with sem:
-                    return h if await _probe_is_fs(f"{h}:{port}") else ""
-
-            hits = [h for h in await asyncio.gather(*[_scan(h) for h in hosts]) if h]
-            if hits:
-                hits.sort(key=lambda x: int(x.rsplit(".", 1)[1]))  # 取末位最小，结果稳定
-                found = f"http://{hits[0]}:{port}"
+            opens = await asyncio.gather(*[_tcp_open(h, port) for h in hosts])
+            open_hosts = sorted((h for h, o in zip(hosts, opens) if o),
+                                key=lambda x: int(x.rsplit(".", 1)[1]))  # 末位升序，结果稳定
+            for h in open_hosts:
+                if await _probe_is_fs(f"{h}:{port}"):
+                    found = f"http://{h}:{port}"
+                    break
 
         _auto_state.update({"endpoint": found, "ts": time.monotonic()})
         if found:

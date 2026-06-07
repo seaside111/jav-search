@@ -2060,9 +2060,11 @@ async function testJavdb() {
     rows.push(`<div><b style="color:${ok ? 'var(--green)' : 'var(--red)'}">${ok ? '✓ 可正常访问' : '✗ 无法获取片源'}</b></div>`);
     rows.push(`<div>结论：${escHtml(d.message || '')}</div>`);
     rows.push(`<div>取页方式：${escHtml(d.via || '-')}　HTTP：${escHtml(String(d.http_status ?? '-'))}　解析条数：${escHtml(String(d.item_count ?? 0))}</div>`);
-    // 地址栏留空、由程序自动探测到的 FlareSolverr 地址
-    if (d.fs_endpoint && !document.getElementById('cfgJavdbFlare').value.trim()) {
-      rows.push(`<div>自动探测到 FlareSolverr：<b style="color:var(--accent)">${escHtml(d.fs_endpoint)}</b>（地址栏留空即自动使用，无需手填）</div>`);
+    // 地址栏留空、由程序自动探测到的 FlareSolverr 地址：直接回填到地址框，方便查看 / 一键保存固定
+    const javdbFlareEl = document.getElementById('cfgJavdbFlare');
+    if (d.fs_endpoint && !javdbFlareEl.value.trim()) {
+      javdbFlareEl.value = d.fs_endpoint;
+      rows.push(`<div>自动探测到 FlareSolverr：<b style="color:var(--accent)">${escHtml(d.fs_endpoint)}</b> —— 已填入上方地址框，点「保存设置」即可固定（留空则每次自动探测）</div>`);
     }
     rows.push(`<div>Cloudflare 拦截：${d.cf_blocked ? '<span style="color:var(--red)">是</span>' : '否'}</div>`);
     if (ip.country_code) {
@@ -2110,8 +2112,10 @@ async function testFc2() {
     rows.push(`<div><b style="color:${ok ? 'var(--green)' : 'var(--red)'}">${ok ? '✓ 可正常访问' : '✗ 无法获取片源'}</b></div>`);
     rows.push(`<div>结论：${escHtml(d.message || '')}</div>`);
     rows.push(`<div>取页方式：${escHtml(d.via || '-')}　HTTP：${escHtml(String(d.http_status ?? '-'))}　解析条数：${escHtml(String(d.item_count ?? 0))}　文章链接：${escHtml(String(d.article_links ?? 0))}</div>`);
-    if (d.fs_endpoint && !document.getElementById('cfgFc2Flare').value.trim() && !document.getElementById('cfgJavdbFlare').value.trim()) {
-      rows.push(`<div>自动探测到 FlareSolverr：<b style="color:var(--accent)">${escHtml(d.fs_endpoint)}</b>（地址栏留空即自动使用）</div>`);
+    const fc2FlareEl = document.getElementById('cfgFc2Flare');
+    if (d.fs_endpoint && !fc2FlareEl.value.trim() && !document.getElementById('cfgJavdbFlare').value.trim()) {
+      fc2FlareEl.value = d.fs_endpoint;
+      rows.push(`<div>自动探测到 FlareSolverr：<b style="color:var(--accent)">${escHtml(d.fs_endpoint)}</b> —— 已填入上方 FC2 地址框，点「保存设置」即可固定（留空则每次自动探测）</div>`);
     }
     rows.push(`<div>Cloudflare 拦截：${d.cf_blocked ? '<span style="color:var(--red)">是</span>' : '否'}</div>`);
     if (d.error && d.error !== 'cf_challenge') {
