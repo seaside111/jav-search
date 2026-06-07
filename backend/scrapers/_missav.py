@@ -16,7 +16,8 @@ import re
 from typing import Optional
 import httpx
 
-from ._fsgate import flaresolverr_request as _fs_request, discover_auto as _fs_discover
+from ._fsgate import (flaresolverr_request as _fs_request, discover_auto as _fs_discover,
+                      PRIO_DETAIL, PRIO_LATEST)
 
 # 可直连的镜像优先；域名常变，可由配置 fc2_missav_base 覆盖（逗号分隔）
 DEFAULT_BASES = ["https://missav.ws", "https://missav123.com"]
@@ -73,15 +74,21 @@ def _looks_like_cf(html: str, status: int) -> bool:
             or "cf-chl-bypass" in head)
 
 
-async def _fetch_via_flaresolverr(url: str, fs_url: str, proxy: Optional[str]) -> str:
+async def _fetch_via_flaresolverr(url: str, fs_url: str, proxy: Optional[str],
+                                  priority: int = PRIO_LATEST) -> str:
     """统一走 _fsgate 的智能适配 + 全局串行；MissAV 仅需 HTML，丢弃 status/err。"""
     html, _status, _err = await _fs_request(url, fs_url, proxy, None,
-                                            max_timeout=40000, read_timeout=70.0)
+                                            max_timeout=40000, read_timeout=70.0,
+                                            priority=priority)
     return html or ""
 
 
-async def _get_html(num: str, proxy: Optional[str], opts: dict) -> str:
-    """按镜像依次直连抓 MissAV 的 FC2 页面；命中 CF 时退到 FlareSolverr。"""
+async def _get_html(num: str, proxy: Optional[str], opts: dict,
+                    allow_flaresolverr: bool = True,
+                    priority: int = PRIO_LATEST) -> str:
+    """按镜像依次直连抓 MissAV 的 FC2 页面；命中 CF 时退到 FlareSolverr。
+    allow_flaresolverr=False（列表批量补全用）：命中 CF 直接放弃，绝不回退 FlareSolverr，
+    避免一次列表补全产生几十个 FlareSolverr 请求把它压垮。"""
     paths = [f"/ja/FC2-PPV-{num}", f"/FC2-PPV-{num}"]
     for base in opts["bases"]:
         for path in paths:
@@ -93,12 +100,12 @@ async def _get_html(num: str, proxy: Optional[str], opts: dict) -> str:
                 if resp.status_code == 200 and not _looks_like_cf(resp.text, 200):
                     if str(num) in resp.text:
                         return resp.text
-                elif _looks_like_cf(resp.text, resp.status_code):
+                elif allow_flaresolverr and _looks_like_cf(resp.text, resp.status_code):
                     fs_url = opts.get("flaresolverr_url") or await _fs_discover()  # 留空则自动探测
                     if not fs_url:
                         continue
                     fs_proxy = proxy if opts.get("flaresolverr_use_proxy", True) else None
-                    html = await _fetch_via_flaresolverr(url, fs_url, fs_proxy)
+                    html = await _fetch_via_flaresolverr(url, fs_url, fs_proxy, priority)
                     if html and str(num) in html:
                         return html
             except Exception:
@@ -118,17 +125,22 @@ def _clean_title(title: str, num: str) -> str:
     return t.strip()
 
 
-async def fetch_fc2(num: str, proxy: Optional[str] = None) -> Optional[dict]:
+async def fetch_fc2(num: str, proxy: Optional[str] = None,
+                    allow_flaresolverr: bool = True,
+                    priority: int = PRIO_LATEST) -> Optional[dict]:
     """
     抓 MissAV 补全 FC2 元数据。返回 {title, cover, actors, tags} 或 None（不存在/未启用）。
     封面优先用页面 og:image，没有则回退确定性 fourhoi URL。
+    allow_flaresolverr=False：列表批量补全时禁用 FlareSolverr 回退（保护其不被压垮）。
+    priority：FlareSolverr 回退时的闸优先级；详情路径传 PRIO_DETAIL 以便插队。
     """
     if not num:
         return None
     opts = _runtime()
     if not opts.get("enabled"):
         return None
-    html = await _get_html(num, proxy, opts)
+    html = await _get_html(num, proxy, opts, allow_flaresolverr=allow_flaresolverr,
+                           priority=priority)
     if not html:
         return None
 

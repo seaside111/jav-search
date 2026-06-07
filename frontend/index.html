@@ -1686,10 +1686,14 @@ function detailNeedsJavdbExtra(m) {
 // 渲染详情里的「磁力 + 样品图」区块（JavDB 独有）；补抓中时显示提示
 function renderDetailExtra(m, idx) {
   const di = (typeof idx === 'number') ? idx : -1;
-  const samplesHtml = (m.samples || []).map(s =>
-    `<a class="detail-sample" href="${escAttr(s)}" target="_blank">
-      <img src="${escAttr(API + '/api/img?url=' + encodeURIComponent(s))}" loading="lazy" onerror="this.parentNode.style.display='none'">
-    </a>`).join('');
+  const samplesHtml = (m.samples || []).map(s => {
+    // 缩略图与「点开大图」都走后端图片代理：代理带正确 Referer + 出口代理抓取，
+    // 这样即便客户端本机没有代理，也能正常查看原图（原始 CDN 多有防盗链/需代理）。
+    const proxied = API + '/api/img?url=' + encodeURIComponent(s);
+    return `<a class="detail-sample" href="${escAttr(proxied)}" target="_blank">
+      <img src="${escAttr(proxied)}" loading="lazy" onerror="this.parentNode.style.display='none'">
+    </a>`;
+  }).join('');
   const magnetsHtml = (m.magnets || []).map((g, j) => {
     const badges = [];
     if (g.hd) badges.push('<span class="mag-badge hd">高清</span>');
@@ -2120,6 +2124,10 @@ async function testFc2() {
     rows.push(`<div>Cloudflare 拦截：${d.cf_blocked ? '<span style="color:var(--red)">是</span>' : '否'}</div>`);
     if (d.error && d.error !== 'cf_challenge') {
       rows.push(`<div style="color:var(--text-dim)">错误：${escHtml(d.error)}</div>`);
+    }
+    // 服务端 500（diagnose 抛异常）时把真实报错显示出来，便于定位
+    if (d.detail) {
+      rows.push(`<div style="color:var(--red)">服务端错误：${escHtml(d.detail)}</div>`);
     }
     // 0 条时回显实际页面，便于定位（真盾 / 登录墙 / 选择器不匹配）
     if (!ok && (d.page_title || d.page_snippet)) {

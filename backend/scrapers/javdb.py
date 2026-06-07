@@ -22,7 +22,8 @@ from bs4 import BeautifulSoup
 
 from ._fsgate import (flaresolverr_request as _fs_request, fs_candidates as _fs_candidates,
                       normalize_fs_url as _normalize_fs_url, resolved_endpoint as _fs_resolved,
-                      discover_auto as _fs_discover)
+                      discover_auto as _fs_discover,
+                      PRIO_DETAIL, PRIO_SEARCH, PRIO_LATEST)
 
 JAVDB_BASE = "https://javdb.com"
 SOURCE = "JavDB"
@@ -124,17 +125,19 @@ def _is_cf_challenge(html: str, status: int = 200) -> bool:
 # 返回 (html, status, error)
 # ──────────────────────────────────────────────
 async def _fetch_via_flaresolverr(url: str, flaresolverr_url: str, proxy: Optional[str],
-                                  cookies: Optional[dict] = None) -> tuple[str, int, str]:
+                                  cookies: Optional[dict] = None,
+                                  priority: int = PRIO_LATEST) -> tuple[str, int, str]:
     """
     通过 FlareSolverr 获取过盾后的 HTML（统一走 _fsgate 的智能适配 + 全局串行）。
     cookies 用于传入 over18 等绕过年龄门；地址智能适配 / 候选回退 / 缓存 / 串行均由共享层处理。
+    priority 透传给闸：详情点击高优先级，可插到首页最新/搜索的批量任务前面。
     """
     return await _fs_request(url, flaresolverr_url, proxy, cookies,
-                             max_timeout=40000, read_timeout=70.0)
+                             max_timeout=40000, read_timeout=70.0, priority=priority)
 
 
 async def _fetch_html(url: str, proxy: Optional[str], opts: Optional[dict] = None,
-                      retries: int = 2) -> tuple[str, int, str]:
+                      retries: int = 2, priority: int = PRIO_LATEST) -> tuple[str, int, str]:
     """
     取单页 HTML。优先 FlareSolverr，其次增强 httpx（带 Cookie/请求头/重试）。
     返回 (html, status_code, error_msg)。命中 CF 盾时 error_msg 标记 'cf_challenge'。
@@ -148,14 +151,16 @@ async def _fetch_html(url: str, proxy: Optional[str], opts: Optional[dict] = Non
     if flaresolverr:
         # FlareSolverr 用的代理：默认复用主代理；关掉则让其走自身网络出口（直连）
         fs_proxy = proxy if opts.get("flaresolverr_use_proxy", True) else None
-        html, status, err = await _fetch_via_flaresolverr(url, flaresolverr, fs_proxy, cookies)
+        html, status, err = await _fetch_via_flaresolverr(url, flaresolverr, fs_proxy,
+                                                          cookies, priority)
         # 带 Cookie 报错时，自动重试一次不带 Cookie：
         # 某些 FlareSolverr 版本对 cookies 字段敏感会直接 500，去掉 Cookie 往往就能过盾
         # （代价是可能停在年龄门，但至少能拿到页面、由上层识别）。
         # 仅在「确实连上了」FlareSolverr 却报错时重试（err 形如 'flaresolverr: ...'）；
         # 连不上（'flaresolverr 异常: ConnectTimeout' 等）再探一轮也是白费，跳过。
         if err and cookies and "flaresolverr:" in err:
-            html2, status2, err2 = await _fetch_via_flaresolverr(url, flaresolverr, fs_proxy, None)
+            html2, status2, err2 = await _fetch_via_flaresolverr(url, flaresolverr, fs_proxy,
+                                                                 None, priority)
             if not err2:
                 html, status, err = html2, status2, ""
         if err:
@@ -273,7 +278,8 @@ def _parse_list(html: str) -> list[dict]:
     return items
 
 
-async def _fetch_list_only(list_url_builder, proxy, max_results, max_pages=20) -> list[dict]:
+async def _fetch_list_only(list_url_builder, proxy, max_results, max_pages=20,
+                           priority=PRIO_LATEST) -> list[dict]:
     opts = _runtime_options()
     # 走 FlareSolverr 时每页都很慢（浏览器渲染+过盾），只抓 1 页（约 28-40 条，足够首页/首屏），
     # 避免多页累加超过单源超时被整体丢弃；直连（增强 httpx）则保持原页数上限。
@@ -282,7 +288,7 @@ async def _fetch_list_only(list_url_builder, proxy, max_results, max_pages=20) -
     all_items, seen = [], set()
     for page in range(1, max_pages + 1):
         page_url = list_url_builder(page)
-        html, status, err = await _fetch_html(page_url, proxy, opts)
+        html, status, err = await _fetch_html(page_url, proxy, opts, priority=priority)
         if err:
             print(f"[JavDB] list page{page} 失败: {err} (HTTP {status}) {page_url}")
             break
@@ -318,7 +324,8 @@ async def search_list(query: str, mode: str, proxy: Optional[str] = None, max_re
 
     # 番号搜索结果通常很少，限制页数
     pages = 2 if mode == "code" else 20
-    return await _fetch_list_only(build, proxy, max_results, max_pages=pages)
+    return await _fetch_list_only(build, proxy, max_results, max_pages=pages,
+                                  priority=PRIO_SEARCH)
 
 
 # ──────────────────────────────────────────────
@@ -330,12 +337,13 @@ async def get_latest(proxy: Optional[str] = None, max_results: int = 40) -> list
     def build(page):
         # 最新有码列表
         return f"{JAVDB_BASE}/censored?sort_type=0" + ("" if page == 1 else f"&page={page}")
-    items = await _fetch_list_only(build, proxy, max_results, max_pages=pages)
+    items = await _fetch_list_only(build, proxy, max_results, max_pages=pages,
+                                   priority=PRIO_LATEST)
     if not items:
         # 兜底用首页
         items = await _fetch_list_only(
             lambda p: JAVDB_BASE + ("" if p == 1 else f"/?page={p}"),
-            proxy, max_results, max_pages=pages)
+            proxy, max_results, max_pages=pages, priority=PRIO_LATEST)
     return items
 
 
@@ -343,7 +351,8 @@ async def get_latest(proxy: Optional[str] = None, max_results: int = 40) -> list
 # 详情
 # ──────────────────────────────────────────────
 async def fetch_detail(url: str, proxy: Optional[str] = None) -> Optional[dict]:
-    html, status, err = await _fetch_html(url, proxy, _runtime_options())
+    # 详情为用户交互请求 → 高优先级，可插到首页最新/搜索的批量任务前面
+    html, status, err = await _fetch_html(url, proxy, _runtime_options(), priority=PRIO_DETAIL)
     if err or not html:
         print(f"[JavDB] detail 失败 {url}: {err} (HTTP {status})")
         return None

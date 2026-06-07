@@ -18,7 +18,8 @@ import httpx
 from bs4 import BeautifulSoup
 
 from . import _missav
-from ._fsgate import flaresolverr_request as _fs_request, discover_auto as _fs_discover
+from ._fsgate import (flaresolverr_request as _fs_request, discover_auto as _fs_discover,
+                      PRIO_DETAIL, PRIO_SEARCH, PRIO_LATEST)
 
 FC2_BASE = "https://fc2ppvdb.com"
 SOURCE = "FC2"
@@ -141,14 +142,16 @@ def _is_cf_challenge(html: str, status: int = 200) -> bool:
 # 返回 (html, status, error)。error == 'cf_challenge' 表示命中盾。
 # ──────────────────────────────────────────────
 async def _fetch_via_flaresolverr(url: str, flaresolverr_url: str, proxy: Optional[str],
-                                  cookies: Optional[dict] = None) -> tuple[str, int, str]:
-    """统一走 _fsgate 的智能适配 + 全局串行；FC2 用更长的 maxTimeout/读超时（页面较慢）。"""
+                                  cookies: Optional[dict] = None,
+                                  priority: int = PRIO_LATEST) -> tuple[str, int, str]:
+    """统一走 _fsgate 的智能适配 + 全局串行；FC2 用更长的 maxTimeout/读超时（页面较慢）。
+    priority 透传给闸：详情点击高优先级，可插到首页最新/搜索的批量任务前面。"""
     return await _fs_request(url, flaresolverr_url, proxy, cookies,
-                             max_timeout=45000, read_timeout=75.0)
+                             max_timeout=45000, read_timeout=75.0, priority=priority)
 
 
 async def _fetch_html(url: str, proxy: Optional[str], opts: Optional[dict] = None,
-                      retries: int = 2) -> tuple[str, int, str]:
+                      retries: int = 2, priority: int = PRIO_LATEST) -> tuple[str, int, str]:
     opts = opts or _runtime_options()
     cookies = _merge_cookies(opts.get("cookie", ""))
     flaresolverr = opts.get("flaresolverr_url", "")
@@ -158,9 +161,10 @@ async def _fetch_html(url: str, proxy: Optional[str], opts: Optional[dict] = Non
     if flaresolverr:
         fs_proxy = proxy if opts.get("flaresolverr_use_proxy", True) else None
         html, status, err = await _fetch_via_flaresolverr(url, flaresolverr, fs_proxy,
-                                                          cookies or None)
+                                                          cookies or None, priority)
         if err and cookies and "flaresolverr:" in err:
-            html2, status2, err2 = await _fetch_via_flaresolverr(url, flaresolverr, fs_proxy, None)
+            html2, status2, err2 = await _fetch_via_flaresolverr(url, flaresolverr, fs_proxy,
+                                                                 None, priority)
             if not err2:
                 html, status, err = html2, status2, ""
         if err:
@@ -242,6 +246,29 @@ def _dur_to_text(s: str) -> str:
     return (s or "").strip()
 
 
+# 列表卡封面：优先取懒加载的真实地址，跳过 data:URI / 占位图 / svg 图标。
+# fc2ppvdb 首页卡片多用懒加载——未滚动到视口的卡片 src 仍是占位图，真实地址在 data-*，
+# 只读 src 会取到占位图导致前端「有图却加载失败」，故须先读 data-* 并过滤占位。
+_IMG_PLACEHOLDER = ("placeholder", "blank", "loading", "spacer", "lazy", "noimage", "1x1")
+
+
+def _clean_img_src(img) -> str:
+    if not img:
+        return ""
+    for attr in ("data-src", "data-original", "data-lazy-src", "data-lazy",
+                 "data-echo", "src"):
+        v = (img.get(attr) or "").strip()
+        if not v:
+            continue
+        low = v.lower()
+        if low.startswith("data:") or low.endswith(".svg"):
+            continue
+        if any(k in low for k in _IMG_PLACEHOLDER):
+            continue
+        return v
+    return ""
+
+
 # ──────────────────────────────────────────────
 # 列表页解析（首页最新 / 搜索结果）
 # ──────────────────────────────────────────────
@@ -269,14 +296,20 @@ def _parse_list(html: str, max_results: int = 300) -> list[dict]:
             card, parent = parent, parent.parent
             hops += 1
 
-        # 封面：容器内首张图（含懒加载属性）
+        # 封面：① 容器内首张图（优先懒加载真实地址、过滤占位图）；② 否则取背景图；
+        # ③ 仍无则用 MissAV 的确定性封面 URL 兜底（零额外请求，404 由前端图片代理优雅降级）。
+        # 整块加保护：任何边角解析异常都不得拖垮整页解析/诊断，最差退回确定性封面。
         img = card.find("img")
         cover = ""
-        if img:
-            cover = _abs(img.get("src") or img.get("data-src")
-                         or img.get("data-original") or img.get("data-lazy-src") or "")
-        # fc2ppvdb 常缺封面（尤其下架条目）→ 用 MissAV 的确定性封面 URL 兜底（零额外请求，
-        # 404 由前端图片代理优雅降级）。
+        try:
+            cover = _abs(_clean_img_src(img))
+            if not cover:
+                mbg = re.search(r'background-image\s*:\s*url\((["\']?)([^"\')]+)\1\)',
+                                str(card), re.I)
+                if mbg:
+                    cover = _abs(mbg.group(2))
+        except Exception:
+            cover = ""
         if not cover:
             cover = _missav.cover_url(num)
 
@@ -321,7 +354,8 @@ def _parse_list(html: str, max_results: int = 300) -> list[dict]:
     return items
 
 
-async def _fetch_list_pages(url_builder, proxy, max_results, max_pages=10) -> list[dict]:
+async def _fetch_list_pages(url_builder, proxy, max_results, max_pages=10,
+                            priority: int = PRIO_LATEST) -> list[dict]:
     opts = _runtime_options()
     # 走 FlareSolverr 时每页都要过盾、很慢，只抓 1 页（约 20-30 条），避免超单源超时被丢弃。
     if opts.get("flaresolverr_url"):
@@ -329,7 +363,7 @@ async def _fetch_list_pages(url_builder, proxy, max_results, max_pages=10) -> li
     all_items, seen = [], set()
     for page in range(1, max_pages + 1):
         page_url = url_builder(page)
-        html, status, err = await _fetch_html(page_url, proxy, opts)
+        html, status, err = await _fetch_html(page_url, proxy, opts, priority=priority)
         if err:
             print(f"[FC2] list page{page} 失败: {err} (HTTP {status}) {page_url}")
             break
@@ -349,6 +383,74 @@ async def _fetch_list_pages(url_builder, proxy, max_results, max_pages=10) -> li
         if len(all_items) >= max_results or added == 0:
             break
     return all_items[:max_results]
+
+
+# ──────────────────────────────────────────────
+# 列表轻量增强：用 MissAV（直连，不经 FlareSolverr）补列表卡的「标题/封面」
+# fc2ppvdb 首页卡片常封面懒加载占位、标题缺失；而 MissAV 对 FC2 的「标题 + 封面」覆盖
+# 可靠，且默认走直连镜像（仅命中 CF 才回退 FlareSolverr）——因此在列表阶段补全几乎不
+# 增加 FlareSolverr 负担。样品图仍留到打开详情时再抓。
+#  · 只对「标题缺失」的卡片发起补全（首页已带标题时零网络开销）。
+#  · 进程内缓存 num→结果，翻页/刷新命中即零开销。
+#  · 信号量限并发，封面无论是否命中都已有确定性 fourhoi 兜底（前端代理拉取）。
+# ──────────────────────────────────────────────
+_LIST_ENRICH_CACHE: dict = {}
+_LIST_ENRICH_CACHE_MAX = 2000
+
+
+def _missav_enabled() -> bool:
+    try:
+        from config_manager import load as load_config
+        return bool(load_config().get("fc2_missav_enabled", True))
+    except Exception:
+        return True
+
+
+def _needs_title(it: dict) -> bool:
+    t = (it.get("title") or "").strip()
+    return (not t) or t == (it.get("code") or "")
+
+
+async def _enrich_one(it: dict, proxy: Optional[str], sem: asyncio.Semaphore) -> None:
+    num = _extract_number(it.get("code") or it.get("url") or "")
+    if not num:
+        return
+    data = _LIST_ENRICH_CACHE.get(num)
+    if data is None:
+        async with sem:
+            data = _LIST_ENRICH_CACHE.get(num)   # 排队期间可能已被其它请求填充
+            if data is None:
+                try:
+                    # 列表补全严格直连 MissAV，禁用 FlareSolverr 回退，避免压垮 FlareSolverr
+                    data = await _missav.fetch_fc2(num, proxy,
+                                                   allow_flaresolverr=False) or {}
+                except Exception:
+                    data = {}
+                if len(_LIST_ENRICH_CACHE) >= _LIST_ENRICH_CACHE_MAX:
+                    _LIST_ENRICH_CACHE.pop(next(iter(_LIST_ENRICH_CACHE)))
+                _LIST_ENRICH_CACHE[num] = data
+    if not data:
+        return
+    if data.get("title") and _needs_title(it):
+        it["title"] = data["title"]
+    if data.get("cover"):
+        it["cover"] = data["cover"]           # 升级为 MissAV 真实封面（og:image）
+    srcs = it.get("sources") or [it.get("source", SOURCE)]
+    if "MissAV" not in srcs:
+        it["sources"] = list(srcs) + ["MissAV"]
+
+
+async def _enrich_list_missav(items: list[dict], proxy: Optional[str],
+                              limit: int = 60, concurrency: int = 8) -> list[dict]:
+    if not items or not _missav_enabled():
+        return items
+    targets = [it for it in items if _needs_title(it)][:limit]
+    if not targets:
+        return items
+    sem = asyncio.Semaphore(concurrency)
+    await asyncio.gather(*[_enrich_one(it, proxy, sem) for it in targets],
+                         return_exceptions=True)
+    return items
 
 
 # ──────────────────────────────────────────────
@@ -382,7 +484,9 @@ async def search_list(query: str, mode: str, proxy: Optional[str] = None,
         base = f"{FC2_BASE}/search?stext={kw}"
         return base if page == 1 else f"{base}&page={page}"
 
-    return await _fetch_list_pages(build, proxy, max_results, max_pages=10)
+    items = await _fetch_list_pages(build, proxy, max_results, max_pages=10,
+                                    priority=PRIO_SEARCH)
+    return await _enrich_list_missav(items, proxy)
 
 
 # ──────────────────────────────────────────────
@@ -392,13 +496,14 @@ async def get_latest(proxy: Optional[str] = None, max_results: int = 40) -> list
     def build(page):
         return FC2_BASE + ("/" if page == 1 else f"/?page={page}")
     pages = max(2, min(max_results // 20 + 1, 6))
-    items = await _fetch_list_pages(build, proxy, max_results, max_pages=pages)
+    items = await _fetch_list_pages(build, proxy, max_results, max_pages=pages,
+                                    priority=PRIO_LATEST)
     if not items:
         # 兜底：文章列表页
         items = await _fetch_list_pages(
             lambda p: f"{FC2_BASE}/articles" + ("" if p == 1 else f"?page={p}"),
-            proxy, max_results, max_pages=pages)
-    return items
+            proxy, max_results, max_pages=pages, priority=PRIO_LATEST)
+    return await _enrich_list_missav(items, proxy)
 
 
 # ──────────────────────────────────────────────
@@ -410,8 +515,9 @@ async def fetch_detail(url: str, proxy: Optional[str] = None) -> Optional[dict]:
     （fc2ppvdb 对下架条目常只剩番号骨架）。两边并发，几乎不增加额外延迟。
     """
     num = _extract_number(url)
-    fc2_task = _fetch_html(url, proxy, _runtime_options())
-    missav_task = _missav.fetch_fc2(num, proxy) if num else _noop()
+    # 详情为用户交互请求 → 高优先级，可插到首页最新/搜索的批量任务前面
+    fc2_task = _fetch_html(url, proxy, _runtime_options(), priority=PRIO_DETAIL)
+    missav_task = _missav.fetch_fc2(num, proxy, priority=PRIO_DETAIL) if num else _noop()
     (html, status, err), mv = await asyncio.gather(fc2_task, missav_task,
                                                    return_exceptions=False)
 
