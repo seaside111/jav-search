@@ -163,12 +163,15 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
     sem = asyncio.Semaphore(concurrency)
 
     # 是否启用了 FlareSolverr（影响走 FlareSolverr 的来源 JavDB/FC2 的并发与超时）
+    # 含「自动探测」：地址留空但已自动探到本机 FlareSolverr 时，同样按走 FS 处理（串行+放宽超时）
     flaresolverr_on = False
     try:
         from config_manager import load as load_config
+        from ._fsgate import auto_endpoint as _fs_auto
         _cfg = load_config()
         flaresolverr_on = bool((_cfg.get("javdb_flaresolverr_url") or "").strip()
-                               or (_cfg.get("fc2_flaresolverr_url") or "").strip())
+                               or (_cfg.get("fc2_flaresolverr_url") or "").strip()
+                               or _fs_auto())
     except Exception:
         pass
 

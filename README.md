@@ -39,10 +39,10 @@ docker-compose logs -f
 
 > **部署前务必修改 docker-compose 里的 `AUTH_USERNAME` / `AUTH_PASSWORD` / `AUTH_SECRET`！**
 
-### FlareSolverr（JavDB / FC2 过 Cloudflare 盾用 · 「填 URL 即用」）
+### FlareSolverr（JavDB / FC2 过 Cloudflare 盾用 · 留空自动探测 / 也可手填）
 
 JavDB / FC2 需要过 Cloudflare 盾。**FlareSolverr 不再打进本项目的安装包**——你只需在任意地方
-自行跑一个 FlareSolverr，然后在「设置」里**填上它的 URL**即可，简单可控、互不绑定。
+自行跑一个 FlareSolverr，本应用会**自动找到它**，简单可控、互不绑定。
 
 ```bash
 # 自己单独跑一个 FlareSolverr（任意主机/NAS 均可，端口默认 8191）
@@ -52,13 +52,16 @@ docker run -d --name flaresolverr --restart unless-stopped \
   ghcr.io/flaresolverr/flaresolverr:latest
 ```
 
-然后在「设置 → JavDB 反爬 / FC2 数据源」的 **FlareSolverr 地址**里填它的 URL，例如：
+**最省事：「设置 → JavDB 反爬」的 FlareSolverr 地址栏留空即可** —— 程序会自动探测本机/同宿主机的
+FlareSolverr（依次试容器名 / `host.docker.internal` / 网桥网关 / `127.0.0.1`，再扫描 docker 同网段的
+8191），装了就自然连上，**无需理解 docker 网络、也不用手查容器 IP**。点「测试 JavDB 连通」会显示探到的地址。
+
+也可以**手填具体 URL**固定使用（优先级最高），例如：
 
 - 局域网：`http://192.168.1.100:8191`
 - 绑定的外网域名：`https://fs.yourdomain.com`
 
 填法很宽松：缺 `http://` 会自动补、不填端口默认 `8191`、带 `/v1` 或末尾斜杠都会自动清理。
-填完点「测试 JavDB 连通」确认可达即可。
 
 > ⚠️ FlareSolverr 的出口 IP = 跑它的那台机器的 IP。若它在**机房 VPS（数据中心 IP）**上，
 > JavDB 仍可能按 IP 信誉**硬封 403**——此时在「设置 → 主代理」填一个【**非日本**】住宅代理

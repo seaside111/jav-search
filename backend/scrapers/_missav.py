@@ -16,7 +16,7 @@ import re
 from typing import Optional
 import httpx
 
-from ._fsgate import flaresolverr_request as _fs_request
+from ._fsgate import flaresolverr_request as _fs_request, discover_auto as _fs_discover
 
 # 可直连的镜像优先；域名常变，可由配置 fc2_missav_base 覆盖（逗号分隔）
 DEFAULT_BASES = ["https://missav.ws", "https://missav123.com"]
@@ -93,9 +93,12 @@ async def _get_html(num: str, proxy: Optional[str], opts: dict) -> str:
                 if resp.status_code == 200 and not _looks_like_cf(resp.text, 200):
                     if str(num) in resp.text:
                         return resp.text
-                elif _looks_like_cf(resp.text, resp.status_code) and opts.get("flaresolverr_url"):
+                elif _looks_like_cf(resp.text, resp.status_code):
+                    fs_url = opts.get("flaresolverr_url") or await _fs_discover()  # 留空则自动探测
+                    if not fs_url:
+                        continue
                     fs_proxy = proxy if opts.get("flaresolverr_use_proxy", True) else None
-                    html = await _fetch_via_flaresolverr(url, opts["flaresolverr_url"], fs_proxy)
+                    html = await _fetch_via_flaresolverr(url, fs_url, fs_proxy)
                     if html and str(num) in html:
                         return html
             except Exception:

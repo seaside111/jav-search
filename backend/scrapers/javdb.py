@@ -21,7 +21,8 @@ import httpx
 from bs4 import BeautifulSoup
 
 from ._fsgate import (flaresolverr_request as _fs_request, fs_candidates as _fs_candidates,
-                      normalize_fs_url as _normalize_fs_url, resolved_endpoint as _fs_resolved)
+                      normalize_fs_url as _normalize_fs_url, resolved_endpoint as _fs_resolved,
+                      discover_auto as _fs_discover)
 
 JAVDB_BASE = "https://javdb.com"
 SOURCE = "JavDB"
@@ -141,6 +142,9 @@ async def _fetch_html(url: str, proxy: Optional[str], opts: Optional[dict] = Non
     opts = opts or _runtime_options()
     cookies = _merge_cookies(opts.get("cookie", ""))
     flaresolverr = opts.get("flaresolverr_url", "")
+    # 设置页留空 → 自动探测本机/同宿主机的 FlareSolverr（带缓存/负缓存，探不到则回退直连）
+    if not flaresolverr:
+        flaresolverr = await _fs_discover()
     if flaresolverr:
         # FlareSolverr 用的代理：默认复用主代理；关掉则让其走自身网络出口（直连）
         fs_proxy = proxy if opts.get("flaresolverr_use_proxy", True) else None
@@ -565,16 +569,23 @@ async def diagnose(proxy: Optional[str] = None) -> dict:
     """
     opts = _runtime_options()
     fs_raw = opts.get("flaresolverr_url") or ""
-    via = "flaresolverr" if fs_raw else "httpx"
+    # 地址留空：诊断时强制重新自动探测一次，并把探到的地址用于本次取页
+    fs_auto = ""
+    if not fs_raw:
+        fs_auto = await _fs_discover(force=True)
+        if fs_auto:
+            opts = {**opts, "flaresolverr_url": fs_auto}
+    fs_effective = fs_raw or fs_auto
+    via = "flaresolverr" if fs_effective else "httpx"
     test_url = f"{JAVDB_BASE}/censored?sort_type=0"
 
     html, status, err = await _fetch_html(test_url, proxy, opts, retries=1)
     exit_ip = await _probe_exit_ip(proxy)
 
-    # FlareSolverr 实际连通的地址（智能适配后）：用于回显，并提示是否做了自动改写
-    fs_endpoint = _fs_resolved(fs_raw) if fs_raw else ""
-    fs_cands = _fs_candidates(fs_raw) if fs_raw else []
-    fs_adapted = bool(fs_endpoint and fs_endpoint != _normalize_fs_url(fs_raw))
+    # FlareSolverr 实际连通的地址（手填走智能适配结果；留空走自动探测结果）：用于回显
+    fs_endpoint = (_fs_resolved(fs_raw) or _normalize_fs_url(fs_raw)) if fs_raw else fs_auto
+    fs_cands = _fs_candidates(fs_raw) if fs_raw else ([fs_auto] if fs_auto else [])
+    fs_adapted = bool(fs_raw and fs_endpoint and fs_endpoint != _normalize_fs_url(fs_raw))
 
     cf_blocked = (err == "cf_challenge") or _is_cf_challenge(html, status)
     items = _parse_list(html) if html and not cf_blocked else []
@@ -639,10 +650,18 @@ async def diagnose(proxy: Optional[str] = None) -> dict:
     if not reachable and not cf_blocked and (err or "").startswith("HTTP 5"):
         message = f"上游返回 {err}（多为代理/FlareSolverr 到 JavDB 的链路错误，非 CF 盾）。"
 
-    # FlareSolverr 地址自动适配提示：用户填了 localhost 但实际通过宿主机网关/容器名连上时点明
+    # FlareSolverr 地址提示
     fs_hint = ""
-    if fs_adapted and fs_endpoint:
+    if fs_auto and fs_endpoint:
+        # 地址留空、由程序自动探测到的：告知探到的地址，用户可不填、保持自动
+        fs_hint = (f"已自动探测到 FlareSolverr：{fs_endpoint}（地址栏留空即自动使用，无需手填；"
+                   f"也可把它固定填进设置）。")
+    elif fs_adapted and fs_endpoint:
         fs_hint = f"已自动把 FlareSolverr 地址适配为 {fs_endpoint} 并连通（建议把设置里的地址直接改成它）。"
+    elif not fs_effective and not reachable:
+        # 留空且没探到：提示自动探测的前提
+        fs_hint = ("未自动探测到可用的 FlareSolverr（地址栏留空时会自动找本机/同宿主机的 8191）。"
+                   "若已自行部署，请确认它在运行；或直接在地址栏手填它的 URL。")
 
     return {
         "reachable": reachable,

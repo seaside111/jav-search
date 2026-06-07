@@ -18,7 +18,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from . import _missav
-from ._fsgate import flaresolverr_request as _fs_request
+from ._fsgate import flaresolverr_request as _fs_request, discover_auto as _fs_discover
 
 FC2_BASE = "https://fc2ppvdb.com"
 SOURCE = "FC2"
@@ -152,6 +152,9 @@ async def _fetch_html(url: str, proxy: Optional[str], opts: Optional[dict] = Non
     opts = opts or _runtime_options()
     cookies = _merge_cookies(opts.get("cookie", ""))
     flaresolverr = opts.get("flaresolverr_url", "")
+    # JavDB/FC2 地址都留空 → 自动探测（FC2 强制需要 FlareSolverr，探到才有戏）
+    if not flaresolverr:
+        flaresolverr = await _fs_discover()
     if flaresolverr:
         fs_proxy = proxy if opts.get("flaresolverr_use_proxy", True) else None
         html, status, err = await _fetch_via_flaresolverr(url, flaresolverr, fs_proxy,
@@ -555,6 +558,12 @@ def _inspect_page(html: str) -> dict:
 
 async def diagnose(proxy: Optional[str] = None) -> dict:
     opts = _runtime_options()
+    # 地址留空：诊断时强制自动探测一次，用于本次取页与回显
+    fs_auto = ""
+    if not opts.get("flaresolverr_url"):
+        fs_auto = await _fs_discover(force=True)
+        if fs_auto:
+            opts = {**opts, "flaresolverr_url": fs_auto}
     via = "flaresolverr" if opts.get("flaresolverr_url") else "httpx"
     html, status, err = await _fetch_html(FC2_BASE + "/", proxy, opts, retries=1)
     cf_blocked = (err == "cf_challenge") or _is_cf_challenge(html, status)
@@ -567,8 +576,9 @@ async def diagnose(proxy: Optional[str] = None) -> dict:
     if reachable:
         message = f"连接正常，解析到 {len(items)} 条最新片源。"
     elif not opts.get("flaresolverr_url"):
-        message = ("FC2PPVDB 启用了 Cloudflare Turnstile 人机验证，直连无法通过。"
-                   "请配置 FlareSolverr（可复用 JavDB 的 FlareSolverr 地址）。")
+        message = ("FC2PPVDB 启用了 Cloudflare Turnstile 人机验证，直连无法通过；"
+                   "且未自动探测到本机/同宿主机的 FlareSolverr。请确认已部署 FlareSolverr（地址栏留空会"
+                   "自动探测），或直接在地址栏手填它的 URL（可复用 JavDB 的）。")
     elif err and err.startswith("flaresolverr"):
         message = f"FlareSolverr 报错：{err.split('flaresolverr:', 1)[-1].strip() or err}"
     elif cf_blocked:
@@ -593,10 +603,11 @@ async def diagnose(proxy: Optional[str] = None) -> dict:
         "http_status": status,
         "item_count": len(items),
         "via": via,
+        "fs_endpoint": fs_auto,              # 自动探测到的 FlareSolverr 地址（手填则为空）
         "error": err,
         "page_title": page.get("title", ""),
         "page_snippet": page.get("snippet", ""),
         "article_links": page.get("article_links", 0),
         "page_kind": page.get("kind", ""),
-        "message": message,
+        "message": (message + (f" 已自动探测到 FlareSolverr：{fs_auto}。" if fs_auto and reachable else "")),
     }
