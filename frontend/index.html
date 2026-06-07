@@ -599,8 +599,8 @@
           <h3>JavDB 反爬（1.4.2）</h3>
           <div class="setting-row">
             <label class="setting-label">FlareSolverr 地址</label>
-            <input class="setting-input" id="cfgJavdbFlare" type="text" placeholder="http://192.168.1.100:8191">
-            <span class="setting-hint">填了则 JavDB 请求改走 FlareSolverr 过 Cloudflare 盾；留空走增强直连</span>
+            <input class="setting-input" id="cfgJavdbFlare" type="text" placeholder="http://192.168.1.100:8191 或 https://fs.你的域名.com">
+            <span class="setting-hint">自行部署 FlareSolverr 后把它的 URL 填这里即可（局域网 IP 或外网域名都行）；填了则 JavDB 走它过 Cloudflare 盾，留空走增强直连。后端已做串行+排队上限+熔断，多任务并发也不会把它压垮</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">FlareSolverr 复用代理</label>
@@ -2279,6 +2279,11 @@ function mergeLatestBatch(items) {
     const ex = latestCodeIndex[key];
     if (ex === undefined) {
       it.sources = (it.sources && it.sources.length) ? it.sources : [it.source];
+      // 记录各来源各自的详情页 URL（首页最新是前端按番号合并，后端不给 source_urls，
+      // 这里得自己补——否则 JavBus+JavDB 合并卡缺 source_urls['JavDB']，详情页就抓不到
+      // JavDB 样品图/磁力。单源卡也一并记上，保证后续被合并时不丢自己的 URL）。
+      it.source_urls = it.source_urls || {};
+      if (it.source && it.url) it.source_urls[it.source] = it.url;
       latestCodeIndex[key] = currentResults.length;
       currentResults.push(it);
       added++;
@@ -2287,6 +2292,10 @@ function mergeLatestBatch(items) {
       const set = new Set(itemSources(cur));
       itemSources(it).forEach(s => set.add(s));
       cur.sources = [...set];
+      // 并入各来源详情页 URL（合并卡按需补抓非主来源样品图/磁力的依据）
+      cur.source_urls = cur.source_urls || {};
+      if (it.source_urls) Object.assign(cur.source_urls, it.source_urls);
+      if (it.source && it.url && !cur.source_urls[it.source]) cur.source_urls[it.source] = it.url;
       // 补充缺失字段（不覆盖已有）
       for (const k of ['cover', 'title', 'release_date', 'duration', 'director',
                        'studio', 'label', 'series', 'score', 'score_count']) {

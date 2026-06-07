@@ -39,59 +39,33 @@ docker-compose logs -f
 
 > **部署前务必修改 docker-compose 里的 `AUTH_USERNAME` / `AUTH_PASSWORD` / `AUTH_SECRET`！**
 
-### 一键部署（含 FlareSolverr · Beta 推荐）
+### FlareSolverr（JavDB / FC2 过 Cloudflare 盾用 · 「填 URL 即用」）
 
-JavDB / FC2 需要过 Cloudflare 盾，本版提供**内置 FlareSolverr 的一键包**，无需单独装 FlareSolverr、无需在设置页手填地址（已通过环境变量预置为 `http://flaresolverr:8191`，并对各种填法做了智能适配）：
-
-```bash
-# 方式 A：零构建，直接拉取 beta 镜像 + FlareSolverr
-docker compose -f docker-compose.hub.yml up -d
-
-# 方式 B：拿到源码包后本地构建 + FlareSolverr
-docker compose -f docker-compose.flaresolverr.yml up -d --build
-```
-
-#### 不想用 compose？纯 `docker run` 一键装（含 FlareSolverr）
-
-两个容器放在同一自定义网络里，jav-search 用容器名 `flaresolverr` 直连，无需对外发布 8191：
+JavDB / FC2 需要过 Cloudflare 盾。**FlareSolverr 不再打进本项目的安装包**——你只需在任意地方
+自行跑一个 FlareSolverr，然后在「设置」里**填上它的 URL**即可，简单可控、互不绑定。
 
 ```bash
-# 1) 建一个共享网络（已存在会报错，可忽略）
-docker network create jav-search-net
-
-# 2) 起 FlareSolverr（仅供内部调用，不映射端口）
+# 自己单独跑一个 FlareSolverr（任意主机/NAS 均可，端口默认 8191）
 docker run -d --name flaresolverr --restart unless-stopped \
-  --network jav-search-net \
+  -p 8191:8191 \
   -e LOG_LEVEL=info -e TZ=Asia/Shanghai \
   ghcr.io/flaresolverr/flaresolverr:latest
-
-# 3) 起 jav-search（通过 env 预置 FlareSolverr 地址＝容器名直连）
-docker run -d --name jav-search --restart unless-stopped \
-  --network jav-search-net \
-  -p 8085:8085 \
-  -v jav-config:/config \
-  -v /volume1/downloads/jav:/downloads/jav \
-  -v /volume1/media/jav:/media/jav \
-  -e CONFIG_DIR=/config -e PORT=8085 -e TZ=Asia/Shanghai \
-  -e JAVDB_FLARESOLVERR_URL=http://flaresolverr:8191 \
-  -e FC2_FLARESOLVERR_URL=http://flaresolverr:8191 \
-  -e AUTH_USERNAME=admin \
-  -e AUTH_PASSWORD=改成你的强密码 \
-  -e AUTH_SECRET=一串很长的随机字符串 \
-  -e AUTH_SESSION_TTL=604800 \
-  --add-host host.docker.internal:host-gateway \
-  ghcr.io/seaside111/jav-search:beta
 ```
 
-更省事：项目自带一键脚本（变量在文件开头改）——
-- 群晖 / Linux：`bash install.sh`
-- Windows：`powershell -ExecutionPolicy Bypass -File install.ps1`
+然后在「设置 → JavDB 反爬 / FC2 数据源」的 **FlareSolverr 地址**里填它的 URL，例如：
 
-> **只想单独跑 jav-search**（FlareSolverr 装在别处）？去掉上面的 `--network` 与 `JAVDB/FC2_FLARESOLVERR_URL` 两行即可；
-> 之后在「设置」里填 FlareSolverr 地址——Docker 内填 `localhost` 也会被**智能适配**自动改连 `host.docker.internal` / 容器名。
+- 局域网：`http://192.168.1.100:8191`
+- 绑定的外网域名：`https://fs.yourdomain.com`
 
-> ⚠️ FlareSolverr 的出口 IP = 本机/服务器 IP。若部署在**机房 VPS（数据中心 IP）**，JavDB 仍可能按 IP 信誉**硬封 403**——
-> 此时需在「设置 → 主代理」填一个【**非日本**】住宅代理（保持「FlareSolverr 复用主代理」开启）。
+填法很宽松：缺 `http://` 会自动补、不填端口默认 `8191`、带 `/v1` 或末尾斜杠都会自动清理。
+填完点「测试 JavDB 连通」确认可达即可。
+
+> ⚠️ FlareSolverr 的出口 IP = 跑它的那台机器的 IP。若它在**机房 VPS（数据中心 IP）**上，
+> JavDB 仍可能按 IP 信誉**硬封 403**——此时在「设置 → 主代理」填一个【**非日本**】住宅代理
+> （保持「FlareSolverr 复用主代理」开启）。
+
+> 🛡️ **防过载**：后端对发往 FlareSolverr 的请求做了串行闸 + 排队上限 + 连续失败熔断，
+> 即使刮削/最新/搜索/连通测试同时触发，也只会一个一个排队，不会再把单实例挤到卡死。
 
 ---
 
@@ -202,9 +176,7 @@ jav-search/
 ├── Dockerfile
 ├── docker-compose.yml               # bridge 网络（默认）
 ├── docker-compose.host.yml          # host 网络（代理跨网段时用）
-├── docker-compose.hub.yml           # 零构建：拉 beta 镜像 + 内置 FlareSolverr
-├── docker-compose.flaresolverr.yml  # 源码构建 + 内置 FlareSolverr
-├── install.sh / install.ps1         # 纯 docker run 一键安装脚本（含 FlareSolverr）
+├── install.sh / install.ps1         # 纯 docker run 一键安装脚本（仅 jav-search，FlareSolverr 自备）
 ├── .github/workflows/docker-publish.yml  # 推 tag 自动构建多架构镜像（beta→:beta / 正式→:latest）
 ├── README.md
 ├── config/                     # 占位目录（用命名卷时可忽略）

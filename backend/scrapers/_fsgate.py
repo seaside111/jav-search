@@ -1,34 +1,45 @@
 """
-全局 FlareSolverr 串行闸 + 地址智能适配（V1.4.3）。
+全局 FlareSolverr 取页闸（重写：填 URL 即用 + 防过载死机）。
 
-一、串行闸（GATE）
-FlareSolverr 是单浏览器实例、一次只能处理一个请求；客户端并发提交会在其内部排队、
-长时间挂起直至 ReadTimeout（典型症状：后台刮削正占用 FlareSolverr 时，前台点「JavDB
-连通测试」就超时）。所有走 FlareSolverr 的取页——JavDB/FC2 的搜索/详情/诊断/最新，以及
-MissAV 过盾兜底——都通过本闸全局串行，一次只向 FlareSolverr 发一个请求，避免互相撞车。
+定位：FlareSolverr 不绑进安装包，由用户自行部署后，在设置页填一个可达 URL
+（如 http://192.168.1.100:8191 或绑定的外网域名）即用。本模块只负责把
+JavDB / FC2 / MissAV 三源的取页请求安全地送到那个 URL，并防止把它打死。
 
-放置原则：闸只加在「取页层」（即本模块的 flaresolverr_request 内）。上层（如 enrich）
-**不得**在持有任何会与本闸重入的锁后再触发取页。
+为什么需要这把闸：FlareSolverr 是单浏览器实例，一次只能处理一个请求。
+之前的事故是——后台刮削、首页最新、搜索、连通测试同时往它怼，请求在它内部
+排队、互相挤、越堆越多，最终整个实例卡死（典型表现：所有请求一起 ReadTimeout，
+被误判成「IP 失效」）。本模块用三层保护根治：
 
-二、地址智能适配（flaresolverr_request）
-不论用户按哪种 NAS/服务器习惯填地址、把 FlareSolverr 装在哪，后端都尽量自动连上：
-  - 写法兼容：缺 http:// 自动补、缺端口默认 8191、带 /v1 或末尾斜杠自动清理。
-  - Docker localhost 自动改写：容器内填 localhost 指向的是本服务自己（必然连不上），
-    自动按命中概率尝试 host.docker.internal / 同网络容器名 flaresolverr / 网桥网关 172.17.0.1。
-  - 快失败：连接超时压到 6s（死地址不卡 70s），读取给足让 FlareSolverr 渲染。
-  - 连上即缓存该地址，后续请求直接命中、不再多探；连不上给出可读排错提示。
+  1. 串行闸（GATE）：进程级 Semaphore(1)，一次只向 FlareSolverr 发一个请求。
+  2. 背压（排队上限）：排队等待的请求超过 _MAX_WAITERS 就立刻快失败，
+     不再无限堆积——堆积正是压垮单实例的根因。
+  3. 熔断（circuit breaker）：连续多次「连不上 / 读超时」判定实例已不健康，
+     开闸冷却一段时间，期间直接快失败，不再继续往一个半死的实例上怼，
+     给它自我恢复的机会，也让前台立刻拿到可读错误而非长时间挂起。
 
-JavDB / FC2 / MissAV 三源统一调用 flaresolverr_request，行为一致。
+另含地址规整（normalize_fs_url / fs_candidates）：缺协议自动补、缺端口默认 8191、
+带 /v1 或末尾斜杠自动清理；容器内误填 localhost 时按命中概率兜底几个常见地址。
 """
 import os
+import time
 import asyncio
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-# 进程级、跨模块共享：JavDB / FC2 / MissAV 的 FlareSolverr 请求都排这一个队
-GATE = asyncio.Semaphore(1)
+# ── 三层保护的全局状态（进程级，跨模块共享）──
+GATE = asyncio.Semaphore(1)        # 串行：一次只发一个请求给 FlareSolverr
+_MAX_WAITERS = 16                  # 排队上限：超过直接快失败，杜绝无限堆积压垮实例
+_waiters = 0                       # 当前正在排队 + 执行中的请求数
+_MIN_INTERVAL = 0.4                # 两次请求之间的最小间隔（秒），给单浏览器留回收时间
+_last_done_at = 0.0                # 上一次请求结束的时刻（time.monotonic）
+
+# 熔断：连续「连不上 / 读超时」达到阈值即开闸冷却，期间快失败不再打实例
+_CB_FAIL_THRESHOLD = 4             # 连续失败多少次触发熔断
+_CB_COOLDOWN = 45.0                # 熔断冷却时长（秒）
+_consec_fails = 0                  # 当前连续失败计数（成功即清零）
+_cb_open_until = 0.0               # 熔断打开至此刻之前都快失败（time.monotonic）
 
 # FlareSolverr 默认端口
 FS_DEFAULT_PORT = 8191
@@ -40,10 +51,7 @@ _fs_endpoint_cache: dict = {}
 # Docker 探测 / 地址规整 / 候选生成
 # ──────────────────────────────────────────────
 def running_in_docker() -> bool:
-    """
-    判断后端自身是否跑在容器里（NAS/群晖/服务器最常见的部署方式）。
-    只有在容器内，localhost 才需要改写成宿主机网关/容器名才能连到「另一个」容器。
-    """
+    """判断后端自身是否跑在容器里——只有容器内填 localhost 才需要改写成宿主机网关/容器名。"""
     try:
         if os.path.exists("/.dockerenv"):
             return True
@@ -58,7 +66,7 @@ def normalize_fs_url(raw: str) -> str:
     """
     规整用户填写的 FlareSolverr 地址，兼容各种习惯写法，统一成 scheme://host:port：
       - 缺协议：192.168.1.5:8191      -> http://192.168.1.5:8191
-      - 缺端口：http://192.168.1.5    -> http://192.168.1.5:8191（FlareSolverr 默认 8191）
+      - 缺端口：http://192.168.1.5    -> http://192.168.1.5:8191
       - 带 /v1 或末尾斜杠            -> 去掉，调用时再统一补 /v1
     """
     raw = (raw or "").strip()
@@ -80,15 +88,10 @@ def normalize_fs_url(raw: str) -> str:
 
 def fs_candidates(raw: str) -> list:
     """
-    依据常见 NAS/服务器装法，生成 FlareSolverr 候选地址（按尝试优先级排序）：
-      1. 用户填写的规整地址（最优先，尊重用户意图）
-      2. 若 host 是 localhost/127.0.0.1 且后端在容器内 —— 这是最常见的误配：
-         FlareSolverr 多半是「另一个」容器，localhost 指向的是本服务自己，必然连不上。
-         按命中概率自动补：
-         - host.docker.internal:port  → FlareSolverr 容器把端口发布到宿主机时
-         - flaresolverr:port / :8191  → 与本服务在同一 Docker 网络、用约定容器名时（内部端口固定 8191）
-         - 172.17.0.1:port            → Docker 默认网桥网关，host.docker.internal 不可用时兜底
-    局域网 IP / 域名不会被改写（只对 localhost 生效），非 Docker 部署也不扩展。去重保序后返回。
+    生成 FlareSolverr 候选地址（按尝试优先级）：用户填的规整地址永远最优先；
+    仅当填的是 localhost/127.0.0.1 且后端在容器内（最常见误配——此时 localhost 指向
+    本服务自己，连不上）才追加 host.docker.internal / 容器名 flaresolverr / 网桥网关兜底。
+    局域网 IP / 域名一律不改写，非 Docker 不扩展。去重保序返回。
     """
     base = normalize_fs_url(raw)
     if not base:
@@ -121,8 +124,7 @@ def resolved_endpoint(raw: str) -> str:
 
 def split_proxy_auth(proxy: str) -> tuple:
     """
-    拆分代理 URL 中的账号密码：
-      http://user:pass@host:port  ->  (http://host:port, user, pass)
+    拆分代理 URL 中的账号密码：http://user:pass@host:port -> (http://host:port, user, pass)。
     Chrome（FlareSolverr 用）命令行不支持内联账密，须拆开单独传。
     """
     if not proxy:
@@ -140,15 +142,18 @@ def split_proxy_auth(proxy: str) -> tuple:
 
 
 # ──────────────────────────────────────────────
-# 单地址请求（快失败 + 区分是否连上）
+# 单地址请求（快失败 + 区分「连没连上」「实例健不健康」）
 # ──────────────────────────────────────────────
 async def _request_one(endpoint: str, url: str, proxy: Optional[str],
                        cookies: Optional[dict], max_timeout: int,
                        read_timeout: float) -> tuple:
     """
-    向「单个」FlareSolverr endpoint 发请求（已在 GATE 内串行）。返回 (html, status, error, connected)。
-      connected=False：连 FlareSolverr 都没连上（ConnectTimeout/ConnectError）—— 地址多半填错，可换下一个候选。
-      connected=True ：已连上（哪怕 FlareSolverr 自身报错或读超时）—— 地址是对的，不必再换。
+    向「单个」FlareSolverr endpoint 发请求（已在 GATE 内串行）。
+    返回 (html, status, error, connected, healthy)：
+      connected=False：连 FlareSolverr 都没连上（ConnectTimeout/ConnectError）—— 地址多半填错，换下一个候选。
+      connected=True ：连上了（哪怕它报错或读超时）—— 地址是对的，不必再换。
+      healthy=True   ：实例正常应答了一个 JSON（即使站点 403/被盾，那是站点的事，实例本身是活的）。
+      healthy=False  ：连不上或读超时/写超时—— 实例可能已卡死，计入熔断。
     """
     ep = endpoint.rstrip("/")
     if not ep.endswith("/v1"):
@@ -171,9 +176,15 @@ async def _request_one(endpoint: str, url: str, proxy: Optional[str],
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(ep, json=payload)
     except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-        return "", 0, f"flaresolverr 异常: {type(e).__name__}: {e}", False
+        # 没连上：地址问题，可换候选；实例健康度未知 → 计为不健康（连不上本就该熔断）
+        return "", 0, f"flaresolverr 异常: {type(e).__name__}: {e}", False, False
+    except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
+        # 连上了但读/写超时：地址对，但实例多半卡住了 → 不健康，计入熔断
+        return "", 0, f"flaresolverr 异常: {type(e).__name__}: {e}", True, False
     except Exception as e:
-        return "", 0, f"flaresolverr 异常: {type(e).__name__}: {e}", True
+        return "", 0, f"flaresolverr 异常: {type(e).__name__}: {e}", True, False
+    # 走到这里说明实例应答了一个 HTTP 响应 → 实例是活的（healthy=True），
+    # 哪怕里面是 FlareSolverr 报错或站点 403，也属于「站点 / 配置」问题而非实例卡死。
     fs_status, fs_msg, html, status = "", "", "", 0
     try:
         data = resp.json()
@@ -186,48 +197,88 @@ async def _request_one(endpoint: str, url: str, proxy: Optional[str],
         status = resp.status_code
     if resp.status_code != 200 or fs_status.lower() == "error":
         detail = fs_msg or f"HTTP {resp.status_code}"
-        return html, status or resp.status_code, f"flaresolverr: {detail}", True
-    return html, status or 200, "", True
+        return html, status or resp.status_code, f"flaresolverr: {detail}", True, True
+    return html, status or 200, "", True, True
 
 
 # ──────────────────────────────────────────────
-# 共享取页入口：智能多候选 + 全局串行 + 缓存
+# 共享取页入口：背压 + 熔断 + 全局串行 + 智能多候选 + 缓存
 # ──────────────────────────────────────────────
 async def flaresolverr_request(url: str, flaresolverr_url: str, proxy: Optional[str] = None,
                                cookies: Optional[dict] = None, max_timeout: int = 40000,
                                read_timeout: float = 70.0) -> tuple:
     """
-    通过 FlareSolverr 取过盾后的 HTML（智能地址适配 + 全局串行）。返回 (html, status, error)。
-    按 fs_candidates 生成候选地址依次尝试：连不上就换下一个，连上即用并缓存；
-    全部连不上时附带「已尝试地址 + Docker 误配提示」。整体在 GATE 内串行。
+    通过 FlareSolverr 取过盾后的 HTML。返回 (html, status, error)。
+    依次经过：熔断检查 → 背压检查 → 全局串行闸 → 最小间隔 → 多候选尝试。
+    任何一层快失败都返回可读错误，绝不长时间挂起或继续压垮实例。
     """
+    global _waiters, _last_done_at, _consec_fails, _cb_open_until
+
     candidates = fs_candidates(flaresolverr_url)
     if not candidates:
         return "", 0, "flaresolverr 异常: 地址为空"
-    cache_key = (flaresolverr_url or "").strip()
-    cached = _fs_endpoint_cache.get(cache_key)
-    if cached and cached in candidates:
-        candidates = [cached] + [c for c in candidates if c != cached]
 
-    last_html, last_status, last_err = "", 0, ""
-    # 全局串行：整轮候选尝试在同一个闸内，避免与其它路径撞车
-    async with GATE:
-        for ep in candidates:
-            html, status, err, connected = await _request_one(
-                ep, url, proxy, cookies, max_timeout, read_timeout)
-            if connected:
-                _fs_endpoint_cache[cache_key] = ep   # 记住可连地址
-                return html, status, err
-            last_html, last_status, last_err = html, status, err  # 连不上，换下一个
+    now = time.monotonic()
+    # 1) 熔断：实例近期连续失败，冷却期内直接快失败，不再去怼它
+    if now < _cb_open_until:
+        wait = int(_cb_open_until - now) + 1
+        return "", 0, (f"flaresolverr 异常: 实例连续多次无响应，已暂停请求 {wait}s 让其恢复"
+                       "（避免大量任务把单实例继续压垮）。请确认 FlareSolverr 还活着、负载没爆。")
 
-    # 所有候选都连不上：清掉缓存，回传最后错误并附排错提示
-    _fs_endpoint_cache.pop(cache_key, None)
-    hint = last_err
-    if len(candidates) > 1:
-        hint = (f"{last_err}（已自动尝试 {' / '.join(candidates)} 均连不上 FlareSolverr）。"
-                "若 FlareSolverr 与本服务都在 Docker：请把地址填成 http://host.docker.internal:8191，"
-                "或与本服务置于同一 Docker 网络后用容器名 http://flaresolverr:8191，不要用 localhost。")
-    elif "ConnectTimeout" in last_err or "ConnectError" in last_err:
-        hint = (f"{last_err}（连不上 {candidates[0]}）。"
-                "请确认 FlareSolverr 已启动、地址/端口正确且本服务能访问到它。")
-    return last_html, last_status, hint
+    # 2) 背压：排队已满直接快失败，杜绝无限堆积（堆积正是压垮单实例的根因）
+    if _waiters >= _MAX_WAITERS:
+        return "", 0, (f"flaresolverr 异常: 排队请求已达上限（{_MAX_WAITERS}），实例处理不过来，"
+                       "已快速放弃本次以保护实例。请稍后再试，或降低并发/最新片源条数。")
+
+    _waiters += 1
+    try:
+        # 3) 全局串行：整轮候选尝试在同一把闸内，一次只向 FlareSolverr 发一个请求
+        async with GATE:
+            # 4) 最小间隔：给单浏览器实例留出回收上一次会话的时间
+            gap = _MIN_INTERVAL - (time.monotonic() - _last_done_at)
+            if gap > 0:
+                await asyncio.sleep(gap)
+
+            cache_key = (flaresolverr_url or "").strip()
+            cached = _fs_endpoint_cache.get(cache_key)
+            ordered = candidates
+            if cached and cached in candidates:
+                ordered = [cached] + [c for c in candidates if c != cached]
+
+            last_html, last_status, last_err = "", 0, ""
+            any_healthy = False
+            try:
+                for ep in ordered:
+                    html, status, err, connected, healthy = await _request_one(
+                        ep, url, proxy, cookies, max_timeout, read_timeout)
+                    any_healthy = any_healthy or healthy
+                    if connected:
+                        _fs_endpoint_cache[cache_key] = ep   # 记住可连地址
+                        return html, status, err
+                    last_html, last_status, last_err = html, status, err  # 连不上，换下一个
+            finally:
+                _last_done_at = time.monotonic()
+                # 熔断计数：本轮实例是否健康（连得上且有应答）。健康即清零，不健康才累加。
+                if any_healthy:
+                    _consec_fails = 0
+                    _cb_open_until = 0.0
+                else:
+                    _consec_fails += 1
+                    if _consec_fails >= _CB_FAIL_THRESHOLD:
+                        _cb_open_until = time.monotonic() + _CB_COOLDOWN
+                        print(f"[fsgate] FlareSolverr 连续 {_consec_fails} 次无响应，"
+                              f"熔断冷却 {int(_CB_COOLDOWN)}s")
+
+        # 所有候选都连不上：清掉缓存，回传最后错误并附排错提示
+        _fs_endpoint_cache.pop(cache_key, None)
+        hint = last_err
+        if len(ordered) > 1:
+            hint = (f"{last_err}（已自动尝试 {' / '.join(ordered)} 均连不上 FlareSolverr）。"
+                    "若 FlareSolverr 与本服务都在 Docker：请把地址填成 http://host.docker.internal:8191，"
+                    "或与本服务置于同一 Docker 网络后用容器名 http://flaresolverr:8191，不要用 localhost。")
+        elif "ConnectTimeout" in last_err or "ConnectError" in last_err:
+            hint = (f"{last_err}（连不上 {ordered[0]}）。"
+                    "请确认 FlareSolverr 已启动、地址/端口正确且本服务能访问到它。")
+        return last_html, last_status, hint
+    finally:
+        _waiters -= 1

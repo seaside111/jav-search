@@ -135,6 +135,7 @@ async def search(
         out = collected[0][1]
         for it in out:
             it.setdefault("sources", [it.get("source", "")])
+            it.setdefault("source_urls", {it.get("source", ""): it.get("url", "")})
         return out[:max_results]
 
     return _merge_lists(collected)[:max_results]
@@ -233,6 +234,7 @@ async def get_latest(
         out = collected[0][1]
         for it in out:
             it.setdefault("sources", [it.get("source", "")])
+            it.setdefault("source_urls", {it.get("source", ""): it.get("url", "")})
         return out
     return _merge_lists(collected)
 
