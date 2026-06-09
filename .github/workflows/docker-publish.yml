@@ -51,8 +51,13 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.img.outputs.name }}
+          # 关键：关掉 metadata-action 的自动 latest（默认 latest=auto 会对任意 git tag
+          # 自动补 :latest，从而盖过下面显式的 enable=false——这正是 beta 误覆盖 :latest 的根因）。
+          # 关掉后，:latest 完全由下面那条显式规则控制。
+          flavor: |
+            latest=false
           # 始终打上「具体版本号」标签（取自 git tag）
-          # beta tag 额外打移动标签 :beta；正式 tag 额外打 :latest（beta 不动 latest）
+          # beta tag 额外打移动标签 :beta（不动 :latest）；正式 tag 才额外打 :latest
           tags: |
             type=ref,event=tag
             type=raw,value=beta,enable=${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'Beta') }}
