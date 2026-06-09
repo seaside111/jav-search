@@ -18,6 +18,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from . import _missav
+from . import _sukebei
 from ._fsgate import (flaresolverr_request as _fs_request, discover_auto as _fs_discover,
                       PRIO_DETAIL, PRIO_SEARCH, PRIO_LATEST)
 
@@ -355,11 +356,13 @@ def _parse_list(html: str, max_results: int = 300) -> list[dict]:
 
 
 async def _fetch_list_pages(url_builder, proxy, max_results, max_pages=10,
-                            priority: int = PRIO_LATEST) -> list[dict]:
+                            priority: int = PRIO_LATEST,
+                            fs_max_pages: int = 1) -> list[dict]:
     opts = _runtime_options()
-    # 走 FlareSolverr 时每页都要过盾、很慢，只抓 1 页（约 20-30 条），避免超单源超时被丢弃。
+    # 走 FlareSolverr 时每页都要过盾、很慢：默认只抓 1 页（约 20-30 条）避免超单源超时被丢弃；
+    # 首页最新可由 fs_max_pages 放宽到前 N 页（页与页之间经 _fsgate 串行过盾，N 越大越慢）。
     if opts.get("flaresolverr_url"):
-        max_pages = 1
+        max_pages = min(max_pages, max(1, fs_max_pages))
     all_items, seen = [], set()
     for page in range(1, max_pages + 1):
         page_url = url_builder(page)
@@ -398,6 +401,18 @@ _LIST_ENRICH_CACHE: dict = {}
 _LIST_ENRICH_CACHE_MAX = 2000
 
 
+def _cache_put(num: str, data: dict) -> None:
+    """写入 MissAV 结果缓存（带容量上限 LRU 近似：满了丢最早的）。"""
+    if not num:
+        return
+    if num in _LIST_ENRICH_CACHE:
+        _LIST_ENRICH_CACHE[num] = data
+        return
+    if len(_LIST_ENRICH_CACHE) >= _LIST_ENRICH_CACHE_MAX:
+        _LIST_ENRICH_CACHE.pop(next(iter(_LIST_ENRICH_CACHE)))
+    _LIST_ENRICH_CACHE[num] = data
+
+
 def _missav_enabled() -> bool:
     try:
         from config_manager import load as load_config
@@ -426,9 +441,7 @@ async def _enrich_one(it: dict, proxy: Optional[str], sem: asyncio.Semaphore) ->
                                                    allow_flaresolverr=False) or {}
                 except Exception:
                     data = {}
-                if len(_LIST_ENRICH_CACHE) >= _LIST_ENRICH_CACHE_MAX:
-                    _LIST_ENRICH_CACHE.pop(next(iter(_LIST_ENRICH_CACHE)))
-                _LIST_ENRICH_CACHE[num] = data
+                _cache_put(num, data)
     if not data:
         return
     if data.get("title") and _needs_title(it):
@@ -451,6 +464,103 @@ async def _enrich_list_missav(items: list[dict], proxy: Optional[str],
     await asyncio.gather(*[_enrich_one(it, proxy, sem) for it in targets],
                          return_exceptions=True)
     return items
+
+
+# ──────────────────────────────────────────────
+# 后台 MissAV 预抓（V1.4.4，用户选「只预抓便宜部分」）
+# sukebei 最新卡只有种子标题 + fourhoi 封面；MissAV 详情(直连、不过盾、便宜)能补
+# 干净标题 + 真封面 + 样品图。这里后台**串行 + 节流 + 直连**慢慢把最新 N 条的 MissAV
+# 结果灌进 _LIST_ENRICH_CACHE：① 后续刷新时列表卡升级成干净标题/封面；② 点开详情时
+# 样品图秒出（女优/标签仍点开走 fc2ppvdb，按用户选择不预抓）。全程不碰 FlareSolverr。
+# ──────────────────────────────────────────────
+_PREWARM_LOCK = asyncio.Lock()       # 同一时刻只跑一个预抓 runner，避免并发请求重复预抓
+_PREWARM_TASKS: set = set()          # 持有后台任务引用，防止被 GC 提前回收
+_PREWARM_THROTTLE = 0.5              # 每条之间睡 0.5s，进一步降低存在感
+
+
+def _prefetch_enabled() -> bool:
+    try:
+        from config_manager import load as load_config
+        return bool(load_config().get("fc2_prefetch_missav", True))
+    except Exception:
+        return True
+
+
+def _prefetch_count() -> int:
+    try:
+        from config_manager import load as load_config
+        n = int(load_config().get("fc2_prefetch_count", 20))
+    except Exception:
+        n = 20
+    return max(0, min(n, 60))
+
+
+def _apply_cached_missav(items: list[dict]) -> None:
+    """用**已预热**的 MissAV 缓存就地升级列表卡（仅命中缓存，零网络）。
+    FC2 最新卡的临时标题来自种子文件名、质量低 → 有 MissAV 干净标题就替换。"""
+    for it in items:
+        num = _extract_number(it.get("code") or it.get("url") or "")
+        data = _LIST_ENRICH_CACHE.get(num) if num else None
+        if not data:
+            continue
+        if data.get("title"):
+            it["title"] = data["title"]
+        if data.get("cover"):
+            it["cover"] = data["cover"]
+        srcs = it.get("sources") or [it.get("source", SOURCE)]
+        if "MissAV" not in srcs:
+            it["sources"] = list(srcs) + ["MissAV"]
+
+
+async def _prewarm_missav_bg(nums: list[str], proxy: Optional[str]) -> None:
+    if _PREWARM_LOCK.locked():
+        return
+    async with _PREWARM_LOCK:
+        for num in nums:
+            if _LIST_ENRICH_CACHE.get(num):     # 已有正向缓存，跳过
+                continue
+            try:
+                data = await _missav.fetch_fc2(num, proxy, allow_flaresolverr=False)
+            except Exception:
+                data = None
+            if data:                            # 只缓存正向结果；空的留给详情走 FS 兜底
+                _cache_put(num, data)
+            await asyncio.sleep(_PREWARM_THROTTLE)
+
+
+def _schedule_prewarm(items: list[dict], proxy: Optional[str]) -> None:
+    """安排后台预抓（fire-and-forget）。在运行中的事件循环里调度，请求立刻返回不等它。"""
+    if not _prefetch_enabled() or not _missav_enabled():
+        return
+    if _PREWARM_LOCK.locked():
+        return
+    nums = []
+    for it in items[:_prefetch_count()]:
+        num = _extract_number(it.get("code") or it.get("url") or "")
+        if num and not _LIST_ENRICH_CACHE.get(num):
+            nums.append(num)
+    if not nums:
+        return
+    try:
+        task = asyncio.create_task(_prewarm_missav_bg(nums, proxy))
+        _PREWARM_TASKS.add(task)
+        task.add_done_callback(_PREWARM_TASKS.discard)
+    except RuntimeError:
+        pass                                    # 无运行中的事件循环（理论上不会发生）
+
+
+async def _missav_for_detail(num: str, proxy: Optional[str]) -> Optional[dict]:
+    """详情用的 MissAV 取数：优先用预热缓存（零网络/秒出样品图）；
+    未预热/预热为空才正常抓（详情为交互请求，允许回退 FlareSolverr）。"""
+    if not num:
+        return None
+    cached = _LIST_ENRICH_CACHE.get(num)
+    if cached:                                  # 命中且有内容
+        return cached
+    data = await _missav.fetch_fc2(num, proxy, priority=PRIO_DETAIL)
+    if data:
+        _cache_put(num, data)
+    return data
 
 
 # ──────────────────────────────────────────────
@@ -492,18 +602,108 @@ async def search_list(query: str, mode: str, proxy: Optional[str] = None,
 # ──────────────────────────────────────────────
 # 首页最新片源
 # ──────────────────────────────────────────────
-async def get_latest(proxy: Optional[str] = None, max_results: int = 40) -> list[dict]:
+def _sort_by_number_desc(items: list[dict]) -> list[dict]:
+    """按 FC2-PPV 编号(数字)降序重排（V1.4.4）。
+
+    FC2 的编号是平台在卖家上架/注册时分配的自增 ID——整体上编号越大越新。
+    fc2ppvdb 首页是按它自己的「收录/販売日」排的、混着大小号，最大的新号未必在最前；
+    而「编号越大越新」是用户的核心诉求，故抓回这批后统一按编号降序，让真正的新号浮到最前。
+    无法解析出编号的条目（理论上不该有）排到最后，保持稳定。"""
+    def _key(it: dict) -> int:
+        num = _extract_number(it.get("code") or it.get("url") or "")
+        return int(num) if num else -1
+    return sorted(items, key=_key, reverse=True)
+
+
+def _latest_pages() -> int:
+    """首页 FC2 最新抓取页数（V1.4.4，配置 fc2_latest_pages，默认 1，硬上限 3）。
+
+    实测（probe_fc2_pages）：fc2ppvdb **首页 `/` 不支持翻页**——`?page=2` 与 `?page=1`
+    返回完全相同的内容，`?per_page=`/`?limit=` 也被忽略。所以主路径默认只取 1 页足矣
+    （首页一次就给约 100 条）。此开关仅对「需登录的 `/articles` 兜底列表」可能有效，
+    保留作未来扩展；默认 1，每页都要过 FlareSolverr 的盾、串行较慢，硬封顶 3。"""
+    try:
+        from config_manager import load as load_config
+        n = int(load_config().get("fc2_latest_pages", 1))
+    except Exception:
+        n = 1
+    return max(1, min(n, 3))
+
+
+def _sukebei_enabled() -> bool:
+    """是否启用 sukebei 最新发现源（V1.4.4，配置 fc2_latest_use_sukebei，默认 True）。"""
+    try:
+        from config_manager import load as load_config
+        return bool(load_config().get("fc2_latest_use_sukebei", True))
+    except Exception:
+        return True
+
+
+def _merge_latest(rich_items: list[dict], extra_items: list[dict]) -> list[dict]:
+    """合并两路最新：以 rich_items（fc2ppvdb，字段全）为主，按番号去重，
+    extra_items（sukebei，字段少但更新）只补充 rich 里没有的番号。"""
+    out = list(rich_items)
+    seen = {it.get("code") for it in rich_items}
+    for it in extra_items:
+        if it.get("code") not in seen:
+            out.append(it)
+            seen.add(it.get("code"))
+    return out
+
+
+async def _fetch_fc2ppvdb_latest(proxy: Optional[str], pool: int) -> list[dict]:
+    """fc2ppvdb 首页最新（经 FlareSolverr，较慢）。一次约 100 条「最新+人気」混排、不分页。
+    先全量收集（不在文档顺序上提前截断），交由上层统一编号降序。"""
+    npages = _latest_pages()
+
     def build(page):
         return FC2_BASE + ("/" if page == 1 else f"/?page={page}")
-    pages = max(2, min(max_results // 20 + 1, 6))
-    items = await _fetch_list_pages(build, proxy, max_results, max_pages=pages,
-                                    priority=PRIO_LATEST)
+
+    items = await _fetch_list_pages(build, proxy, pool, max_pages=npages,
+                                    priority=PRIO_LATEST, fs_max_pages=npages)
     if not items:
-        # 兜底：文章列表页
+        # 兜底：文章列表页（通常需登录；登录后此路径可能按日期分页，故沿用 npages）
         items = await _fetch_list_pages(
             lambda p: f"{FC2_BASE}/articles" + ("" if p == 1 else f"?page={p}"),
-            proxy, max_results, max_pages=pages, priority=PRIO_LATEST)
-    return await _enrich_list_missav(items, proxy)
+            proxy, pool, max_pages=npages, priority=PRIO_LATEST, fs_max_pages=npages)
+    return items
+
+
+async def get_latest(proxy: Optional[str] = None, max_results: int = 40) -> list[dict]:
+    """FC2 首页最新片源（V1.4.4 改为 sukebei 优先）。
+
+    数据源短板：fc2ppvdb 的新着列表封顶在某个号（实测只到 4894253）、够不到市面最新。
+    sukebei 种子站按 id 倒序＝最新、**直连不过盾、最快**，能拿到 fc2ppvdb 够不到的新号。
+
+    策略：① 先抓 sukebei（快）；够 max_results 就直接用，**完全跳过慢的 fc2ppvdb 首页**，
+    既新又快。② sukebei 不够 / 关闭 / 失败时，再抓 fc2ppvdb 首页补足（字段更全）。
+    两路按番号去重后统一编号降序、截取最新 max_results。sukebei 卡的标题/封面较朴素
+    （种子标题 + fourhoi 封面），完整信息在点开详情时由 fc2ppvdb/MissAV 按需补全。"""
+    pool = max(max_results * 2, 200)
+
+    sukebei_items = []
+    if _sukebei_enabled():
+        try:
+            sukebei_items = await _sukebei.fetch_fc2_latest(proxy, limit=pool)
+        except Exception as e:
+            # sukebei 出任何问题都只降级到 fc2ppvdb，绝不让 FC2 最新整个消失
+            print(f"[FC2] sukebei 最新失败，降级 fc2ppvdb: {type(e).__name__}: {e}")
+            sukebei_items = []
+
+    # sukebei 已够量 → 不再碰慢的 fc2ppvdb 首页，直接排序返回（最新且最快）
+    if len(sukebei_items) >= max_results:
+        items = sukebei_items
+    else:
+        # 不够（或未启用/失败）：抓 fc2ppvdb 首页补全，rich 为主、sukebei 补新号
+        rich = await _fetch_fc2ppvdb_latest(proxy, pool)
+        items = _merge_latest(rich, sukebei_items)
+
+    # 编号降序后截取最新 max_results：让真正最新的番号排在最前（详见 _sort_by_number_desc）
+    items = _sort_by_number_desc(items)[:max_results]
+    items = await _enrich_list_missav(items, proxy)   # 缺标题的卡内联补全（sukebei 卡有标题→跳过，快）
+    _apply_cached_missav(items)                        # 已预热的卡升级成干净标题/封面（零网络）
+    _schedule_prewarm(items, proxy)                    # 后台慢慢抓 MissAV(含样品图)入缓存
+    return items
 
 
 # ──────────────────────────────────────────────
@@ -511,43 +711,35 @@ async def get_latest(proxy: Optional[str] = None, max_results: int = 40) -> list
 # ──────────────────────────────────────────────
 async def fetch_detail(url: str, proxy: Optional[str] = None) -> Optional[dict]:
     """
-    抓 FC2 详情：fc2ppvdb 为主，**并发**抓 MissAV 补全缺失的封面/标题/女优/标签
-    （fc2ppvdb 对下架条目常只剩番号骨架）。两边并发，几乎不增加额外延迟。
+    FC2 详情（V1.4.4：改为 **MissAV-only**，不再走 fc2ppvdb / FlareSolverr）。
+
+    背景：FC2 番号已由 sukebei 发现、标题/封面/样品图由 MissAV 提供（且可后台预热）；
+    fc2ppvdb 在详情里唯一独有的是女优/标签/販売日，而 FC2 这类无此需求，且它对最新片
+    常为空、却要花一次慢速过盾——故详情移除 fc2ppvdb，**点开即出、彻底不碰 FlareSolverr**。
+    （fc2ppvdb 仍保留用于关键词/女优名搜索与首页最新兜底。）下载仍走 Jackett/sukebei。
+
+    MissAV 优先用后台预热缓存（命中则样品图秒出、零网络），未预热才现抓。
     """
     num = _extract_number(url)
-    # 详情为用户交互请求 → 高优先级，可插到首页最新/搜索的批量任务前面
-    fc2_task = _fetch_html(url, proxy, _runtime_options(), priority=PRIO_DETAIL)
-    missav_task = _missav.fetch_fc2(num, proxy, priority=PRIO_DETAIL) if num else _noop()
-    (html, status, err), mv = await asyncio.gather(fc2_task, missav_task,
-                                                   return_exceptions=False)
-
-    info = None
-    if not err and html:
-        info = _parse_detail(html, url)
-    if info is None and not mv:
-        # fc2ppvdb 抓取失败且 MissAV 也无数据
-        print(f"[FC2] detail 失败 {url}: {err} (HTTP {status})")
-        return None
-    if info is None:
-        # fc2ppvdb 没拿到，但 MissAV 有 → 用 MissAV 兜底拼一个最小详情
-        info = {
-            "code": _display_code(num), "title": _display_code(num), "cover": "",
-            "url": url if url.startswith("http") else f"{FC2_BASE}/articles/{num}",
-            "source": SOURCE, "release_date": "", "duration": "", "director": "",
-            "studio": "", "label": "FC2", "series": "", "score": "", "score_count": "",
-            "actors": [], "tags": [], "samples": [], "magnets": [], "description": "",
-            "detail_loaded": True,
-        }
-
-    return _merge_missav(info, mv, num)
-
-
-async def _noop():
-    return None
+    mv = await _missav_for_detail(num, proxy) if num else None
+    info = {
+        "code": _display_code(num),
+        "title": _display_code(num),
+        "cover": "",
+        "url": url if url.startswith("http") else f"{FC2_BASE}/articles/{num}",
+        "source": SOURCE, "release_date": "", "duration": "", "director": "",
+        "studio": "", "label": "FC2", "series": "", "score": "", "score_count": "",
+        "actors": [], "tags": [], "samples": [], "magnets": [], "description": "",
+        "detail_loaded": True,
+    }
+    info = _merge_missav(info, mv, num)
+    if not info.get("cover"):
+        info["cover"] = _missav.cover_url(num)   # MissAV 无 og:image 时回退 fourhoi 确定性封面
+    return info
 
 
 def _merge_missav(info: dict, mv: Optional[dict], num: str) -> dict:
-    """把 MissAV 数据并入 fc2ppvdb 详情：只补缺，不覆盖 fc2ppvdb 已有的结构化字段。"""
+    """把 MissAV 数据并入 FC2 详情骨架：只补缺，不覆盖已有字段（标题/封面/样品图/预览）。"""
     if not mv:
         return info
     real_title = info.get("title") and info["title"] != _display_code(num)
@@ -572,72 +764,9 @@ def _merge_missav(info: dict, mv: Optional[dict], num: str) -> dict:
     return info
 
 
-def _parse_detail(html: str, url: str) -> Optional[dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    m = re.search(r"/articles/(\d+)", url)
-    num = m.group(1) if m else _extract_number(url)
-
-    # 404 / 已删除
-    page_txt = soup.get_text(" ", strip=True)[:400]
-    if any(k in page_txt for k in ("お探しの商品が見つかりません", "404 Not Found",
-                                   "このページは削除されました")):
-        return None
-
-    # 标题：详情页 h2 > a。注意：不要回退 <title>——fc2ppvdb 的 <title> 是站名 "FC2PPVDB"，
-    # 并非影片标题；真实标题缺失时留空，交由 MissAV 补全或回退番号。
-    title = ""
-    h2a = soup.select_one("h2 a")
-    if h2a:
-        title = h2a.get_text(strip=True)
-    if title.strip().upper() in ("FC2PPVDB", "FC2 PPV DB"):
-        title = ""
-
-    # 封面：alt 等于番号的 img，兜底取页面首张文章相关图
-    cover = ""
-    img = soup.select_one(f'img[alt="{num}"]') if num else None
-    if not img:
-        img = soup.select_one("section img, main img, img")
-    if img:
-        cover = _abs(img.get("src") or img.get("data-src") or "")
-
-    labels = _scan_labels(soup)
-
-    # 样品图：典型为指向图片的链接（lightbox），低噪声
-    samples = []
-    for a in soup.select('a[href$=".jpg"], a[href$=".jpeg"], a[href$=".png"], a[href$=".webp"]'):
-        href = _abs(a.get("href", ""))
-        if href and href != cover and href not in samples:
-            samples.append(href)
-    samples = samples[:30]
-
-    # 简介：fc2ppvdb 多为标题即简介，保留标题作为兜底描述
-    info = {
-        "code": _display_code(num),
-        "title": title or _display_code(num),
-        "cover": cover,
-        "url": url if url.startswith("http") else f"{FC2_BASE}/articles/{num}",
-        "source": SOURCE,
-        "release_date": labels["release_date"],
-        "duration": _dur_to_text(labels["duration"]),
-        "director": labels["seller"],
-        "studio": labels["seller"],
-        "label": "FC2",
-        "series": "",
-        "score": "",
-        "score_count": "",
-        "actors": [{"name": n, "avatar": ""} for n in labels["actress"]],
-        "tags": labels["tags"],
-        "samples": samples,
-        "magnets": [],          # FC2 站点不提供磁力，下载走 Jackett/sukebei
-        "description": "",
-        "uncensored": (labels["mosaic"] == "無") if labels["mosaic"] else None,
-        "detail_loaded": True,
-    }
-    return info
-
-
 # ──────────────────────────────────────────────
 # 连通诊断（与 JavDB 一致的接口风格，便于前端复用）
+# 注：诊断仍探 fc2ppvdb（关键词搜索与首页最新兜底仍用它）；详情已不再用 fc2ppvdb。
 # ──────────────────────────────────────────────
 def _inspect_page(html: str) -> dict:
     """解析不到片源时，回显页面标题/可见文本片段/文章链接数，辅助区分

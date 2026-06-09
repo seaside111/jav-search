@@ -653,6 +653,26 @@
             <span class="setting-hint">MissAV 域名常变。可填多个镜像（逗号分隔）做兜底，如 https://missav.ws,https://missav123.com</span>
           </div>
           <div class="setting-row">
+            <label class="setting-label">最新优先用 sukebei（1.4.4）</label>
+            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgFc2Sukebei" checked> 用 sukebei 发现最新 FC2 番号</label>
+            <span class="setting-hint">默认开，<strong>强烈建议保持</strong>。fc2ppvdb 的最新列表封顶、够不到市面最新号；sukebei 种子站按 id 倒序＝最新、<strong>直连不过盾、最快</strong>，能拿到更新的番号。开启后首页最新优先走 sukebei，够量就跳过较慢的 fc2ppvdb 首页；卡片标题/封面较朴素（种子标题 + fourhoi 封面），点开详情时再由 fc2ppvdb/MissAV 补全完整信息。下载仍按番号走 Jackett/sukebei</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">后台预抓样品图（1.4.4）</label>
+            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgFc2Prefetch" checked> 后台慢慢补全 FC2 最新的标题/封面/样品图</label>
+            <span class="setting-hint">默认开、<strong>低负担</strong>。开启后程序在后台<strong>串行+节流+直连 MissAV</strong>（不过盾）慢慢抓最新片的真标题/封面/样品图灌进缓存：刷新后列表卡标题/封面变干净、点开详情<strong>样品图秒出</strong>。女优/标签仍点开才走 fc2ppvdb（按你的选择不预抓，避免 FlareSolverr 负担）</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">预抓条数</label>
+            <input class="setting-input" id="cfgFc2PrefetchCount" type="number" value="20" min="0" max="60" step="5">
+            <span class="setting-hint">后台预抓最新多少条（0＝关闭）。直连 MissAV、每条间隔 0.5 秒，20 条约十几秒抓完且只抓一次（已缓存不重抓），日常几乎无感。最多 60</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">fc2ppvdb 抓取页数（1.4.4）</label>
+            <input class="setting-input" id="cfgFc2LatestPages" type="number" value="1" min="1" max="3" step="1">
+            <span class="setting-hint">仅当上面关掉 sukebei、或 sukebei 数量不足时，才回退抓 fc2ppvdb 首页补充。实测其首页<strong>不支持翻页</strong>（page=2=page=1）、忽略 per_page，一次约 100 条混排，本程序按番号降序取最新 N 条，故<strong>默认 1 页即可</strong>，多设无益反而每页多过一次盾变慢</span>
+          </div>
+          <div class="setting-row">
             <label class="setting-label">连通测试</label>
             <button class="btn" id="btnFc2Test" type="button" onclick="testFc2()">测试 FC2 连通</button>
             <span class="setting-hint">检测 fc2ppvdb 是否可达 / 是否被 Turnstile 拦截 / FlareSolverr 是否生效</span>
@@ -685,8 +705,8 @@
           </div>
           <div class="setting-row">
             <label class="setting-label">首页最新数量 · FC2</label>
-            <input class="setting-input" id="cfgLatestFc2" type="number" value="30" min="12" max="120" step="6">
-            <span class="setting-hint">FC2 走 FlareSolverr 单页过盾较慢，建议 30 条左右</span>
+            <input class="setting-input" id="cfgLatestFc2" type="number" value="60" min="12" max="120" step="6">
+            <span class="setting-hint">从首页约 100 条里按编号降序取最新的多少条展示（建议 60）。详情/标签翻到该页渐进加载</span>
           </div>
         </div>
       </div>
@@ -1917,12 +1937,16 @@ async function openSettings() {
     document.getElementById('cfgFc2Cookie').value = cfg.fc2_cookie || '';
     document.getElementById('cfgFc2Missav').checked = cfg.fc2_missav_enabled !== false;
     document.getElementById('cfgFc2MissavBase').value = cfg.fc2_missav_base || '';
+    document.getElementById('cfgFc2Sukebei').checked = cfg.fc2_latest_use_sukebei !== false;
+    document.getElementById('cfgFc2Prefetch').checked = cfg.fc2_prefetch_missav !== false;
+    document.getElementById('cfgFc2PrefetchCount').value = (cfg.fc2_prefetch_count != null ? cfg.fc2_prefetch_count : 20);
+    document.getElementById('cfgFc2LatestPages').value = cfg.fc2_latest_pages || 1;
     document.getElementById('cfgMaxResults').value = cfg.max_results || 300;
     document.getElementById('cfgShowLatest').checked = cfg.show_latest !== false;
     const ll = cfg.latest_limits || {};
     document.getElementById('cfgLatestJavbus').value = ll.javbus || 100;
     document.getElementById('cfgLatestAvsox').value  = ll.avsox || 40;
-    document.getElementById('cfgLatestFc2').value    = ll.fc2 || 30;
+    document.getElementById('cfgLatestFc2').value    = ll.fc2 || 60;
     document.getElementById('cfgBaiduId').value  = cfg.baidu_app_id || '';
     document.getElementById('cfgBaiduKey').value = cfg.baidu_secret_key || '';
     document.getElementById('cfgAliyunId').value  = cfg.aliyun_access_key_id || '';
@@ -2180,7 +2204,9 @@ async function saveSettings() {
   maxResults = Math.max(12, Math.min(maxResults, 500));
   const latJb = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestJavbus').value) || 100, 300));
   const latAv = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestAvsox').value) || 40, 200));
-  const latFc2 = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestFc2').value) || 30, 120));
+  const latFc2 = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestFc2').value) || 60, 120));
+  const fc2Pages = Math.max(1, Math.min(parseInt(document.getElementById('cfgFc2LatestPages').value) || 1, 3));
+  const fc2PrefetchCount = Math.max(0, Math.min(parseInt(document.getElementById('cfgFc2PrefetchCount').value) || 0, 60));
   const payload = {
     proxy: document.getElementById('cfgProxy').value.trim(),
     sources,
@@ -2194,6 +2220,10 @@ async function saveSettings() {
     fc2_cookie: document.getElementById('cfgFc2Cookie').value.trim(),
     fc2_missav_enabled: document.getElementById('cfgFc2Missav').checked,
     fc2_missav_base: document.getElementById('cfgFc2MissavBase').value.trim(),
+    fc2_latest_use_sukebei: document.getElementById('cfgFc2Sukebei').checked,
+    fc2_prefetch_missav: document.getElementById('cfgFc2Prefetch').checked,
+    fc2_prefetch_count: fc2PrefetchCount,
+    fc2_latest_pages: fc2Pages,
     max_results: maxResults,
     show_latest: document.getElementById('cfgShowLatest').checked,
     latest_sources: sources,

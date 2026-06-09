@@ -30,7 +30,7 @@ import qbittorrent
 import library
 import auth
 
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.4.4-beta"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -179,6 +179,13 @@ class ConfigUpdateRequest(BaseModel):
     fc2_cookie: Optional[str] = None
     fc2_missav_enabled: Optional[bool] = None
     fc2_missav_base: Optional[str] = None
+    # V1.4.4 FC2 最新片源抓取页数（前 N 页跨页去重 + 编号降序汇总）
+    fc2_latest_pages: Optional[int] = None
+    # V1.4.4 FC2 最新优先用 sukebei 发现（更新更快、直连不过盾）
+    fc2_latest_use_sukebei: Optional[bool] = None
+    # V1.4.4 后台预抓 FC2 最新的 MissAV（标题/封面/样品图，低负担）
+    fc2_prefetch_missav: Optional[bool] = None
+    fc2_prefetch_count: Optional[int] = None
     baidu_app_id: Optional[str] = ""
     baidu_secret_key: Optional[str] = ""
     aliyun_access_key_id: Optional[str] = ""

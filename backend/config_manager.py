@@ -22,6 +22,18 @@ DEFAULT_CONFIG = {
     # V1.4.3：用 MissAV 给 FC2 补全封面/标题/女优/标签（fc2ppvdb 对下架条目常缺这些）
     "fc2_missav_enabled": True,          # 是否启用 MissAV 补全
     "fc2_missav_base": "",               # MissAV 镜像（逗号分隔，留空用内置默认 missav.ws）
+    # V1.4.4：FC2 最新片源抓取页数。实测 fc2ppvdb 首页 `/` 不支持翻页（page=2=page=1）、
+    # 也忽略 per_page/limit，且一次就返回约 100 条（最新+人気混排）。故默认 1：取这一页后
+    # 全量按编号降序、截取最新 N 条即可。此项仅对需登录的 /articles 兜底列表可能有效，
+    # 保留作未来扩展；走 FlareSolverr 每页过盾较慢，硬上限 3。
+    "fc2_latest_pages": 1,
+    # V1.4.4：FC2 最新优先用 sukebei 发现（种子站按 id 倒序＝最新、直连不过盾、最快），
+    # 能拿到 fc2ppvdb 新着列表够不到的最新号；sukebei 够量就跳过慢的 fc2ppvdb 首页。默认开。
+    "fc2_latest_use_sukebei": True,
+    # V1.4.4：后台预抓 FC2 最新的 MissAV（标题/封面/样品图，直连不过盾、低负担），
+    # 串行+节流慢慢灌缓存：列表卡升级干净标题/封面、点开详情样品图秒出。女优/标签不预抓。
+    "fc2_prefetch_missav": True,
+    "fc2_prefetch_count": 20,            # 预抓最新多少条（0 关闭，硬上限 60）
     "baidu_app_id": "",                  # 百度翻译 AppID
     "baidu_secret_key": "",              # 百度翻译 SecretKey
     "aliyun_access_key_id": "",          # 阿里云 AccessKeyId
@@ -38,7 +50,7 @@ DEFAULT_CONFIG = {
         "javdb": 40,
         "avsox": 40,
         "avmoo": 40,
-        "fc2": 30,                       # FC2 走 FlareSolverr 较慢，数量不宜过大
+        "fc2": 60,                       # FC2 抓前 2 页汇总（fc2_latest_pages），上限放到 60 才装得下两页
     },
     # Jackett
     "jackett_url": "",                   # Jackett 地址，如 http://192.168.1.100:9117
