@@ -30,7 +30,7 @@ import qbittorrent
 import library
 import auth
 
-APP_VERSION = "1.4.4-beta"
+APP_VERSION = "1.4.4"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 

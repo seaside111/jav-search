@@ -522,7 +522,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本（Beta）">v1.4.3-beta</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.4</div>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="3"/>
@@ -2464,7 +2464,7 @@ async function checkVersion() {
   try {
     const resp = await fetch(`${API}/api/version`, { cache: 'no-store' });
     const d = await safeJson(resp);
-    chip.textContent = 'v' + (d.current || '1.4.3-beta');
+    chip.textContent = 'v' + (d.current || '1.4.4');
     if (d.update_available && d.latest) {
       chip.classList.add('has-update', 'clickable');
       chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;

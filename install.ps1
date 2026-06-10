@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────
-# jav-search (Beta) 一键安装脚本（Windows）—— 纯 docker run，仅 jav-search 本体
+# jav-search 一键安装脚本（Windows）—— 纯 docker run，仅 jav-search 本体
 # 用法：改好下面的「按需修改」变量后执行：
 #   powershell -ExecutionPolicy Bypass -File install.ps1
 # 重复执行会先删除同名旧容器再重建（升级/改配置时直接再跑一次即可）。
@@ -14,7 +14,7 @@
 $ErrorActionPreference = "Stop"
 
 # ===================== 按需修改 =====================
-$IMAGE    = "ghcr.io/seaside111/jav-search:beta"   # 镜像（锁版本可改成 :V1.4.3-beta）
+$IMAGE    = "ghcr.io/seaside111/jav-search:latest"   # 镜像（锁版本可改成 :V1.4.4）
 $PORT     = 8085                                    # 网页端口（宿主机侧，冲突就改这里）
 
 # 媒体库刮削目录（改成你的真实路径）。不需要刮削可删掉下面对应的 -v 行。
