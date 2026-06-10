@@ -231,6 +231,8 @@ jav-search/
 
 ## 更新日志
 
+> **V1.4.4 FC2 专项优化**：① FC2「最新片源」改为**优先用 sukebei 发现番号**（种子站按 id 倒序＝最新、直连不过盾、最快），拿到 fc2ppvdb 够不到的市面最新号，并**统一按 FC2-PPV 编号降序**取最新；② 新增**后台串行预抓 MissAV**（直连不过盾、低负担），慢慢灌入最新片的真标题/封面/样品图，刷新后列表卡变干净、详情样品图秒出；③ FC2 详情改为 **MissAV-only**，点开即出、彻底不碰 FlareSolverr，不再与 JavDB/刮削抢实例（fc2ppvdb 仍保留用于关键词/女优名搜索与首页最新兜底）；④ 设置页新增「最新优先用 sukebei / 后台预抓样品图 + 条数 / fc2ppvdb 抓取页数」。详见 [`docs_v1.4.4_更新说明.md`](docs_v1.4.4_更新说明.md)。
+>
 > **V1.4.3 首页增强**：① 顶部新增**版本号 + 更新检测**（后端代理 GitHub release，带缓存，有新版红点提醒）；② 首页最新片源改为**各来源并行、边抓边显示**（`/api/latest?source=`），快源先显示、慢源随后补入，不再被慢源拖住整页；③ 列表上方新增**数据源切换标签**（全部/JavBus/JavDB/…/FC2，各带条数），首页与搜索结果均可一键筛选。详见 [`docs_v1.4.3_更新说明.md`](docs_v1.4.3_更新说明.md)。
 >
 > **V1.4.3 新增（FC2 数据源）**：① 新增 **FC2-PPV 专用数据源**（fc2ppvdb.com），收录 FC2 素人/无码片源的番号、标题、封面、女优、卖家、贩卖日、收录时间、标签等；② 番号自动识别扩展，`FC2-PPV-1234567` / `FC2PPV1234567` / 纯数字 均按番号检索，直命中详情页；③ fc2ppvdb 强制 Cloudflare Turnstile，复用 JavDB 那套 FlareSolverr 取页（FC2 地址留空则自动复用 JavDB 的 FlareSolverr）；④ 设置页新增 FC2 数据源勾选、FlareSolverr/Cookie 配置与「FC2 连通测试」。注意：FC2 站点不提供磁力，下载仍走 Jackett/sukebei 按 `FC2-PPV-xxxxxxx` 检索。详见 [`docs_v1.4.3_更新说明.md`](docs_v1.4.3_更新说明.md)。
