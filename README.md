@@ -39,6 +39,39 @@ docker-compose logs -f
 
 > **部署前务必修改 docker-compose 里的 `AUTH_USERNAME` / `AUTH_PASSWORD` / `AUTH_SECRET`！**
 
+### 不用 compose，纯 `docker run` 部署（含刮削目录）
+
+不想用 compose 也行，下面是一条完整命令（已含媒体库刮削的目录挂载），改好账号密码即可直接执行：
+
+```bash
+docker run -d \
+  --name jav-search \
+  --restart unless-stopped \
+  -p 8085:8085 \
+  -v jav-config:/config                          `# 配置持久化（命名卷，删容器不丢配置）` \
+  -v /volume1/downloads/jav:/downloads/jav       `# 下载器保存目录＝刮削监控源（冒号左侧改成你的真实路径）` \
+  -v /volume1/media/jav:/media/jav               `# 刮削后归档目录（自动按 YYYYMM/番号/ 建子目录）` \
+  -e CONFIG_DIR=/config \
+  -e PORT=8085 \
+  -e TZ=Asia/Shanghai \
+  -e AUTH_USERNAME=admin                         `# 登录用户名` \
+  -e AUTH_PASSWORD=改成你的强密码                  `# 登录密码，务必修改` \
+  -e AUTH_SECRET=一串很长的随机字符串              `# 会话签名密钥，填长随机串` \
+  -e AUTH_SESSION_TTL=604800 \
+  --add-host host.docker.internal:host-gateway \
+  ghcr.io/seaside111/jav-search:latest
+```
+
+> 上面 `` `# ...` `` 是行内批注，会被 shell 当空忽略，可整段直接复制运行。挂载冒号**左侧**是宿主机真实路径（按需改），**右侧**是容器内路径，需与「设置 → 刮削」里填的一致。不需要刮削功能就删掉中间两行 `-v`。Windows PowerShell 请去掉行尾 `\` 与批注、写成一行。
+
+**升级 / 重建**（配置在命名卷里，不会丢）：
+
+```bash
+docker pull ghcr.io/seaside111/jav-search:latest
+docker stop jav-search && docker rm jav-search
+# 再次执行上面的 docker run 命令即可
+```
+
 ### FlareSolverr（JavDB / FC2 过 Cloudflare 盾用 · 留空自动探测 / 也可手填）
 
 JavDB / FC2 需要过 Cloudflare 盾。**FlareSolverr 不再打进本项目的安装包**——你只需在任意地方
