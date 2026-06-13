@@ -929,16 +929,25 @@ async def _scan_once(config: dict) -> int:
     return processed
 
 
+def _monitor_should_run(config: dict) -> bool:
+    """监控是否该运行：刮削、归档任一开启即运行（无单独的监控开关）。
+    两者都关＝无事可做＝不监控。监控只负责非发种的下载/手动放入文件，按这两个全局
+    开关统一处理（发种任务占用的文件由 active_codes/active_paths 自动跳过）。"""
+    scrape_meta = config.get("scrape_meta_enabled", config.get("publish_scrape_enabled", True))
+    archive_on = config.get("archive_enabled", config.get("publish_archive_enabled", True))
+    return bool(scrape_meta or archive_on)
+
+
 async def _monitor_loop():
     _monitor_state["running"] = True
     _log("刮削监控协程已启动")
     while True:
         config = load_config()
-        if not config.get("scrape_enabled"):
+        if not _monitor_should_run(config):
             _monitor_state["enabled"] = False
-            _monitor_state["message"] = "监控已停用"
+            _monitor_state["message"] = "未启用（刮削、归档都关闭）"
             _monitor_state["running"] = False
-            _log("检测到监控开关已关闭，协程退出")
+            _log("检测到刮削与归档均关闭，监控协程退出")
             return
         _monitor_state["enabled"] = True
         _monitor_state["watch_dir"] = config.get("scrape_watch_dir", "")
@@ -960,12 +969,12 @@ async def _monitor_loop():
 
 
 def start_monitor():
-    """主程序启动事件中调用；若配置启用则拉起监控协程。"""
+    """主程序启动事件中调用；刮削或归档任一开启则拉起监控协程。"""
     global _monitor_task
     config = load_config()
-    if not config.get("scrape_enabled"):
-        _log("启动：刮削监控未启用（可在设置中开启）")
-        _monitor_state["message"] = "未启用（可在设置中开启）"
+    if not _monitor_should_run(config):
+        _log("启动：刮削与归档均关闭，监控未启用")
+        _monitor_state["message"] = "未启用（刮削、归档都关闭）"
         return
     if _monitor_task and not _monitor_task.done():
         _log("启动：监控已在运行，跳过")
@@ -980,15 +989,15 @@ def ensure_monitor():
     """配置变更后调用：按最新配置启动或保持监控。"""
     global _monitor_task
     config = load_config()
-    if config.get("scrape_enabled"):
+    if _monitor_should_run(config):
         if not _monitor_task or _monitor_task.done():
-            _log(f"配置变更：启用监控，拉起协程（监控目录 {config.get('scrape_watch_dir') or '未配置'}）")
+            _log(f"配置变更：刮削/归档已开，拉起监控协程（监控目录 {config.get('scrape_watch_dir') or '未配置'}）")
             _monitor_task = asyncio.create_task(_monitor_loop())
         else:
             _log("配置变更：监控已在运行，沿用现有协程（新配置下轮扫描生效）")
     else:
-        _log("配置变更：监控开关为关闭状态")
-    # 停用时由循环自身检测 scrape_enabled 后退出
+        _log("配置变更：刮削与归档均关闭，监控将停止")
+    # 停用时由循环自身检测后退出
 
 
 # ─────────────────────────────────────────

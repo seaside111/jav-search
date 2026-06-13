@@ -288,12 +288,12 @@
         </div>
         <div class="row">
           <label class="lbl">停止·分享率</label>
-          <input type="number" id="cfgPubStopRatio" min="0" step="0.1" value="1.0">
+          <input type="number" id="cfgPubStopRatio" min="0" step="0.1" value="1.0" oninput="updateStopGate()">
           <span class="hint">达此分享率停种（0=不按分享率）</span>
         </div>
         <div class="row">
           <label class="lbl">停止·时长(小时)</label>
-          <input type="number" id="cfgPubStopHours" min="0" step="1" value="72">
+          <input type="number" id="cfgPubStopHours" min="0" step="1" value="72" oninput="updateStopGate()">
           <span class="hint">达此做种时长停种（0=不按时长）</span>
         </div>
         <div class="row">
@@ -307,7 +307,8 @@
         </div>
       </div>
       <div class="row">
-        <label class="chk"><input type="checkbox" id="cfgPubDeleteAfterStop"> 停止后删除做种任务</label>
+        <label class="chk"><input type="checkbox" id="cfgPubDeleteAfterStop" onchange="updateStopGate()"> 停止后删除做种任务</label>
+        <span class="hint" id="pubDeleteHint">仅在做种<b>达到上面的停止条件</b>后才执行；「停止·分享率」「停止·时长」都为 0 时永不触发，此开关无效</span>
       </div>
       <div class="row">
         <label class="chk"><input type="checkbox" id="cfgPubDeleteFiles"> 删除时连同文件（危险）</label>
@@ -384,8 +385,23 @@ async function loadConfig(){
     $('cfgPubDeleteFiles').checked = !!c.publish_delete_files;
     $('cfgPubAnonymous').checked = !!c.publish_anonymous;
     $('cfgPubAuto').checked = !!c.publish_auto;
+    updateStopGate();
     if (c.mteam_api_key) checkMteam();
   } catch(e){ /* ignore */ }
+}
+
+// 删种/删文件开关只在「设了停止条件」时才有意义：两个停止条件都为 0 时置灰并提示无效；
+// 删文件还需「停止后删除」勾上才可用。
+function updateStopGate(){
+  const ratio = parseFloat($('cfgPubStopRatio').value) || 0;
+  const hours = parseFloat($('cfgPubStopHours').value) || 0;
+  const hasStop = ratio > 0 || hours > 0;
+  const delAfter = $('cfgPubDeleteAfterStop');
+  const delFiles = $('cfgPubDeleteFiles');
+  const hint = $('pubDeleteHint');
+  delAfter.disabled = !hasStop;
+  delFiles.disabled = !hasStop || !delAfter.checked;
+  if (hint) hint.style.color = hasStop ? '' : 'var(--red, #e55)';
 }
 
 async function saveSettings(){

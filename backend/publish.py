@@ -90,6 +90,11 @@ _TERMINAL = {STOPPED, ABORTED_EXISTS, ABORTED_TAKEN, CANCELLED}
 # （每 tick≈publish_poll_interval 秒）再放行处理；超时仍无则进处理、由 _step_process 出带诊断的失败。
 _DL_SETTLE_TICKS = 6
 
+# 做种期间若连续这么多个 tick 在下载器列表里都找不到本任务的做种种子（且下载器可达），
+# 判定为「被外部手动删除」→ 任务置 STOPPED 并释放文件保护，避免永久卡 SEEDING、永久占槽。
+# 仅当下载器返回非空列表(确证可达)才计数，规避下载器重启/暂不可达造成的误判。
+_SEED_GONE_TICKS = 3
+
 
 def _log(msg: str):
     logbus.info("发种", msg)
@@ -970,8 +975,32 @@ async def _step_reseed(t: dict, config: dict):
 
 
 async def _step_seed_check(t: dict, config: dict):
-    """检查做种停止条件。"""
-    tor = await _find_torrent(config, t.get("infohash_new") or "")
+    """检查做种停止条件；并检测做种种子是否已被外部(在下载器里手动)删除。"""
+    ih = (t.get("infohash_new") or "").lower()
+    if not ih:
+        return  # 无做种 infohash（如 reseed 失败），无可检查/可误判
+    torrents = await downloader.list_torrents(config)
+    tor = next((x for x in torrents if (x.get("hash") or "").lower() == ih), None)
+
+    # P1：做种种子从下载器消失的处理。仅当列表非空(确证下载器可达)才计 miss，
+    #     连续 _SEED_GONE_TICKS 次仍找不到 → 判定被外部删除：置 STOPPED + 释放文件保护、退出占槽。
+    #     列表为空(可能下载器重启/不可达，无法区分)则跳过本次、不计数，宁可漏判不可误判。
+    if tor is None:
+        if not torrents:
+            _set(t, note="下载器暂无返回(可能重启/不可达)，跳过本次做种检查")
+            return
+        miss = int(t.get("seed_missing_ticks", 0)) + 1
+        if miss >= _SEED_GONE_TICKS:
+            _set(t, state=STOPPED, seed_torrent_removed=True, seed_missing_ticks=0,
+                 note="做种种子已从下载器移除(疑似手动删除)，停止跟踪并释放——文件不再受保护、可被监控正常归档")
+        else:
+            _set(t, seed_missing_ticks=miss,
+                 note=f"未在下载器找到做种种子（{miss}/{_SEED_GONE_TICKS}）")
+        return
+    # 找到了：清零消失计数
+    if t.get("seed_missing_ticks"):
+        _set(t, seed_missing_ticks=0)
+
     ratio = tor.get("ratio", 0) if tor else 0
     seeding_time = tor.get("seeding_time", 0) if tor else 0
     stop_ratio = float(config.get("publish_stop_ratio", 0) or 0)

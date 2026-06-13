@@ -121,7 +121,7 @@ DEFAULT_CONFIG = {
     # V1.5：日志详略。True=详细(每步+每次API,beta排查用)；定型后设 False 只看主要动作
     "log_verbose": True,
     # V1.4：媒体库刮削（监控下载目录 → 刮削 → 移动归档）
-    "scrape_enabled": False,             # 是否启用后台自动刮削监控
+    "scrape_enabled": False,             # 【已废弃为独立开关】监控改由 scrape_meta_enabled/archive_enabled 任一开启自动运行，此键不再起作用
     "scrape_watch_dir": "",              # 监控目录（下载器保存的目录，容器内视角）
     "scrape_output_dir": "",             # 刮削后归档目录（按 YYYYMM 建子目录存放）
     "scrape_interval": 300,              # 监控轮询间隔（秒）

@@ -919,7 +919,7 @@ async def api_set_config(req: ConfigUpdateRequest):
             _asyncio.create_task(mteam_enums.refresh_conf(config))
         except Exception as e:
             print(f"[config] 触发 M-Team 枚举刷新失败: {e}")
-    # 配置变更后按最新的 scrape_enabled 启停后台监控
+    # 配置变更后启停后台监控（刮削/归档任一开启即运行）
     try:
         library.ensure_monitor()
     except Exception as e:

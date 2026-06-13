@@ -928,8 +928,12 @@
       <!-- 刮削：媒体库 -->
       <div class="settings-pane" id="pane-scrape">
         <div class="setting-group">
-          <h3>刮削 &amp; 归档（全局·监控与发种共用）</h3>
-          <div class="setting-hint" style="margin:-4px 0 8px">此处的<b>下载/工作目录、归档目录、归档模式、按年月</b>为全局唯一来源，刮削监控与发种流水线都用它，避免两套配置、两头执行。发种中心不再单独设这些目录。</div>
+          <h3>刮削 &amp; 归档（全局统一·所有文件通用）</h3>
+          <div class="setting-hint" style="margin:-4px 0 10px;line-height:1.7">
+            只有<b>刮削</b>、<b>归档</b>两个总开关，<b>发种文件</b>和<b>你手动放进下载目录的文件</b>一视同仁、同一标准处理。<br>
+            后台会自动监控下载目录——只要刮削或归档任一开启就生效，无需单独的监控开关；两个都关＝完全不处理。
+            （发种任务正在做种的文件会自动跳过，绝不抢。）
+          </div>
           <div class="jackett-status-row">
             <div class="jackett-status-dot" id="scrapeDot"></div>
             <span class="jackett-status-text" id="scrapeStatusText">未启用</span>
@@ -937,21 +941,15 @@
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
-              <input type="checkbox" id="cfgScrapeEnabled"> 启用后台自动刮削监控
-            </label>
-            <span class="setting-hint">监控下载完成的文件 → 刮削元数据/封面/NFO → 归档（发种任务占用的文件会自动跳过，绝不抢）</span>
-          </div>
-          <div class="setting-row">
-            <label class="source-chk" style="font-size:13px">
               <input type="checkbox" id="cfgScrapeMetaEnabled" checked> 刮削（改名番号 + 写 NFO/封面）
             </label>
-            <span class="setting-hint">监控与发种共用的刮削开关。开：视频改名为<b>番号</b>、标题/演员/简介写入 NFO、抓封面；关：保留原文件名、不写 NFO/封面（直接归档/做种）</span>
+            <span class="setting-hint">开：视频改名为<b>番号</b>、标题/演员/简介写入 NFO、抓封面（手动放入的文件也自动刮削）；关：保留原文件名、不写 NFO/封面</span>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
               <input type="checkbox" id="cfgArchiveEnabled" checked> 归档（成品放到归档目录供 EMBY）
             </label>
-            <span class="setting-hint">监控与发种共用的归档开关。开：刮削/发种成品按下面的「归档方式」放进归档目录；关：不归档（发种仍在下载目录原地做种，监控则只刮削不归档）</span>
+            <span class="setting-hint">开：成品按下面的「归档方式」放进归档目录（手动放入的文件也照此归档）；关：不归档（发种仍在下载目录原地做种）</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">下载/工作目录（监控 &amp; 发种共用）</label>
@@ -2236,7 +2234,6 @@ async function openSettings() {
     document.getElementById('cfgLogVerbose').checked = cfg.log_verbose !== false;
     // 注：M-Team 连接与发种流水线设置已迁移到独立的「发种中心」页面 /publish
     // V1.4 刮削
-    document.getElementById('cfgScrapeEnabled').checked   = !!cfg.scrape_enabled;
     document.getElementById('cfgScrapeWatch').value       = cfg.scrape_watch_dir || '';
     document.getElementById('cfgScrapeOutput').value      = cfg.scrape_output_dir || '';
     document.getElementById('cfgScrapeInterval').value    = cfg.scrape_interval || 300;
@@ -2533,8 +2530,7 @@ async function saveSettings() {
     tr_category: document.getElementById('cfgTrCategory').value.trim(),
     log_verbose: document.getElementById('cfgLogVerbose').checked,
     // 注：发种相关设置已迁移到「发种中心」页面 /publish
-    // V1.4 刮削
-    scrape_enabled: document.getElementById('cfgScrapeEnabled').checked,
+    // 刮削 & 归档（监控由 刮削/归档 任一开启自动运行，无单独监控开关）
     scrape_watch_dir: document.getElementById('cfgScrapeWatch').value.trim(),
     scrape_output_dir: document.getElementById('cfgScrapeOutput').value.trim(),
     scrape_interval: Math.max(30, parseInt(document.getElementById('cfgScrapeInterval').value) || 300),
