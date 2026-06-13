@@ -5,3 +5,6 @@ beautifulsoup4>=4.12,<5
 lxml>=5.2,<6
 pydantic>=2.7,<3
 python-multipart>=0.0.9
+# ── V1.5 媒体处理 ──
+torf>=4.2,<5            # 纯 Python 制种（计算 piece size / 写 source flag）
+pymediainfo>=6.1,<7    # 读取视频技术规格（封装 libmediainfo，镜像内已 apt 装 mediainfo）

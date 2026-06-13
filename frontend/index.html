@@ -318,6 +318,17 @@
   .btn-qb:disabled { opacity: .6; cursor: wait; }
   .btn-qb.pushed { background: var(--green); }
   .btn-qb.failed { background: var(--red); }
+  .btn-publish {
+    display: flex; align-items: center; gap: 4px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border: none; border-radius: 5px; color: #fff;
+    padding: 4px 10px; font-size: 10px; font-weight: 700;
+    font-family: 'Noto Sans SC', sans-serif; cursor: pointer;
+    transition: opacity .2s; white-space: nowrap;
+  }
+  .btn-publish:hover { opacity: .85; }
+  .btn-publish:disabled { opacity: .6; cursor: wait; }
+  .btn-publish.pushed { background: var(--green); }
 
   /* drawer empty / loading */
   .drawer-msg { padding: 20px 14px; text-align: center; font-size: 12px; color: var(--text-dim); }
@@ -378,6 +389,23 @@
   .settings-tab.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); border-color: transparent; color: #fff; font-weight: 600; }
   .settings-pane { display: none; flex-direction: column; gap: 24px; }
   .settings-pane.active { display: flex; }
+  /* ── PT 辅种（V1.5）── */
+  .pt-file {
+    display: flex; justify-content: space-between; align-items: center; gap: 10px;
+    padding: 7px 12px; border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 6px; cursor: pointer; transition: all .15s;
+  }
+  .pt-file:hover { border-color: var(--accent); background: var(--bg-card); }
+  .pt-file-name { font-size: 13px; color: var(--text-muted); word-break: break-all; }
+  .pt-file-size { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+  .pt-cand {
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px;
+  }
+  .pt-cand-match { border-color: var(--green); background: rgba(40,200,120,.06); }
+  .pt-cand-main { min-width: 0; }
+  .pt-cand-name { font-size: 13px; color: var(--text-muted); word-break: break-all; margin-bottom: 3px; }
+  .pt-cand-meta { font-size: 12px; color: var(--text-dim); }
   .save-bar { padding: 16px 24px 24px; border-top: 1px solid var(--border); position: sticky; bottom: 0; background: #13131f; }
 
   .save-btn { background: linear-gradient(135deg, var(--accent), var(--accent2)); border: none; border-radius: var(--radius); color: #fff; font-weight: 700; font-family: 'Noto Sans SC', sans-serif; padding: 12px 20px; cursor: pointer; width: 100%; font-size: 14px; transition: opacity .2s; }
@@ -454,8 +482,26 @@
   /* 磁力每条的操作按钮组（与磁力信息同一行，靠右对齐） */
   .mag-actions { display: flex; gap: 6px; margin-left: auto; flex-shrink: 0; }
   .detail-samples { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px; }
-  .detail-sample { display: block; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
+  .detail-sample { display: block; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); cursor: zoom-in; }
   .detail-sample img { width: 100%; height: 80px; object-fit: cover; display: block; }
+  /* ── 样品图灯箱（点击放大，再点关闭）：纯 fixed+flex，无新特性，跨浏览器稳妥 ── */
+  .lightbox-overlay {
+    display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,.9); z-index: 400; cursor: zoom-out;
+    align-items: center; justify-content: center; padding: 20px;
+  }
+  .lightbox-overlay.open { display: flex; }
+  /* max-width/height 等比缩放，不依赖 object-fit；老浏览器同样生效 */
+  .lightbox-img {
+    max-width: 94%; max-height: 94%; width: auto; height: auto;
+    border-radius: 6px; box-shadow: 0 10px 50px rgba(0,0,0,.7); cursor: zoom-out;
+  }
+  .lightbox-close {
+    position: absolute; top: 16px; right: 20px; z-index: 2;
+    background: rgba(20,20,28,.8); border: 1px solid var(--border); color: #fff;
+    width: 40px; height: 40px; border-radius: 50%; cursor: pointer; font-size: 20px; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+  }
   .detail-actions { display: flex; gap: 10px; flex-wrap: wrap; padding-top: 6px; }
   .detail-btn {
     display: flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 8px; font-size: 13px;
@@ -522,7 +568,13 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.4</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.5.0-beta</div>
+  <a class="btn-icon" href="/publish" title="发种中心" style="text-decoration:none">
+    <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+      <path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+    </svg>
+    发种
+  </a>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="3"/>
@@ -705,8 +757,17 @@
           </div>
           <div class="setting-row">
             <label class="setting-label">首页最新数量 · FC2</label>
-            <input class="setting-input" id="cfgLatestFc2" type="number" value="60" min="12" max="120" step="6">
-            <span class="setting-hint">从首页约 100 条里按编号降序取最新的多少条展示（建议 60）。详情/标签翻到该页渐进加载</span>
+            <input class="setting-input" id="cfgLatestFc2" type="number" value="60" min="12" max="100" step="6">
+            <span class="setting-hint">上限 100（sukebei 按需翻页覆盖，单页去重约 64-70）。再大会掉进慢路径致首页空，故封顶 100，建议 60</span>
+          </div>
+        </div>
+        <div class="setting-group">
+          <h3>系统日志</h3>
+          <div class="setting-row">
+            <label class="source-chk" style="font-size:13px">
+              <input type="checkbox" id="cfgLogVerbose" checked> 详细日志（beta 排查用）
+            </label>
+            <span class="setting-hint">开启：后台 docker logs 记录每一步与每次 API 调用，便于测试排查。定型稳定后关闭，只显示主要动作（状态流转/成功失败）</span>
           </div>
         </div>
       </div>
@@ -750,6 +811,11 @@
       <div class="settings-pane" id="pane-jackett">
         <div class="setting-group">
           <h3>Jackett 资源搜索</h3>
+          <div class="setting-row">
+            <label class="setting-label">启用 Jackett</label>
+            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgJackettEnabled"> 资源搜索使用 Jackett（默认关）</label>
+            <span class="setting-hint"><strong>默认关闭：资源搜索直接用 sukebei.nyaa.si</strong>（免配置、磁力齐全）。开启后 Jackett 优先、Jackett 无结果或失败时自动用 sukebei 兜底</span>
+          </div>
           <div class="jackett-status-row">
             <div class="jackett-status-dot" id="jackettDot"></div>
             <span class="jackett-status-text" id="jackettStatusText">未检测</span>
@@ -780,12 +846,28 @@
       <!-- 下载器：qBittorrent -->
       <div class="settings-pane" id="pane-downloader">
         <div class="setting-group">
-          <h3>qBittorrent 下载器</h3>
+          <h3>下载器类型</h3>
+          <div class="setting-row">
+            <label class="setting-label">当前下载器</label>
+            <select class="setting-input" id="cfgDownloaderType">
+              <option value="qb">qBittorrent</option>
+              <option value="transmission">Transmission</option>
+            </select>
+            <span class="setting-hint">选择推送/辅种使用的下载器后端；下方填对应连接信息</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">磁力推送限速</label>
+            <input class="setting-input" id="cfgMagnetUpLimit" type="number" min="0" step="1" placeholder="0">
+            <span class="setting-hint">首次经「推送」把搜索结果的磁力/种子加入下载器时，给该种子设单种上传限速(KB/s)，0=不限。仅作用于此处首推，不影响 PT 发种（发种限速在发布页设置）</span>
+          </div>
           <div class="jackett-status-row">
             <div class="jackett-status-dot" id="qbDot"></div>
             <span class="jackett-status-text" id="qbStatusText">未检测</span>
-            <button class="jackett-test-btn" onclick="testQb()">测试连接</button>
+            <button class="jackett-test-btn" onclick="testQb()">测试当前下载器</button>
           </div>
+        </div>
+        <div class="setting-group">
+          <h3>qBittorrent</h3>
           <div class="setting-row">
             <label class="setting-label">WebUI 地址</label>
             <input class="setting-input" id="cfgQbUrl" type="text" placeholder="http://192.168.1.100:8080">
@@ -813,6 +895,32 @@
             <label class="source-chk" style="font-size:13px">
               <input type="checkbox" id="cfgQbPaused"> 推送后暂停（先不开始下载）
             </label>
+          </div>
+        </div>
+        <div class="setting-group">
+          <h3>Transmission</h3>
+          <div class="setting-row">
+            <label class="setting-label">RPC 地址</label>
+            <input class="setting-input" id="cfgTrUrl" type="text" placeholder="http://192.168.1.100:9091">
+            <span class="setting-hint">Transmission 的 RPC 地址；填到端口即可，会自动补 /transmission/rpc</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">用户名</label>
+            <input class="setting-input" id="cfgTrUser" type="text" placeholder="（可空）">
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">密码</label>
+            <input class="setting-input" id="cfgTrPass" type="password" placeholder="（可空）">
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">保存目录</label>
+            <input class="setting-input" id="cfgTrSavePath" type="text" placeholder="/downloads/jav">
+            <span class="setting-hint">推送任务的下载保存目录（TR 主机视角）；留空用 TR 默认目录</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">任务标签</label>
+            <input class="setting-input" id="cfgTrCategory" type="text" placeholder="jav">
+            <span class="setting-hint">Transmission 用 labels 作分类标签</span>
           </div>
         </div>
       </div>
@@ -893,6 +1001,12 @@
     <button class="detail-close" onclick="closeDetail()">✕</button>
     <div class="detail-content" id="detailContent"></div>
   </div>
+</div>
+
+<!-- 样品图灯箱：点遮罩/图片/✕/按 Esc 关闭，关闭后继续浏览详情 -->
+<div class="lightbox-overlay" id="lightboxOverlay" onclick="closeLightbox()">
+  <button class="lightbox-close" onclick="closeLightbox()" aria-label="关闭">✕</button>
+  <img class="lightbox-img" id="lightboxImg" src="" alt="样品图">
 </div>
 
 <div id="toast"></div>
@@ -1024,6 +1138,7 @@ function renderResults(results) {
   currentResults = results || [];
   currentPage = 1;
   activeSourceFilter = null;
+  _coverPrewarmed.clear();   // 新一批结果，重置封面预热去重表
   // 重置详情补全缓存
   for (const k in pageEnrichPromise) delete pageEnrichPromise[k];
   const container = document.getElementById('results');
@@ -1097,30 +1212,43 @@ function setSourceFilter(src) {
   showPage(1);
 }
 
-// 后台预取的「向前页数」窗口：当前页之后多预取几页详情，翻页更顺。
-const PREFETCH_AHEAD = 3;
+// 详情向前预取页数：用户常跳页，预取多页大多是浪费 → 只补当前页（0=不向前预取详情）。
+// 翻页加速改由「封面预热」(prewarmCoversAround) 承担——它只拉封面图片字节，便宜得多。
+const PREFETCH_AHEAD = 0;
 
-// V1.3：切换到第 p 页。先用列表级信息即时渲染（快），
-// 再异步补全本页详情并就地升级；同时后台预取后续多页详情。
+// ── 封面预热（翻页/首屏加速的主力）──────────────────────────────
+// 封面 URL 在列表层就已全部拿到，无需详情。这里把「当前页及其相邻 ±1 页」的封面
+// 提前经 /api/img 拉一遍：① 填满服务端 _img_cache 与浏览器缓存，翻到相邻页秒显；
+// ② 对当前页用 new Image() 强制立即下载（绕过卡片 <img loading=lazy> 的折叠延迟），
+// 让「首屏所有封面尽快显示」。只拉封面图片字节，不抓任何详情。
+const _coverPrewarmed = new Set();
+function prewarmCoversAround(p) {
+  const totalPages = viewTotalPages();
+  for (const pg of [p, p - 1, p + 1]) {       // 当前页优先，再相邻 ±1 页
+    if (pg < 1 || pg > totalPages) continue;
+    for (const i of pageIndices(pg)) {
+      const m = currentResults[i];
+      if (!m || !m.cover) continue;
+      const u = `${API}/api/img?url=${encodeURIComponent(m.cover)}`;
+      if (_coverPrewarmed.has(u)) continue;
+      _coverPrewarmed.add(u);
+      const img = new Image();
+      img.decoding = 'async';
+      img.src = u;                            // 命中缓存则零网络；同 URL 不重复预热
+    }
+  }
+  if (_coverPrewarmed.size > 2000) _coverPrewarmed.clear();  // 防无界增长
+}
+
+// V1.3：切换到第 p 页。先用列表级信息即时渲染（快），随后预热封面并补当前页详情。
 function showPage(p) {
   const totalPages = viewTotalPages();
   currentPage = Math.min(Math.max(p, 1), totalPages);
   renderPage();
-  // 优先补全当前页 → 完成后就地升级卡片；再依次后台预取后续 PREFETCH_AHEAD 页
+  // 只补全「当前页」详情（演员/标签等），完成后就地升级卡片。不再向前预取多页详情。
   ensurePageDetails(currentPage).then(() => {
     if (currentPage === p) upgradePageCards(currentPage);
-    // 串行预取后续几页：避免一次性并发太多 /api/details 批次压垮抓取/代理
-    (async () => {
-      if (prefetchJavdbExtras) await prefetchJavdbExtrasForPage(currentPage);
-      for (let k = 1; k <= PREFETCH_AHEAD; k++) {
-        const np = currentPage + k;
-        if (np > totalPages) break;
-        await ensurePageDetails(np);
-        // 若预取期间用户已翻到正在预取的页，就地升级其卡片
-        if (currentPage === np) upgradePageCards(np);
-        if (prefetchJavdbExtras) await prefetchJavdbExtrasForPage(np);
-      }
-    })();
+    if (prefetchJavdbExtras) prefetchJavdbExtrasForPage(currentPage);
   });
 }
 
@@ -1151,6 +1279,8 @@ function renderPage(scroll = true) {
   if (scroll) container.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   renderPagination(totalPages);
+  // 渲染后立即预热「当前页 + 相邻 ±1 页」封面（首屏强制即载、相邻页提前缓存）
+  prewarmCoversAround(currentPage);
 }
 
 // 列举某页的「主索引」（经过滤后；索引指向 currentResults，详情补全照旧按主索引）
@@ -1230,6 +1360,14 @@ function upgradePageCards(p) {
   for (const i of pageIndices(p)) {
     const card = document.querySelector(`.card[data-idx="${i}"]`);
     if (!card) continue;
+    // 封面升级：详情可能返回更清晰/不同的大封面，就地替换 <img src>，
+    // 让列表卡片随详情同步更新（此前只刷新正文、封面一直停在列表级图）。
+    const m = currentResults[i];
+    const coverImg = card.querySelector('.card-cover img');
+    if (coverImg && m && m.cover && coverImg.dataset.fb !== '1') {
+      const want = `${API}/api/img?url=${encodeURIComponent(m.cover)}`;
+      if (coverImg.getAttribute('src') !== want) coverImg.src = want;
+    }
     if (card.dataset.translated === '1') continue;   // 保留用户翻译结果
     const body = card.querySelector('.card-body');
     if (body) body.innerHTML = cardBodyInner(currentResults[i], i);
@@ -1312,8 +1450,13 @@ function cardBodyInner(m, idx) {
 
 function renderCard(m, idx) {
   const coverSrc = m.cover ? `${API}/api/img?url=${encodeURIComponent(m.cover)}` : '';
+  // 大封面偶发 404 时先回退到列表缩略图（cover_thumb），再失败才显示占位图标
+  const thumbSrc = m.cover_thumb ? `${API}/api/img?url=${encodeURIComponent(m.cover_thumb)}` : '';
+  const onErr = thumbSrc
+    ? `if(this.dataset.fb!=='1'){this.dataset.fb='1';this.src='${escAttr(thumbSrc)}';}else{this.parentElement.innerHTML='<div class=no-cover>🎬</div>';}`
+    : `this.parentElement.innerHTML='<div class=no-cover>🎬</div>'`;
   const cover = coverSrc
-    ? `<img src="${escAttr(coverSrc)}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=no-cover>🎬</div>'">`
+    ? `<img src="${escAttr(coverSrc)}" alt="" loading="lazy" onerror="${escAttr(onErr)}">`
     : `<div class="no-cover">🎬</div>`;
 
   const scoreBadge = m.score ? `<div class="score-badge">★ ${escHtml(m.score)}</div>` : '';
@@ -1530,6 +1673,17 @@ function renderResourceItem(r, i, idx) {
        </button>`
     : '';
 
+  // 发种到 M-Team（用这条磁力/种子走查重→下载→刮削→制种→发布流水线）
+  const pubUrl = r.magnet || r.link || '';
+  const pubBtn = pubUrl
+    ? `<button class="btn-publish" id="pub-${i}" onclick="publishResource('${escAttr(pubUrl)}', 'pub-${i}', ${typeof idx === 'number' ? idx : -1})" title="发种到 M-Team">
+        <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+        </svg>
+        发种
+       </button>`
+    : '';
+
   return `
     <div class="resource-item">
       <div class="res-title">${escHtml(r.title)}</div>
@@ -1538,11 +1692,39 @@ function renderResourceItem(r, i, idx) {
       </div>
       <div class="res-actions">
         ${qbBtn}
+        ${pubBtn}
         ${thunderBtn}
         ${magnetBtn}
         ${torrentBtn}
       </div>
     </div>`;
+}
+
+// 发种：把这条资源加入发种队列
+async function publishResource(downloadUrl, btnId, idx) {
+  const btn = document.getElementById(btnId);
+  const m = (typeof idx === 'number' && idx >= 0 && currentResults[idx]) ? currentResults[idx] : null;
+  const code = m ? (m.code || '') : '';
+  if (!code) { showToast('该影片缺少番号，无法发种'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
+  try {
+    const resp = await fetch(`${API}/api/publish/enqueue`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, download_url: downloadUrl, title: (m ? m.title : '') }),
+    });
+    if (resp.status === 404) { showToast('发种流水线尚未实现'); if (btn){btn.disabled=false;btn.textContent='发种';} return; }
+    const data = await safeJson(resp);
+    if (resp.ok && data.success) {
+      if (btn) { btn.textContent = '✓ 已入队'; btn.classList.add('pushed'); }
+      showToast(`已加入发种队列：${code}`);
+    } else {
+      if (btn) { btn.disabled = false; btn.textContent = '发种'; }
+      showToast('✗ ' + (data.detail || '入队失败'));
+    }
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '发种'; }
+    showToast('✗ 发种出错：' + e.message);
+  }
 }
 
 // 推送磁力/种子到 qBittorrent
@@ -1703,6 +1885,14 @@ function detailNeedsJavdbExtra(m) {
   return !!su['JavDB'] && (m.source || '') !== 'JavDB' && !m._javdb_extra_loaded;
 }
 
+// 详情里「磁力 / 样品图」区块是否仍在后台补抓中（显示「抓取中」用）：
+//  ① 合并卡待补抓 JavDB 独有字段；或
+//  ② 慢源（JavDB/FC2 走 FlareSolverr）单条详情尚未加载完
+//     —— 此时封面/标题已用列表级数据先行展示，只有磁力/样品图等待补全。
+function detailExtraPending(m) {
+  return detailNeedsJavdbExtra(m) || (isLazyItem(m) && !m.detail_loaded);
+}
+
 // 渲染详情里的「磁力 + 样品图」区块（JavDB 独有）；补抓中时显示提示
 function renderDetailExtra(m, idx) {
   const di = (typeof idx === 'number') ? idx : -1;
@@ -1710,9 +1900,10 @@ function renderDetailExtra(m, idx) {
     // 缩略图与「点开大图」都走后端图片代理：代理带正确 Referer + 出口代理抓取，
     // 这样即便客户端本机没有代理，也能正常查看原图（原始 CDN 多有防盗链/需代理）。
     const proxied = API + '/api/img?url=' + encodeURIComponent(s);
-    return `<a class="detail-sample" href="${escAttr(proxied)}" target="_blank">
+    // 点击不再新开标签页，改为弹出灯箱放大（再点关闭）
+    return `<div class="detail-sample" onclick="openLightbox('${escAttr(proxied)}')">
       <img src="${escAttr(proxied)}" loading="lazy" onerror="this.parentNode.style.display='none'">
-    </a>`;
+    </div>`;
   }).join('');
   const magnetsHtml = (m.magnets || []).map((g, j) => {
     const badges = [];
@@ -1742,9 +1933,9 @@ function renderDetailExtra(m, idx) {
   if (magnetsHtml) html += `<div><div class="detail-section-label">磁力资源（JavDB）</div><div class="detail-magnets">${magnetsHtml}</div></div>`;
   if (samplesHtml) html += `<div><div class="detail-section-label">样品图</div><div class="detail-samples">${samplesHtml}</div></div>`;
   // 还没补抓且当前没有样品图/磁力时，显示加载提示（JavDB 走 FlareSolverr 较慢）
-  if (detailNeedsJavdbExtra(m) && !samplesHtml && !magnetsHtml) {
-    html += `<div><div class="detail-section-label">JavDB 样品图 / 磁力</div>
-      <div style="color:var(--text-dim);font-size:13px"><span class="drawer-spinner"></span> 正在抓取 JavDB 样品图/磁力（FlareSolverr 较慢，请稍候）…</div></div>`;
+  if (detailExtraPending(m) && !samplesHtml && !magnetsHtml) {
+    html += `<div><div class="detail-section-label">磁力链 / 样品图</div>
+      <div style="color:var(--text-dim);font-size:13px"><span class="drawer-spinner"></span> 正在抓取磁力链 / 样品图（JavDB 走 FlareSolverr 较慢，请稍候）…</div></div>`;
   }
   return html;
 }
@@ -1773,28 +1964,17 @@ async function ensureJavdbExtras(idx) {
   m._javdb_extra_loaded = true;
 }
 
-async function openDetail(idx) {
-  const m0 = currentResults[idx];
-  if (!m0) return;
-  currentDetailIdx = idx;
-
-  // 详情未加载：先打开弹窗显示加载态，再补全
-  if (!m0.detail_loaded) {
-    document.getElementById('detailContent').innerHTML =
-      `<div class="detail-body" style="padding:48px 26px;text-align:center;color:var(--text-dim)">
-         <span class="drawer-spinner"></span> 正在加载详情…
-       </div>`;
-    document.getElementById('detailOverlay').classList.add('open');
-    await ensureItemDetail(idx);
-    // 同步升级背后的卡片
-    upgradePageCards(currentPage);
-    if (!document.getElementById('detailOverlay').classList.contains('open')) return;
-  }
-
-  const m = currentResults[idx];
+// 用「当前手头的数据」构建详情弹窗内容（可能是列表级的部分数据，也可能是补全后的完整数据）。
+// 拆成独立函数，便于：先用列表级数据秒开 → 详情补全后用完整数据重渲染。
+function buildDetailContent(m, idx) {
   const coverSrc = m.cover ? `${API}/api/img?url=${encodeURIComponent(m.cover)}` : '';
+  // 与卡片一致：大封面 404 时先回退缩略图，再失败才占位
+  const thumbSrc = m.cover_thumb ? `${API}/api/img?url=${encodeURIComponent(m.cover_thumb)}` : '';
+  const onErr = thumbSrc
+    ? `if(this.dataset.fb!=='1'){this.dataset.fb='1';this.src='${escAttr(thumbSrc)}';}else{this.outerHTML='<div class=detail-no-cover>🎬</div>';}`
+    : `this.outerHTML='<div class=detail-no-cover>🎬</div>'`;
   const coverHtml = coverSrc
-    ? `<img class="detail-cover" src="${escAttr(coverSrc)}" alt="" onerror="this.outerHTML='<div class=detail-no-cover>🎬</div>'">`
+    ? `<img class="detail-cover" src="${escAttr(coverSrc)}" alt="" onerror="${escAttr(onErr)}">`
     : `<div class="detail-no-cover">🎬</div>`;
 
   const scoreText = m.score ? (m.score + (m.score_count ? ` (${m.score_count}人评)` : '')) : '';
@@ -1850,17 +2030,43 @@ async function openDetail(idx) {
       </div>
     </div>`;
 
-  document.getElementById('detailContent').innerHTML = content;
+  return content;
+}
+
+// 详情弹窗是否仍开着且仍停在 idx 这一条（异步补抓回来后判断是否还要刷新）
+function detailStillOpen(idx) {
+  return currentDetailIdx === idx &&
+    document.getElementById('detailOverlay').classList.contains('open');
+}
+
+async function openDetail(idx) {
+  const m0 = currentResults[idx];
+  if (!m0) return;
+  currentDetailIdx = idx;
+
+  // ① 先用「列表级数据」秒开弹窗：封面/标题/番号/评分此刻已在手，立即渲染；
+  //    磁力链/样品图等慢字段在 renderDetailExtra 里显示「抓取中」。
+  //    这样点开 JavDB 详情不再是「整窗空转十几秒」，而是先看到带封面的详情骨架。
+  document.getElementById('detailContent').innerHTML = buildDetailContent(m0, idx);
   document.getElementById('detailModal').scrollTop = 0;
   document.getElementById('detailOverlay').classList.add('open');
 
-  // 合并卡：后台补抓 JavDB 样品图/磁力，仅刷新该区块（保留已有翻译等状态）
+  // ② 详情未加载的慢源（JavDB/FC2 走 FlareSolverr）：后台补抓完整详情，
+  //    回来后用完整数据重渲染弹窗，并同步升级列表卡片（含封面）。
+  if (!m0.detail_loaded) {
+    await ensureItemDetail(idx);
+    upgradePageCards(currentPage);
+    if (detailStillOpen(idx)) {
+      document.getElementById('detailContent').innerHTML =
+        buildDetailContent(currentResults[idx], idx);
+    }
+  }
+
+  // ③ 合并卡（JavBus+JavDB）：后台补抓 JavDB 独有样品图/磁力，仅刷新该区块（保留翻译等状态）
   if (detailNeedsJavdbExtra(currentResults[idx])) {
     ensureJavdbExtras(idx).then(() => {
       const box = document.getElementById('detail-extra');
-      // 弹窗仍开着且仍是同一条时，局部刷新样品图/磁力
-      if (box && currentDetailIdx === idx &&
-          document.getElementById('detailOverlay').classList.contains('open')) {
+      if (box && detailStillOpen(idx)) {
         box.innerHTML = renderDetailExtra(currentResults[idx], idx);
       }
     });
@@ -1869,6 +2075,22 @@ async function openDetail(idx) {
 
 function closeDetail() {
   document.getElementById('detailOverlay').classList.remove('open');
+}
+
+// 样品图灯箱：点击放大；点遮罩/图片/✕/按 Esc 关闭后继续浏览详情
+function openLightbox(url) {
+  const img = document.getElementById('lightboxImg');
+  img.src = url;
+  document.getElementById('lightboxOverlay').classList.add('open');
+}
+function closeLightbox() {
+  const ov = document.getElementById('lightboxOverlay');
+  ov.classList.remove('open');
+  // 清空 src 释放大图内存；下次打开会重新赋值
+  document.getElementById('lightboxImg').src = '';
+}
+function lightboxOpen() {
+  return document.getElementById('lightboxOverlay').classList.contains('open');
 }
 
 async function translateDetail(idx) {
@@ -1952,10 +2174,14 @@ async function openSettings() {
     document.getElementById('cfgAliyunId').value  = cfg.aliyun_access_key_id || '';
     document.getElementById('cfgAliyunKey').value = cfg.aliyun_access_key_secret || '';
     document.getElementById('cfgDefaultProvider').value = cfg.default_translate_provider || 'baidu';
+    document.getElementById('cfgJackettEnabled').checked = cfg.jackett_enabled === true;
     document.getElementById('cfgJackettUrl').value      = cfg.jackett_url || '';
     document.getElementById('cfgJackettKey').value      = cfg.jackett_api_key || '';
     document.getElementById('cfgJackettIndexers').value = cfg.jackett_indexers || 'all';
     document.getElementById('cfgJackettTimeout').value  = cfg.jackett_timeout || 20;
+    // V1.5 下载器类型
+    document.getElementById('cfgDownloaderType').value = cfg.downloader_type || 'qb';
+    document.getElementById('cfgMagnetUpLimit').value = cfg.magnet_upload_limit_kbps || 0;
     // V1.4 qBittorrent
     document.getElementById('cfgQbUrl').value      = cfg.qb_url || '';
     document.getElementById('cfgQbUser').value     = cfg.qb_username || '';
@@ -1963,6 +2189,16 @@ async function openSettings() {
     document.getElementById('cfgQbSavePath').value = cfg.qb_save_path || '';
     document.getElementById('cfgQbCategory').value = cfg.qb_category || '';
     document.getElementById('cfgQbPaused').checked = !!cfg.qb_paused;
+    // V1.5 Transmission
+    document.getElementById('cfgTrUrl').value      = cfg.tr_url || '';
+    document.getElementById('cfgTrUser').value     = cfg.tr_username || '';
+    document.getElementById('cfgTrPass').value     = cfg.tr_password || '';
+    document.getElementById('cfgTrSavePath').value = cfg.tr_save_path || '';
+    document.getElementById('cfgTrCategory').value = cfg.tr_category || '';
+    // V1.5 M-Team PT
+    // 系统日志详略
+    document.getElementById('cfgLogVerbose').checked = cfg.log_verbose !== false;
+    // 注：M-Team 连接与发种流水线设置已迁移到独立的「发种中心」页面 /publish
     // V1.4 刮削
     document.getElementById('cfgScrapeEnabled').checked   = !!cfg.scrape_enabled;
     document.getElementById('cfgScrapeWatch').value       = cfg.scrape_watch_dir || '';
@@ -1975,7 +2211,7 @@ async function openSettings() {
     currentProvider = cfg.default_translate_provider || 'baidu';
     // 检测 Jackett 状态
     if (cfg.jackett_url && cfg.jackett_api_key) await checkJackettStatus();
-    if (cfg.qb_url) checkQbStatus();
+    if (cfg.qb_url || cfg.tr_url) checkQbStatus();
     refreshScrapeStatus();
   } catch (e) { /* ignore */ }
 }
@@ -2004,7 +2240,7 @@ async function checkQbStatus() {
   try {
     const resp = await fetch(`${API}/api/qbittorrent/status`);
     const data = await safeJson(resp);
-    if (data.online) { dot.classList.add('online'); text.textContent = data.message || '连接正常'; }
+    if (data.online) { dot.classList.add('online'); text.textContent = (data.type === 'transmission' ? '[TR] ' : '[qB] ') + (data.message || '连接正常'); }
     else { dot.classList.add('offline'); text.textContent = data.message || '连接失败'; }
   } catch (e) { dot.classList.add('offline'); text.textContent = '检测出错'; }
 }
@@ -2204,7 +2440,7 @@ async function saveSettings() {
   maxResults = Math.max(12, Math.min(maxResults, 500));
   const latJb = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestJavbus').value) || 100, 300));
   const latAv = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestAvsox').value) || 40, 200));
-  const latFc2 = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestFc2').value) || 60, 120));
+  const latFc2 = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestFc2').value) || 60, 100));
   const fc2Pages = Math.max(1, Math.min(parseInt(document.getElementById('cfgFc2LatestPages').value) || 1, 3));
   const fc2PrefetchCount = Math.max(0, Math.min(parseInt(document.getElementById('cfgFc2PrefetchCount').value) || 0, 60));
   const payload = {
@@ -2233,10 +2469,14 @@ async function saveSettings() {
     aliyun_access_key_id: document.getElementById('cfgAliyunId').value.trim(),
     aliyun_access_key_secret: document.getElementById('cfgAliyunKey').value.trim(),
     default_translate_provider: document.getElementById('cfgDefaultProvider').value,
+    jackett_enabled: document.getElementById('cfgJackettEnabled').checked,
     jackett_url: document.getElementById('cfgJackettUrl').value.trim(),
     jackett_api_key: document.getElementById('cfgJackettKey').value.trim(),
     jackett_indexers: document.getElementById('cfgJackettIndexers').value.trim() || 'all',
     jackett_timeout: parseInt(document.getElementById('cfgJackettTimeout').value) || 20,
+    // V1.5 下载器类型
+    downloader_type: document.getElementById('cfgDownloaderType').value,
+    magnet_upload_limit_kbps: parseInt(document.getElementById('cfgMagnetUpLimit').value, 10) || 0,
     // V1.4 qBittorrent
     qb_url: document.getElementById('cfgQbUrl').value.trim(),
     qb_username: document.getElementById('cfgQbUser').value.trim(),
@@ -2244,6 +2484,14 @@ async function saveSettings() {
     qb_save_path: document.getElementById('cfgQbSavePath').value.trim(),
     qb_category: document.getElementById('cfgQbCategory').value.trim(),
     qb_paused: document.getElementById('cfgQbPaused').checked,
+    // V1.5 Transmission
+    tr_url: document.getElementById('cfgTrUrl').value.trim(),
+    tr_username: document.getElementById('cfgTrUser').value.trim(),
+    tr_password: document.getElementById('cfgTrPass').value,
+    tr_save_path: document.getElementById('cfgTrSavePath').value.trim(),
+    tr_category: document.getElementById('cfgTrCategory').value.trim(),
+    log_verbose: document.getElementById('cfgLogVerbose').checked,
+    // 注：发种相关设置已迁移到「发种中心」页面 /publish
     // V1.4 刮削
     scrape_enabled: document.getElementById('cfgScrapeEnabled').checked,
     scrape_watch_dir: document.getElementById('cfgScrapeWatch').value.trim(),
@@ -2273,7 +2521,7 @@ async function saveSettings() {
       if (payload.jackett_url && payload.jackett_api_key) {
         setTimeout(checkJackettStatus, 300);
       }
-      if (payload.qb_url) setTimeout(checkQbStatus, 300);
+      if (payload.qb_url || payload.tr_url) setTimeout(checkQbStatus, 300);
       // 通知后端按最新配置启停监控，再刷新状态
       try {
         await fetch(`${API}/api/library/scrape/monitor/refresh`, { method: 'POST' });
@@ -2311,7 +2559,11 @@ function showToast(msg) {
 document.getElementById('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
 document.getElementById('settingsOverlay').addEventListener('click', function(e) { if (e.target === this) closeSettings(); });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { closeDetail(); closeSettings(); }
+  if (e.key === 'Escape') {
+    // 灯箱开着时，Esc 只关灯箱、保留详情弹窗，方便继续浏览
+    if (lightboxOpen()) { closeLightbox(); return; }
+    closeDetail(); closeSettings();
+  }
 });
 
 // ══════════════════════════════════════════
@@ -2358,6 +2610,51 @@ function mergeLatestBatch(items) {
   return added;
 }
 
+// V1.5：首页最新结果缓存到 sessionStorage，避免跳到发种页再回来时重新抓取。
+// sessionStorage 在同一标签页内（含整页跳转）保留，关闭标签才清，软 TTL 20 分钟。
+const _LATEST_CACHE_KEY = 'jav_latest_cache';
+const _LATEST_CACHE_TTL = 20 * 60 * 1000;
+function saveLatestCache() {
+  if (!isHomeLatest) return;
+  try {
+    sessionStorage.setItem(_LATEST_CACHE_KEY, JSON.stringify({
+      ts: Date.now(), results: currentResults, page: currentPage,
+    }));
+  } catch (e) { /* 配额满等忽略 */ }
+}
+function tryRestoreLatest() {
+  try {
+    const raw = sessionStorage.getItem(_LATEST_CACHE_KEY);
+    if (!raw) return false;
+    const c = JSON.parse(raw);
+    if (!c || !c.results || !c.results.length) return false;
+    if (Date.now() - (c.ts || 0) > _LATEST_CACHE_TTL) return false;
+    // 恢复状态
+    isHomeLatest = true;
+    currentResults = c.results;
+    latestCodeIndex = {};
+    currentResults.forEach((it, i) => {
+      const code = (it.code || '').toUpperCase().replace(/\s+/g, '-');
+      const key = code || ('url:' + (it.url || ''));
+      if (key && latestCodeIndex[key] === undefined) latestCodeIndex[key] = i;
+    });
+    viewIndices = [];
+    activeSourceFilter = null;
+    currentPage = c.page || 1;
+    rebuildView();
+    renderPage(true);
+    renderSourceFilter();
+    const srcs = [...new Set(currentResults.flatMap(itemSources))].join(' / ');
+    document.getElementById('spinner').classList.remove('active');
+    document.getElementById('statusText').innerHTML =
+      `🆕 最新片源（缓存）· 来自 <strong>${escHtml(srcs)}</strong> · ` +
+      `<a href="#" onclick="loadLatest();return false;" style="color:var(--accent)">刷新</a>`;
+    // 当前页详情按需补全（缓存里可能未补全）
+    ensurePageDetails(currentPage).then(() => upgradePageCards(currentPage));
+    return true;
+  } catch (e) { return false; }
+}
+
 // 首页最新片源：各来源并行抓取，谁先回来谁先显示，慢源随后补入（V1.4.3）
 async function loadLatest() {
   const statusText = document.getElementById('statusText');
@@ -2371,6 +2668,7 @@ async function loadLatest() {
   isHomeLatest = true;
   currentResults = [];
   latestCodeIndex = {};
+  _coverPrewarmed.clear();   // 新一批封面，重置预热去重表
   viewIndices = [];
   activeSourceFilter = null;
   currentPage = 1;
@@ -2400,6 +2698,7 @@ async function loadLatest() {
         if (!firstPaint) { firstPaint = true; renderPage(true); }
         else renderPage(false);
         renderSourceFilter();
+        saveLatestCache();   // 边抓边缓存，半路跳走也有内容可恢复
         // 当前页详情按需补全
         ensurePageDetails(currentPage).then(() => {
           if (token === latestLoadToken) upgradePageCards(currentPage);
@@ -2432,6 +2731,7 @@ async function loadLatest() {
 
   // 并行抓取所有来源
   await Promise.all(sources.map(fetchOne));
+  saveLatestCache();   // 全部返回后再存一次完整结果
 }
 
 // ══════════════════════════════════════════
@@ -2482,7 +2782,8 @@ async function init() {
   await checkAuthStatus();   // 未登录会跳转，登录态/免登录则继续
   await loadRuntimeConfig(); // 读取预取开关 / 首页最新来源等运行配置
   checkVersion();            // 后台检测版本更新（不阻塞）
-  if (showLatestCfg) loadLatest();   // 加载首页最新片源（各源并行、边到边显示）
+  // 首页最新：优先用本标签页缓存（从发种页返回时不重抓），无缓存才抓取
+  if (showLatestCfg) { if (!tryRestoreLatest()) loadLatest(); }
   else document.getElementById('statusText').innerHTML = '输入番号、演员或关键词开始搜索';
 }
 init();

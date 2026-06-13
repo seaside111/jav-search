@@ -33,6 +33,10 @@ services:
       - AUTH_PASSWORD=change_me_please
       - AUTH_SECRET=please-change-this-to-a-long-random-string
       - AUTH_SESSION_TTL=604800
+      # ── 封面/图片磁盘缓存上限（MB）──
+      # 图片经 /api/img 代理后落盘到 /config/imgcache：容器重启不丢、多用户/多实例共享、
+      # 命中即零上游请求。超上限按最旧访问淘汰(LRU)。默认 500；设 0 关闭磁盘缓存（仅内存）。
+      # - IMG_DISK_CACHE_MB=500
       # ── 新增数据源域名（AVSOX/AVMOO 域名常变，失效时改这里）──
       # - AVSOX_BASE=https://avsox.click
       # - AVMOO_BASE=https://avmoo.website

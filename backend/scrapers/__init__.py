@@ -150,15 +150,16 @@ _FLARESOLVERR_SOURCES = ("javdb", "fc2")
 
 
 async def enrich(items: list[dict], proxy: Optional[str] = None,
-                 concurrency: int = 6, per_timeout: float = 9.0) -> list[dict]:
+                 concurrency: int = 10, per_timeout: float = 9.0) -> list[dict]:
     """
     按需抓取详情。items 为待补全的条目（需含 url + source），
     返回与输入等长、顺序一致的详情列表（失败/超时项为 None）。
 
     并发策略：
       - 直连来源（JavBus/AVSOX/AVMOO）走 Semaphore(concurrency) 并发，单条快速超时。
+        concurrency=10 是直连/代理源的甜点：明显快于 6，又不至于触发 AVSOX 等站限流。
       - 走 FlareSolverr 的来源（JavDB/FC2）走全局 Semaphore(1) 串行，单条放宽到 32s——
-        FlareSolverr 单实例不支持并发，串行才能逐条成功而非集体超时。
+        FlareSolverr 单实例不支持并发，串行才能逐条成功而非集体超时（不受上面并发影响）。
     """
     sem = asyncio.Semaphore(concurrency)
 

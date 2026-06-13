@@ -14,7 +14,7 @@
 $ErrorActionPreference = "Stop"
 
 # ===================== 按需修改 =====================
-$IMAGE    = "ghcr.io/seaside111/jav-search:latest"   # 镜像（锁版本可改成 :V1.4.4）
+$IMAGE    = "ghcr.io/seaside111/jav-search:beta"   # beta 测试镜像（锁版本可改成 :V1.5.0-beta；求稳用 :latest）
 $PORT     = 8085                                    # 网页端口（宿主机侧，冲突就改这里）
 
 # 媒体库刮削目录（改成你的真实路径）。不需要刮削可删掉下面对应的 -v 行。

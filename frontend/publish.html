@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>发种中心 · JAV Search</title>
+<style>
+  :root {
+    --bg: #0e0e16; --bg-card: #181826; --bg-soft: #1f1f30;
+    --border: #2a2a3d; --text: #e8e8f0; --text-muted: #b8b8c8;
+    --text-dim: #7a7a8c; --accent: #ff6b9d; --accent2: #c44fd4;
+    --green: #33aa66; --red: #e0556b; --magnet: #22aacc;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Noto Sans SC', system-ui, sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 22px; border-bottom: 1px solid var(--border);
+    background: #13131f; position: sticky; top: 0; z-index: 10;
+  }
+  .logo { font-size: 18px; font-weight: 800;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+  .logo span { font-size: 12px; color: var(--text-dim); -webkit-text-fill-color: var(--text-dim); margin-left: 8px; }
+  .back-btn, .gear-btn {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 14px; border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text-muted); background: none; cursor: pointer; font-size: 13px;
+    text-decoration: none; font-family: inherit;
+  }
+  .gear-btn { margin-left: 10px; }
+  .back-btn:hover, .gear-btn:hover { border-color: var(--accent); color: var(--accent); }
+  main { max-width: 1000px; margin: 0 auto; padding: 22px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+  .tab {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 22px;
+    color: var(--text-dim); padding: 8px 20px; font-size: 13px; cursor: pointer; font-family: inherit;
+  }
+  .tab.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); border-color: transparent; color: #fff; font-weight: 600; }
+  .pane { display: none; }
+  .pane.active { display: block; }
+  .group { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 18px; }
+  .group h3 { font-size: 14px; margin-bottom: 14px; color: var(--text); }
+  .row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
+  .row label.lbl { font-size: 13px; color: var(--text-muted); }
+  .row input[type=text], .row input[type=password], .row input[type=number], .row select {
+    background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); padding: 9px 12px; font-size: 13px; font-family: inherit; width: 100%;
+  }
+  .row input:focus, .row select:focus { outline: none; border-color: var(--accent); }
+  .hint { font-size: 12px; color: var(--text-dim); line-height: 1.6; }
+  .hint a { color: var(--accent); }
+  .chk { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); cursor: pointer; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+  .btn {
+    background: linear-gradient(135deg, var(--accent), var(--accent2)); border: none;
+    border-radius: 8px; color: #fff; padding: 9px 18px; font-size: 13px; font-weight: 600;
+    cursor: pointer; font-family: inherit;
+  }
+  .btn:hover { opacity: .9; } .btn:disabled { opacity: .5; cursor: wait; }
+  .btn-sm { font-size: 12px; padding: 4px 12px; border: 1px solid var(--border); border-radius: 6px;
+    background: none; color: var(--text-muted); cursor: pointer; font-family: inherit; }
+  .btn-sm:hover { border-color: var(--accent); color: var(--accent); }
+  .status-row { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-dim); }
+  .dot.online { background: var(--green); box-shadow: 0 0 6px rgba(51,170,102,.5); }
+  .dot.offline { background: var(--red); }
+  .save-bar { position: sticky; bottom: 0; background: linear-gradient(0deg,#0e0e16 70%,transparent);
+    padding: 14px 0; display: flex; align-items: center; gap: 14px; }
+  .task {
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    padding: 12px 16px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px;
+    background: var(--bg-card);
+  }
+  .task.ready { border-color: var(--green); background: rgba(51,170,102,.06); }
+  .task.failed { border-color: var(--red); }
+  .task-main { min-width: 0; flex: 1; }
+  .task-title { font-size: 14px; color: var(--text); margin-bottom: 4px; word-break: break-all; }
+  .task-meta { font-size: 12px; color: var(--text-dim); }
+  .task-state { display: inline-block; padding: 2px 9px; border-radius: 10px; font-size: 11px;
+    background: var(--bg-soft); color: var(--text-muted); margin-right: 8px; }
+  .task-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .empty { text-align: center; padding: 50px 0; color: var(--text-dim); }
+  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: var(--bg-soft); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 18px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .3s; z-index: 50; }
+  .toast.show { opacity: 1; }
+  .msg { font-size: 12px; white-space: pre-wrap; color: var(--text-dim); margin-top: 6px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+  .stat { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .stat .k { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+  .stat .v { font-size: 17px; font-weight: 700; color: var(--text); word-break: break-all; }
+  table.seeds { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.seeds th, table.seeds td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  table.seeds th { color: var(--text-dim); font-weight: 600; font-size: 12px; }
+  table.seeds td { color: var(--text-muted); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; background: var(--bg-soft); }
+  .badge.ok { color: var(--green); border: 1px solid rgba(51,170,102,.4); }
+  .badge.wait { color: #d9a441; border: 1px solid rgba(217,164,65,.4); }
+  /* 任务分类标签 */
+  .cats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .cat { background: var(--bg-card); border: 1px solid var(--border); border-radius: 18px;
+    color: var(--text-dim); padding: 5px 14px; font-size: 12px; cursor: pointer; font-family: inherit; }
+  .cat.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); border-color: transparent; color: #fff; font-weight: 600; }
+  .cat .n { opacity: .8; margin-left: 4px; }
+  .task { cursor: pointer; }
+  .task:hover { border-color: var(--accent); }
+  /* 详情弹窗 */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6);
+    z-index: 60; align-items: center; justify-content: center; padding: 20px; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: var(--bg); border: 1px solid var(--border); border-radius: 14px;
+    width: 100%; max-width: 640px; max-height: 88vh; display: flex; flex-direction: column; }
+  .modal-head { display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px; border-bottom: 1px solid var(--border); }
+  .modal-head h3 { font-size: 15px; }
+  .modal-close { background: none; border: none; color: var(--text-dim); font-size: 18px; cursor: pointer; }
+  .modal-body { padding: 18px 20px; overflow-y: auto; }
+  .modal-foot { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+  .dl { display: grid; grid-template-columns: 88px 1fr; gap: 6px 12px; font-size: 13px; }
+  .dl dt { color: var(--text-dim); }
+  .dl dd { color: var(--text-muted); word-break: break-all; }
+  .sec-h { font-size: 13px; color: var(--text); font-weight: 600; margin: 16px 0 8px; }
+  .logbox { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; font-size: 12px; color: var(--text-dim); max-height: 180px; overflow-y: auto;
+    white-space: pre-wrap; line-height: 1.7; }
+  .cover-thumb { width: 90px; border-radius: 6px; float: right; margin: 0 0 8px 12px; }
+  @media (max-width: 640px) { .two-col { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">发种中心<span>JAV Search · M-Team</span></div>
+  <a class="back-btn" href="/">← 返回搜索</a>
+</header>
+
+<main>
+  <div class="tabs">
+    <button class="tab active" data-tab="tasks" onclick="switchTab('tasks')">发种任务</button>
+    <button class="tab" data-tab="monitor" onclick="switchTab('monitor')">做种监控</button>
+    <button class="tab" data-tab="settings" onclick="switchTab('settings')">发种设置</button>
+  </div>
+
+  <!-- 任务 -->
+  <div class="pane active" id="pane-tasks">
+    <div class="group">
+      <div class="hint" style="line-height:1.8">
+        发种入口在<b>搜索页 → 展开某影片资源 → 在某条磁力上点「发种」</b>，任务会出现在下方。<br>
+        流程：查重 → 下载 → 停种 → 刮削规整 → 制种 → 发布前复查 → <b>待发布(点确认)</b> → 发布 → 取回官方种子做种。
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+      <button class="btn-sm" onclick="refreshTasks()">刷新</button>
+      <label class="chk"><input type="checkbox" id="autoRefresh" checked onchange="toggleAuto()"> 自动刷新(30s)</label>
+    </div>
+    <div class="cats" id="taskCats"></div>
+    <div id="taskList"><div class="empty">加载中…</div></div>
+  </div>
+
+  <!-- 监控 -->
+  <div class="pane" id="pane-monitor">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+      <button class="btn-sm" onclick="refreshMonitor()">刷新</button>
+      <span class="hint">站点全局数据需先在「发种设置」填 uid</span>
+    </div>
+    <div class="group">
+      <h3>站点全局数据</h3>
+      <div class="stats" id="globalStats"><div class="hint">加载中…</div></div>
+      <div class="msg" id="globalErr"></div>
+    </div>
+    <div class="group">
+      <h3>做种 / 审核状态</h3>
+      <div id="seedList"><div class="hint">加载中…</div></div>
+      <div class="msg" id="seedErr"></div>
+    </div>
+  </div>
+
+  <!-- 设置 -->
+  <div class="pane" id="pane-settings">
+    <div class="group">
+      <h3>M-Team 连接</h3>
+      <div class="status-row">
+        <div class="dot" id="mteamDot"></div>
+        <span class="hint" id="mteamStatus">未检测</span>
+        <button class="btn-sm" style="margin-left:auto" onclick="testMteam()">测试连接</button>
+      </div>
+      <div class="row">
+        <label class="lbl">API 地址</label>
+        <input type="text" id="cfgMteamBase" placeholder="https://test2.m-team.cc/api">
+        <span class="hint">开发期用测试站；正式接口后续替换</span>
+      </div>
+      <div class="row">
+        <label class="lbl">API 密钥</label>
+        <input type="password" id="cfgMteamKey" placeholder="控制台 → 实验室 → API 密钥 生成">
+        <span class="hint">请求头 x-api-key 使用；切勿外泄</span>
+      </div>
+      <div class="row">
+        <label class="lbl">用户 uid</label>
+        <input type="text" id="cfgMteamUid" placeholder="个人页 URL 里的数字（监控全局数据用）">
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>制种 & 做种</h3>
+      <div class="row">
+        <label class="lbl">制种 source 标记</label>
+        <input type="text" id="cfgMteamSource" placeholder="M-Team">
+        <span class="hint">写入种子 info.source，影响 infohash</span>
+      </div>
+      <div class="row">
+        <label class="lbl">做种分类标签</label>
+        <input type="text" id="cfgCrossseedCategory" placeholder="mteam">
+        <span class="hint">发种做种的种子统一打此分类，便于识别保护</span>
+      </div>
+      <div class="row hint" style="line-height:1.5">
+        说明：下载/做种用的「下载器保存目录」沿用<b>全局设置 → 下载器</b>里的配置，发种这里无需重复填写——
+        首次下磁力、最后重新做 PT 种子都由下载器按它自己的保存目录处理。
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>刮削 & 归档</h3>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="cfgPubScrapeEnabled"> 启用刮削</label>
+        <span class="hint">开：文件名只留<b>番号</b>，标题/演员/简介写入 NFO，抓封面；关：保留原文件名、不写 NFO/封面</span>
+      </div>
+      <div class="row">
+        <label class="lbl">刮削目录(本项目容器视角)</label>
+        <input type="text" id="cfgPubWorkDir" placeholder="/data/media/qb/jpav">
+        <span class="hint"><b>本容器 /data 下、实际指向下载器保存数据的同一物理目录</b>的挂载名（通常 = 刮削监控目录）。读取/刮削/规整/归档全基于此目录，做种在此【原地】完成</span>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="cfgPubArchiveEnabled"> 启用归档（供 EMBY 等媒体库）</label>
+        <span class="hint">额外造一份到归档目录给 EMBY；做种始终留在下载目录原地，二者解耦。关闭则可让 EMBY 直接扫下载目录</span>
+      </div>
+      <div class="row">
+        <label class="lbl">归档方式</label>
+        <select id="cfgPubArchiveMode">
+          <option value="hardlink">硬链接（不占额外空间；跨卷自动改为复制）</option>
+          <option value="copy">复制（始终复制一份，占双倍空间）</option>
+        </select>
+        <span class="hint">硬链接需归档目录与下载目录在<b>同一卷</b>；跨卷无法硬链接会自动退化为复制</span>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="cfgPubArchiveByMonth"> 按年月建子目录（归档目录/YYYYMM/番号/）</label>
+        <span class="hint">与刮削监控的归档结构一致；关闭则直接 归档目录/番号/</span>
+      </div>
+      <div class="row">
+        <label class="lbl">归档目录(容器视角)</label>
+        <input type="text" id="cfgPubArchiveDir" placeholder="/data/ 下的子目录">
+        <span class="hint">本项目里的挂载名，给 EMBY 扫。需与刮削目录在同一卷才能硬链接（留空则用刮削归档目录）</span>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>发布参数</h3>
+      <div class="row">
+        <label class="lbl">发布分类 id（必填）</label>
+        <input type="text" id="cfgPubCategory" placeholder="如 AV 区分类 id">
+        <span class="hint">M-Team 必填，<b>手填优先</b>于智能识别。<a href="#" onclick="fetchConf();return false;">点此拉取分类/国家</a>（需先填密钥并保存）</span>
+      </div>
+      <div class="row">
+        <label class="lbl">国家/地区 id</label>
+        <input type="text" id="cfgPubCountries" placeholder="如 日本 的 id（从上面拉取列表里找）">
+        <span class="hint">createOredit 的 countries 字段；可留空</span>
+      </div>
+      <div class="msg" id="confMsg"></div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="cfgPubAnonymous"> 匿名发布</label>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="cfgPubAuto"> 自动发布（复查通过后直接发，不人工确认）</label>
+        <span class="hint">默认关闭＝发布前需在「发种任务」点确认；开启＝全自动</span>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>下载 / 截图 / 做种</h3>
+      <div class="two-col">
+        <div class="row">
+          <label class="lbl">同时活跃数</label>
+          <input type="number" id="cfgPubMaxActive" min="1" max="20" value="3">
+          <span class="hint">含下载+做种；超限排队</span>
+        </div>
+        <div class="row">
+          <label class="lbl">截图张数</label>
+          <input type="number" id="cfgPubShots" min="1" max="20" value="6">
+        </div>
+        <div class="row">
+          <label class="lbl">优先图床</label>
+          <select id="cfgImageHost">
+            <option value="imgbb">imgbb（需key·机房/代理最稳）</option>
+            <option value="imgchest">imgchest（需token·允许成人·直链走CF·国内直连较优）</option>
+            <option value="freeimage">freeimage.host（免注册·成人较宽松·直链走CF）</option>
+            <option value="catbox">catbox.moe（免key·仅住宅IP可传）</option>
+            <option value="pixhost">pixhost（免key·部分代理不通）</option>
+          </select>
+          <span class="hint">简介图按此图床优先上传，失败自动兜底其它。<b>追求"国内访客直连看图"优先试 imgchest / freeimage</b>（直链走 Cloudflare，国内裸连命中率较高）——但能否直连取决于 GFW，请用下方测试拿到直链后到国内裸连环境实测</span>
+        </div>
+        <div class="row">
+          <label class="lbl">imgbb API Key</label>
+          <input type="password" id="cfgImgbbKey" placeholder="https://api.imgbb.com 免费申请">
+          <span class="hint">选 imgbb 时必填。免费注册 imgbb → 取 API Key 填入</span>
+        </div>
+        <div class="row">
+          <label class="lbl">imgchest Token</label>
+          <input type="password" id="cfgImgchestToken" placeholder="imgchest.com 账号 → API 生成 access token">
+          <span class="hint">选 imgchest 时必填。注册 imgchest.com → 个人资料里生成 access token</span>
+        </div>
+        <div class="row">
+          <label class="lbl">freeimage Key</label>
+          <input type="password" id="cfgFreeimageKey" placeholder="留空即用内置公开 key（被限流再填自己的）">
+          <span class="hint">选 freeimage 时可留空（用内置公开 key）；如遇限流，去 freeimage.host 注册取自己的 key 填入</span>
+        </div>
+        <div class="row">
+          <label class="lbl">图床测试</label>
+          <button type="button" class="btn-sm" onclick="testImageHost(this)">上传测试图</button>
+          <span class="hint" id="imghostTestMsg">用内置测试图按当前优先图床上传一次，验证是否正常（会先保存设置）</span>
+        </div>
+        <div class="row">
+          <label class="lbl">停止·分享率</label>
+          <input type="number" id="cfgPubStopRatio" min="0" step="0.1" value="1.0">
+          <span class="hint">达此分享率停种（0=不按分享率）</span>
+        </div>
+        <div class="row">
+          <label class="lbl">停止·时长(小时)</label>
+          <input type="number" id="cfgPubStopHours" min="0" step="1" value="72">
+          <span class="hint">达此做种时长停种（0=不按时长）</span>
+        </div>
+        <div class="row">
+          <label class="lbl">单种上传限速(KB/s)</label>
+          <input type="number" id="cfgPubUpLimit" min="0" step="64" value="0">
+          <span class="hint">0=不限。防超 PT 单种限速被封</span>
+        </div>
+        <div class="row">
+          <label class="lbl">轮询间隔(秒)</label>
+          <input type="number" id="cfgPubPoll" min="10" step="5" value="30">
+        </div>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="cfgPubDeleteAfterStop"> 停止后删除做种任务</label>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="cfgPubDeleteFiles"> 删除时连同文件（危险）</label>
+        <span class="hint">仅在「停止后删除」开启时生效；默认关</span>
+      </div>
+    </div>
+
+    <div class="save-bar">
+      <button class="btn" onclick="saveSettings()">保存发种设置</button>
+      <span class="msg" id="saveMsg" style="margin-top:0"></span>
+    </div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<!-- 任务详情弹窗 -->
+<div class="modal-overlay" id="taskModal" onclick="closeTask()">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-head">
+      <h3 id="tmTitle">任务详情</h3>
+      <button class="modal-close" onclick="closeTask()">✕</button>
+    </div>
+    <div class="modal-body" id="tmBody"></div>
+    <div class="modal-foot" id="tmFoot"></div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let autoTimer = null;
+
+function $(id){ return document.getElementById(id); }
+async function safeJson(r){ try { return await r.json(); } catch(e){ return {}; } }
+function escHtml(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function toast(m){ const t=$('toast'); t.textContent=m; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2600); }
+
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===name));
+  document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('active', p.id==='pane-'+name));
+  if (name==='monitor') refreshMonitor();
+}
+
+// 格式化
+function fmtBytes(n){ n=Number(n||0); const u=['B','KB','MB','GB','TB']; let i=0; while(n>=1024&&i<4){n/=1024;i++;} return (i===0?n:n.toFixed(2))+' '+u[i]; }
+function fmtSpeed(n){ return fmtBytes(n)+'/s'; }
+function fmtDur(s){ s=Number(s||0); const h=Math.floor(s/3600), d=Math.floor(h/24); if(d>0) return d+'天'+(h%24)+'时'; if(h>0) return h+'时'+Math.floor((s%3600)/60)+'分'; return Math.floor(s/60)+'分'; }
+function bytesIfNum(v){ const n=Number(v); return (v!==null&&v!==undefined&&!isNaN(n)&&String(v).match(/^\d+$/))?fmtBytes(n):(v??'—'); }
+
+// ── 配置 ──
+async function loadConfig(){
+  try {
+    const r = await fetch(`${API}/api/config`, {cache:'no-store'});
+    const c = await safeJson(r);
+    $('cfgMteamBase').value = c.mteam_api_base || 'https://test2.m-team.cc/api';
+    $('cfgMteamKey').value = c.mteam_api_key || '';
+    $('cfgMteamUid').value = c.mteam_uid || '';
+    $('cfgMteamSource').value = c.mteam_source_flag || 'M-Team';
+    $('cfgCrossseedCategory').value = c.crossseed_category || 'mteam';
+    $('cfgPubWorkDir').value = c.publish_work_dir || '/data/';   // 默认预填 compose 挂载根，子目录由用户补全
+    $('cfgPubArchiveDir').value = c.publish_archive_dir || '/data/';   // 默认预填挂载根，子目录由用户补全
+    $('cfgPubScrapeEnabled').checked = c.publish_scrape_enabled !== false;
+    $('cfgPubArchiveEnabled').checked = c.publish_archive_enabled !== false;
+    $('cfgPubArchiveMode').value = (c.publish_archive_mode === 'copy') ? 'copy' : 'hardlink';
+    $('cfgPubArchiveByMonth').checked = c.publish_archive_by_month !== false;
+    $('cfgPubCategory').value = c.publish_category || '';
+    $('cfgPubCountries').value = c.publish_countries || '';
+    $('cfgPubMaxActive').value = c.publish_max_active ?? 3;
+    $('cfgPubShots').value = c.publish_screenshot_count ?? 6;
+    $('cfgImageHost').value = c.image_host || 'catbox';
+    $('cfgImgbbKey').value = c.image_imgbb_key || '';
+    $('cfgImgchestToken').value = c.image_imgchest_token || '';
+    $('cfgFreeimageKey').value = c.image_freeimage_key || '';
+    $('cfgPubStopRatio').value = c.publish_stop_ratio ?? 1.0;
+    $('cfgPubStopHours').value = c.publish_stop_hours ?? 72;
+    $('cfgPubUpLimit').value = c.publish_upload_limit_kbps ?? 0;
+    $('cfgPubPoll').value = c.publish_poll_interval ?? 30;
+    $('cfgPubDeleteAfterStop').checked = !!c.publish_delete_after_stop;
+    $('cfgPubDeleteFiles').checked = !!c.publish_delete_files;
+    $('cfgPubAnonymous').checked = !!c.publish_anonymous;
+    $('cfgPubAuto').checked = !!c.publish_auto;
+    if (c.mteam_api_key) checkMteam();
+  } catch(e){ /* ignore */ }
+}
+
+async function saveSettings(){
+  const payload = {
+    mteam_api_base: $('cfgMteamBase').value.trim(),
+    mteam_api_key: $('cfgMteamKey').value,
+    mteam_uid: $('cfgMteamUid').value.trim(),
+    mteam_source_flag: $('cfgMteamSource').value.trim(),
+    crossseed_category: $('cfgCrossseedCategory').value.trim(),
+    publish_work_dir: $('cfgPubWorkDir').value.trim(),
+    publish_archive_dir: $('cfgPubArchiveDir').value.trim(),
+    publish_scrape_enabled: $('cfgPubScrapeEnabled').checked,
+    publish_archive_enabled: $('cfgPubArchiveEnabled').checked,
+    publish_archive_mode: $('cfgPubArchiveMode').value,
+    publish_archive_by_month: $('cfgPubArchiveByMonth').checked,
+    publish_category: $('cfgPubCategory').value.trim(),
+    publish_countries: $('cfgPubCountries').value.trim(),
+    publish_max_active: Math.max(1, parseInt($('cfgPubMaxActive').value)||3),
+    publish_screenshot_count: Math.max(1, parseInt($('cfgPubShots').value)||6),
+    image_host: $('cfgImageHost').value,
+    image_imgbb_key: $('cfgImgbbKey').value,
+    image_imgchest_token: $('cfgImgchestToken').value,
+    image_freeimage_key: $('cfgFreeimageKey').value,
+    publish_stop_ratio: Math.max(0, parseFloat($('cfgPubStopRatio').value)||0),
+    publish_stop_hours: Math.max(0, parseFloat($('cfgPubStopHours').value)||0),
+    publish_upload_limit_kbps: Math.max(0, parseInt($('cfgPubUpLimit').value)||0),
+    publish_poll_interval: Math.max(10, parseInt($('cfgPubPoll').value)||30),
+    publish_delete_after_stop: $('cfgPubDeleteAfterStop').checked,
+    publish_delete_files: $('cfgPubDeleteFiles').checked,
+    publish_anonymous: $('cfgPubAnonymous').checked,
+    publish_auto: $('cfgPubAuto').checked,
+  };
+  const msg = $('saveMsg'); msg.style.color='var(--text-dim)'; msg.textContent='保存中…';
+  try {
+    const r = await fetch(`${API}/api/config`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    const d = await safeJson(r);
+    if (d.success){ msg.style.color='var(--green)'; msg.textContent='✓ 已保存'; setTimeout(()=>msg.textContent='',3000);
+      if (payload.mteam_api_key) setTimeout(checkMteam, 300); }
+    else { msg.style.color='var(--red)'; msg.textContent='保存失败'; }
+  } catch(e){ msg.style.color='var(--red)'; msg.textContent='出错：'+e.message; }
+}
+
+// ── 图床上传测试 ──（先保存设置，再用内置测试图按当前优先图床上传一次）
+async function testImageHost(btn){
+  const msg = $('imghostTestMsg');
+  if (btn) btn.disabled = true;
+  msg.style.color = 'var(--text-dim)'; msg.textContent = '保存设置并上传测试图中…';
+  try {
+    await saveSettings();
+    const r = await fetch(`${API}/api/imagehost/test`, { method:'POST' });
+    const d = await safeJson(r);
+    if (d.success && d.url){
+      msg.style.color = 'var(--green)';
+      msg.innerHTML = `✓ 上传成功（${escHtml(d.host||'')}）：<a href="${escHtml(d.url)}" target="_blank" rel="noopener" style="color:var(--accent)">${escHtml(d.url)}</a>`;
+    } else {
+      msg.style.color = 'var(--red)';
+      msg.textContent = `✗ 上传失败：${d.error || d.detail || '未知错误'}（已尝试 ${(d.hosts||[]).join('、')}）`;
+    }
+  } catch(e){
+    msg.style.color = 'var(--red)'; msg.textContent = '✗ 出错：'+e.message;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ── M-Team 状态 / 分类 ──
+async function testMteam(){
+  if (!$('cfgMteamKey').value){ toast('请先填写 API 密钥'); return; }
+  await checkMteam();
+}
+async function checkMteam(){
+  const dot=$('mteamDot'), txt=$('mteamStatus'); dot.className='dot'; txt.textContent='检测中…（请先保存）';
+  try {
+    const r = await fetch(`${API}/api/mteam/test`); const d = await safeJson(r);
+    if (d.authed){ dot.classList.add('online'); txt.textContent=d.message||'连接正常'; }
+    else { dot.classList.add('offline'); txt.textContent=d.message||'鉴权失败'; }
+  } catch(e){ dot.classList.add('offline'); txt.textContent='检测出错'; }
+}
+async function fetchConf(){
+  const box=$('confMsg'); box.textContent='拉取中…（需先填密钥并保存）';
+  try {
+    const r = await fetch(`${API}/api/publish/mteam/conf`); const d = await safeJson(r);
+    if (!r.ok){ box.textContent='✗ '+(d.detail||'拉取失败'); return; }
+    const data = d.data||{};
+    const fmt = (arr)=>arr.map(c=>`${c.id??c.value??''} · ${c.nameChs||c.cname||c.name||c.label||''}`).join('\n');
+    let out = '';
+    if (Array.isArray(data.category)) out += '【分类】(填上面「发布分类 id」)\n'+fmt(data.category)+'\n\n';
+    if (Array.isArray(data.country)) out += '【国家/地区】(填「国家/地区 id」)\n'+fmt(data.country)+'\n';
+    box.textContent = out || ('已拉取，但结构需人工查看：\n'+JSON.stringify(data).slice(0,800));
+  } catch(e){ box.textContent='✗ 出错：'+e.message; }
+}
+
+// ── 任务（分类 + 列表 + 详情弹窗）──
+let _tasks = [], _counts = {}, _cat = 'all';
+const CATS = [
+  ['all','全部'], ['ready','待确认'], ['active','进行中'],
+  ['seeding','做种中'], ['done','已结束'], ['failed','失败'],
+];
+
+async function refreshTasks(){
+  try {
+    const r = await fetch(`${API}/api/publish/tasks`, {cache:'no-store'});
+    const d = await safeJson(r);
+    _tasks = d.tasks||[]; _counts = d.counts||{};
+    renderCats(); renderTaskList();
+  } catch(e){ $('taskList').innerHTML='<div class="empty">加载失败：'+escHtml(e.message)+'</div>'; }
+}
+function renderCats(){
+  $('taskCats').innerHTML = CATS.map(([k,label])=>{
+    const n = k==='all' ? (_counts.all||0) : (_counts[k]||0);
+    return `<button class="cat ${_cat===k?'active':''}" onclick="setCat('${k}')">${label}<span class="n">${n}</span></button>`;
+  }).join('');
+}
+function setCat(k){ _cat=k; renderCats(); renderTaskList(); }
+function renderTaskList(){
+  const box=$('taskList');
+  const list = _cat==='all' ? _tasks : _tasks.filter(t=>t.group===_cat);
+  if (!list.length){ box.innerHTML='<div class="empty">该分类暂无任务</div>'; return; }
+  box.innerHTML = list.map(t=>{
+    const cls = t.state==='ready' ? 'ready' : (t.group==='failed' ? 'failed' : '');
+    // 确认全程可点：活跃/待发布且未确认时显示「确认」；已确认显示标记
+    const canConfirm = !t.confirmed && ['active','ready'].includes(t.group);
+    const quick =
+      (canConfirm ? `<button class="btn btn-sm" style="color:#fff;border:none;background:linear-gradient(135deg,var(--accent),var(--accent2))" onclick="event.stopPropagation();confirmPub('${t.id}',this)">确认</button>` : '') +
+      (t.group!=='done' ? `<button class="btn-sm" onclick="event.stopPropagation();cancelPub('${t.id}')">取消</button>` : '') +
+      (t.group==='failed'||t.group==='done' ? `<button class="btn-sm" onclick="event.stopPropagation();retryPub('${t.id}')">重试</button>` : '');
+    return `<div class="task ${cls}" onclick="openTask('${t.id}')">
+      <div class="task-main">
+        <div class="task-title">${escHtml(t.code||'')} ${escHtml(t.title_jp||t.title||'')}</div>
+        <div class="task-meta"><span class="task-state">${escHtml(t.state_label||'')}</span>${t.confirmed?'<span class="task-state" style="color:var(--green)">已确认</span>':''}${t.mteam_id?'id '+escHtml(t.mteam_id)+' · ':''}${t.error?'⚠ '+escHtml(t.error):escHtml((t.log&&t.log[t.log.length-1])||'')}</div>
+      </div>
+      <div class="task-actions">${quick}</div>
+    </div>`;
+  }).join('');
+}
+
+async function openTask(id){
+  $('taskModal').classList.add('open');
+  $('tmBody').innerHTML='<div class="hint">加载中…</div>'; $('tmFoot').innerHTML='';
+  try {
+    const r = await fetch(`${API}/api/publish/${id}`, {cache:'no-store'});
+    const d = await safeJson(r);
+    if (!r.ok||!d.task){ $('tmBody').innerHTML='<div class="hint">加载失败</div>'; return; }
+    renderTaskDetail(d.task);
+  } catch(e){ $('tmBody').innerHTML='<div class="hint">出错：'+escHtml(e.message)+'</div>'; }
+}
+function closeTask(){ $('taskModal').classList.remove('open'); }
+function renderTaskDetail(t){
+  $('tmTitle').textContent = (t.code||'') + ' · ' + (t.state_label||'');
+  const sr = t.scrape_result||{}, cr = t.check_result||{}, ms = t.media_summary||{};
+  const cover = sr.cover ? `<img class="cover-thumb" src="${API}/api/img?url=${encodeURIComponent(sr.cover)}" onerror="this.style.display='none'">` : '';
+  let html = cover;
+  html += `<dl class="dl">
+    <dt>番号</dt><dd>${escHtml(t.code||'')}</dd>
+    <dt>日文原名</dt><dd>${escHtml(t.title_jp||sr.title||'(未取到)')}</dd>
+    <dt>状态</dt><dd>${escHtml(t.state_label||'')}${t.error?' · ⚠ '+escHtml(t.error):''}</dd>
+    <dt>站点 id</dt><dd>${t.mteam_id?escHtml(t.mteam_id):'—'}</dd>
+  </dl>`;
+  html += `<div class="sec-h">查询/刮削情况</div><dl class="dl">
+    <dt>命中影片</dt><dd>${sr.found?'是':'否'}${sr.source?'（来源 '+escHtml(sr.source)+'）':''}</dd>
+    <dt>演员</dt><dd>${(sr.actors&&sr.actors.length)?escHtml(sr.actors.join('、')):'—'}</dd>
+    <dt>媒体规格</dt><dd>${ms.height?escHtml((ms.height+'p '+(ms.video_codec||'')+' '+(ms.audio_codec||'')).trim()):'—'}</dd>
+    <dt>归档</dt><dd>${t.archive_path?escHtml(t.archive_path):'—'}</dd>
+  </dl>`;
+  html += `<div class="sec-h">站点查重</div><dl class="dl">
+    <dt>查重结果</dt><dd>${cr.phase?(cr.found?('站点已有 '+cr.count+' 条'):'站点暂无（可发）'):'尚未查重'}</dd>
+  </dl>`;
+  if (cr.items && cr.items.length) html += '<div class="logbox">'+cr.items.map(x=>`#${escHtml(x.id)} ${escHtml(x.name)}`).join('\n')+'</div>';
+  html += `<div class="sec-h">处理日志</div><div class="logbox">${escHtml((t.log||[]).join('\n')||'（无）')}</div>`;
+  $('tmBody').innerHTML = html;
+  // 底部操作（确认全程可点）
+  const f = [];
+  const canConfirm = !t.confirmed && ['active','ready'].includes(t.group);
+  if (canConfirm) f.push(`<button class="btn" onclick="confirmPub('${t.id}',this,true)">${t.state==='ready'?'确认发布':'确认（预授权，到点自动发）'}</button>`);
+  if (t.confirmed && t.group!=='done' && t.group!=='seeding') f.push(`<span class="hint" style="align-self:center;color:var(--green)">✓ 已确认，将自动发布</span>`);
+  if (t.group!=='done') f.push(`<button class="btn-sm" onclick="cancelPub('${t.id}',true)">取消任务</button>`);
+  if (t.group==='failed'||t.group==='done') f.push(`<button class="btn-sm" onclick="retryPub('${t.id}',true)">重试</button>`);
+  f.push(`<button class="btn-sm" onclick="delPub('${t.id}',true)">删除</button>`);
+  $('tmFoot').innerHTML = f.join('');
+}
+
+async function confirmPub(id, btn, fromModal){
+  if (btn){ btn.disabled=true; btn.textContent='发布中…'; }
+  try { const r=await fetch(`${API}/api/publish/${id}/confirm`,{method:'POST'}); const d=await safeJson(r);
+    if (r.ok&&d.success){ toast('已开始发布'); if(fromModal) closeTask(); setTimeout(refreshTasks,800); }
+    else { toast('✗ '+(d.detail||'发布失败')); if(btn){btn.disabled=false;btn.textContent='确认发布';} }
+  } catch(e){ toast('✗ '+e.message); }
+}
+async function cancelPub(id, fromModal){
+  try { const r=await fetch(`${API}/api/publish/${id}/cancel`,{method:'POST'}); const d=await safeJson(r);
+    if (r.ok&&d.success){ toast('已取消'); if(fromModal) closeTask(); refreshTasks(); } else toast('✗ '+(d.detail||'取消失败'));
+  } catch(e){ toast('✗ '+e.message); }
+}
+async function retryPub(id, fromModal){
+  try { const r=await fetch(`${API}/api/publish/${id}/retry`,{method:'POST'}); const d=await safeJson(r);
+    if (r.ok&&d.success){ toast('已重新入队'); if(fromModal) closeTask(); refreshTasks(); } else toast('✗ '+(d.detail||'重试失败'));
+  } catch(e){ toast('✗ '+e.message); }
+}
+async function delPub(id, fromModal){
+  try { await fetch(`${API}/api/publish/${id}`,{method:'DELETE'}); if(fromModal) closeTask(); refreshTasks(); } catch(e){ toast('✗ '+e.message); }
+}
+function toggleAuto(){
+  clearInterval(autoTimer); autoTimer=null;
+  if ($('autoRefresh').checked){
+    autoTimer = setInterval(()=>{
+      if (document.hidden) return;        // 标签页不可见时暂停轮询，省 API 配额
+      refreshTasks();                      // 本地任务，便宜
+      if ($('pane-monitor').classList.contains('active')) refreshMonitor();  // 监控含 M-Team(已服务端缓存60s)
+    }, 30000);                             // 30s 一轮（原 10s 过频）
+  }
+}
+
+// ── 监控 ──
+async function refreshMonitor(){ await Promise.all([loadGlobal(), loadSeeds()]); }
+
+async function loadGlobal(){
+  const box=$('globalStats'), err=$('globalErr'); err.textContent='';
+  try {
+    const r = await fetch(`${API}/api/monitor/global`, {cache:'no-store'});
+    const d = await safeJson(r);
+    if (!d.configured){ box.innerHTML='<div class="hint">未配置 uid，无法获取站点全局数据</div>'; }
+    const cells = [
+      ['用户', d.username||'—'],
+      ['上传量', bytesIfNum(d.uploaded)],
+      ['下载量', bytesIfNum(d.downloaded)],
+      ['分享率', d.ratio??'—'],
+      ['魔力值', d.bonus??'—'],
+      ['做种数', d.seeding??'—'],
+    ];
+    box.innerHTML = cells.map(c=>`<div class="stat"><div class="k">${c[0]}</div><div class="v">${escHtml(String(c[1]))}</div></div>`).join('');
+    const errs = Object.values(d.errors||{}).filter(Boolean);
+    if (errs.length && (d.uploaded==null && d.bonus==null)) err.textContent = '部分数据获取失败：'+errs.join(' / ')+'\n（字段结构因站点而异，可在 /api/monitor/global 看 raw）';
+  } catch(e){ box.innerHTML=''; err.textContent='加载失败：'+e.message; }
+}
+
+async function loadSeeds(){
+  const box=$('seedList'), err=$('seedErr'); err.textContent='';
+  try {
+    const r = await fetch(`${API}/api/monitor/seeds`, {cache:'no-store'});
+    const d = await safeJson(r);
+    const rows = d.rows||[];
+    if (!d.site_ok && d.site_error) err.textContent='站点审核状态获取失败：'+d.site_error;
+    if (!rows.length){ box.innerHTML='<div class="hint">暂无已发布/做种的任务</div>'; return; }
+    box.innerHTML = `<table class="seeds"><thead><tr>
+      <th>番号</th><th>站点</th><th>审核</th><th>上传速度</th><th>已传</th><th>分享率</th><th>做种时长</th></tr></thead><tbody>` +
+      rows.map(x=>{
+        const audit = x.site_visible===1||x.site_visible===true||String(x.site_status).toLowerCase().includes('normal')
+          ? '<span class="badge ok">已通过</span>'
+          : (x.mteam_id ? `<span class="badge wait">${escHtml(String(x.site_status||'待审/未知'))}</span>` : '—');
+        return `<tr>
+          <td>${escHtml(x.code||'')}<div style="font-size:11px;color:var(--text-dim)">${escHtml((x.title_jp||'').slice(0,20))}</div></td>
+          <td>${x.mteam_id?('id '+escHtml(x.mteam_id)):'—'}</td>
+          <td>${audit}</td>
+          <td>${x.in_downloader?fmtSpeed(x.upspeed):'—'}</td>
+          <td>${x.in_downloader?fmtBytes(x.uploaded):'—'}</td>
+          <td>${x.in_downloader?Number(x.ratio||0).toFixed(2):'—'}</td>
+          <td>${x.in_downloader?fmtDur(x.seeding_time):'—'}</td>
+        </tr>`;
+      }).join('') + '</tbody></table>';
+  } catch(e){ box.innerHTML=''; err.textContent='加载失败：'+e.message; }
+}
+
+// init
+loadConfig();
+refreshTasks();
+toggleAuto();
+</script>
+</body>
+</html>

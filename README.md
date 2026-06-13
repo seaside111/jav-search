@@ -1,6 +1,8 @@
-# JAV Search
+# JAV Search · v1.5.0-beta
 
-运行在群晖 Docker 上的日本成人影片信息检索 Web 应用。支持按番号 / 演员 / 关键词搜索，集成百度·阿里云翻译，接入 **Jackett 资源搜索**，并支持 **一键推送 qBittorrent 下载** 与 **下载完成自动刮削归档（Emby 兼容 NFO + 封面）**。
+运行在群晖 Docker 上的日本成人影片信息检索 Web 应用。支持按番号 / 演员 / 关键词搜索，集成百度·阿里云翻译，接入 **Jackett 资源搜索**，支持 **一键推送 qBittorrent / Transmission 下载** 与 **下载完成自动刮削归档（Emby 兼容 NFO + 封面）**，并在 v1.5.0-beta 新增完整的 **发种到 PT（M-Team）流水线**。
+
+> 🧪 **这是 beta 测试分支**（`beta` 分支 / `:beta` 镜像），用于提前体验 v1.5 新功能，可能存在未稳定项；求稳请用 [正式版 `main` 分支 / `:latest` 镜像](https://github.com/seaside111/jav-search)。两者互不影响、可并存。
 
 ---
 
@@ -15,7 +17,8 @@
 - 🔔 **版本更新检测**（V1.4.3）：顶部显示当前版本，后端代理检测 GitHub 最新 release，有新版本时红点提醒
 - 🈳 **翻译功能**：百度 / 阿里云翻译，每条结果独立翻译按钮
 - 🧲 **Jackett 资源搜索**：每张影片卡片一键搜索磁力 / 种子资源
-- 🚀 **qBittorrent 推送**（V1.4）：资源列表「推送下载」按钮，磁力/种子直接加种到指定保存目录
+- 🚀 **下载器推送**（V1.4，V1.5 加 Transmission）：资源列表「推送下载」按钮，按当前下载器（qBittorrent / Transmission）直接加种到指定目录
+- 📤 **发种到 PT（M-Team）**（V1.5-beta）：对资源磁力一键「发种」，后台流水线自动查重→下载→刮削→制种→图床→发布→取回官方种子做种，独立「发种中心」整页跟进任务与做种监控
 - 🎬 **自动刮削归档**（V1.4）：监控下载目录，完成后写 Emby/Kodi NFO + 封面，重命名为番号，按 `YYYYMM/番号/` 归档
 - ⚡ **迅雷下载**：资源列表点「迅雷」唤起本机迅雷；也可复制磁链 / 下载 .torrent
 - ⚙ **可视化设置**：分栏配置代理、数据源、翻译、Jackett、下载器、刮削，无需改文件
@@ -49,7 +52,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8085:8085 \
   -v jav-config:/config                          `# 配置持久化（命名卷，删容器不丢配置）` \
-  -v /volume1/downloads/jav:/downloads/jav       `# 下载器保存目录＝刮削监控源（冒号左侧改成你的真实路径）` \
+  -v /volume1/downloads/jav:/downloads/jav       `# 下载器保存目录＝刮削监控源／发种工作目录（冒号左侧改成你的真实路径）` \
   -v /volume1/media/jav:/media/jav               `# 刮削后归档目录（自动按 YYYYMM/番号/ 建子目录）` \
   -e CONFIG_DIR=/config \
   -e PORT=8085 \
@@ -59,7 +62,7 @@ docker run -d \
   -e AUTH_SECRET=一串很长的随机字符串              `# 会话签名密钥，填长随机串` \
   -e AUTH_SESSION_TTL=604800 \
   --add-host host.docker.internal:host-gateway \
-  ghcr.io/seaside111/jav-search:latest
+  ghcr.io/seaside111/jav-search:beta
 ```
 
 > 上面 `` `# ...` `` 是行内批注，会被 shell 当空忽略，可整段直接复制运行。挂载冒号**左侧**是宿主机真实路径（按需改），**右侧**是容器内路径，需与「设置 → 刮削」里填的一致。不需要刮削功能就删掉中间两行 `-v`。Windows PowerShell 请去掉行尾 `\` 与批注、写成一行。
@@ -67,10 +70,12 @@ docker run -d \
 **升级 / 重建**（配置在命名卷里，不会丢）：
 
 ```bash
-docker pull ghcr.io/seaside111/jav-search:latest
+docker pull ghcr.io/seaside111/jav-search:beta
 docker stop jav-search && docker rm jav-search
 # 再次执行上面的 docker run 命令即可
 ```
+
+> 🧪 beta 用户拉的是 `:beta` 移动标签（随 beta tag 更新）；想锁定到某个具体 beta 版本，把镜像换成 `:V1.5.0-beta` 即可。
 
 ### FlareSolverr（JavDB / FC2 过 Cloudflare 盾用 · 留空自动探测 / 也可手填）
 
@@ -223,6 +228,11 @@ jav-search/
 │   ├── translator.py           # 百度/阿里云翻译
 │   ├── jackett.py              # Jackett 资源搜索
 │   ├── qbittorrent.py          # qBittorrent WebUI 客户端（推送下载）
+│   ├── transmission.py / downloader.py  # Transmission 客户端 + 下载器调度抽象层（V1.5）
+│   ├── mteam.py / mteam_enums.py        # M-Team PT 接入（搜索/发种/取种）+ 枚举映射（V1.5）
+│   ├── publish.py              # 发种流水线状态机 + 队列 + 后台 worker（V1.5）
+│   ├── mediainfo.py / screenshot.py / torrentmaker.py / imagehost.py  # 发种基建：探测/截图/制种/图床（V1.5）
+│   ├── monitor.py / logbus.py  # 做种监控聚合 + 可切换详略日志（V1.5）
 │   ├── library.py              # 媒体库刮削监控 + NFO/封面 + 归档移动
 │   └── scrapers/
 │       ├── __init__.py         # 聚合搜索（列表/详情分离）
@@ -233,6 +243,7 @@ jav-search/
 │       └── _missav.py           # MissAV 补全（给 FC2 补封面/标题，fourhoi CDN 封面）
 └── frontend/
     ├── index.html              # 单页前端（搜索 + 资源抽屉 + 推送 + 分栏设置）
+    ├── publish.html            # 发种中心整页（发种任务 / 做种监控 / 发种设置，V1.5）
     └── login.html
 ```
 
@@ -257,12 +268,23 @@ jav-search/
 | GET  | `/api/qbittorrent/status` | qBittorrent 连接状态 |
 | POST | `/api/library/scrape/run-once` | 立即手动扫描刮削一次 |
 | GET  | `/api/library/scrape/monitor` | 刮削监控状态 |
+| GET  | `/api/downloader/status` | 当前下载器（qB/TR）连接状态 |
+| GET  | `/api/mteam/test` | M-Team 连通诊断 |
+| POST | `/api/publish/enqueue` | 提交发种任务（V1.5） |
+| GET  | `/api/publish/tasks` | 发种任务列表 / 状态（V1.5） |
+| POST | `/api/publish/{id}/confirm` | 确认发布（人工闸门，V1.5） |
+| GET  | `/api/monitor/global` | 做种监控：站点全局数据（V1.5） |
+| GET  | `/api/monitor/seeds` | 做种监控：各做种任务（V1.5） |
 | GET  | `/api/config` | 获取配置（密钥脱敏） |
 | POST | `/api/config` | 保存配置 |
 
 ---
 
 ## 更新日志
+
+> 🧪 **V1.5.0-beta 发种到 PT（大版本 · 测试中）**：在「检索 → 找种 → 下载」链路末端接入完整的 **发种到 M-Team（馒头）** 流水线。要点：① 下载器抽象层，新增 **Transmission**，推送下载按当前下载器自动切换；② 接入 **M-Team PT 站**（`x-api-key`，开发期默认连测试站，可在设置改地址/密钥）；③ **一键发种流水线**——对资源磁力点「发种」，后台状态机自动完成「查重→下载→刮削→制种→截图图床→组装简介→发布→取回官方种子做种」，两处查重防抢发、发布闸门默认人工确认、任务持久化可重试；④ 发种类型（清晰度/编码/有码无码/分类）按 mediainfo + 番号启发式**智能识别**；⑤ 独立 **「发种中心」整页**（发种任务 / 做种监控 / 发种设置）；⑥ 可切换详略的系统日志、单种上传限速。镜像因增装 ffmpeg/mediainfo 由 ~150MB 增至 ~400MB。详见 [`docs_v1.5.0_更新说明.md`](docs_v1.5.0_更新说明.md)。
+>
+> _beta 阶段提醒：发种流水线（尤其 createOredit 上传与官方种子取回做种）需在真实下载器 / M-Team 环境实测验证；详细日志默认开启便于排查，定型后将关闭。_
 
 > **V1.4.4 FC2 专项优化**：① FC2「最新片源」改为**优先用 sukebei 发现番号**（种子站按 id 倒序＝最新、直连不过盾、最快），拿到 fc2ppvdb 够不到的市面最新号，并**统一按 FC2-PPV 编号降序**取最新；② 新增**后台串行预抓 MissAV**（直连不过盾、低负担），慢慢灌入最新片的真标题/封面/样品图，刷新后列表卡变干净、详情样品图秒出；③ FC2 详情改为 **MissAV-only**，点开即出、彻底不碰 FlareSolverr，不再与 JavDB/刮削抢实例（fc2ppvdb 仍保留用于关键词/女优名搜索与首页最新兜底）；④ 设置页新增「最新优先用 sukebei / 后台预抓样品图 + 条数 / fc2ppvdb 抓取页数」。详见 [`docs_v1.4.4_更新说明.md`](docs_v1.4.4_更新说明.md)。
 >

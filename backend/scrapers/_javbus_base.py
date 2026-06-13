@@ -34,6 +34,28 @@ def _abs_url(src: str, base_url: str) -> str:
     return base_url.rstrip("/") + src
 
 
+def _hi_res_cover(thumb: str) -> str:
+    """
+    从列表页缩略图 URL 确定性推导「清晰大封面」URL（零额外网络请求）。
+
+    列表页只给小缩略图（模糊），清晰大封面本只在详情页 a.bigImage 才有；
+    但二者 URL 是确定性对应的，可直接由缩略图推出大封面，让首页/搜索卡片
+    首屏即显示清晰封面，无需等详情抓取。
+      - JavBus 系：  .../pics/thumb/{hash}.jpg  →  .../pics/cover/{hash}_b.jpg
+      - DMM 系(AVSOX/AVMOO)：...{id}ps.jpg       →  ...{id}pl.jpg（ps=小图, pl=大图）
+    无法识别的样式原样返回（前端会以缩略图兜底，不会变差）。
+    """
+    if not thumb:
+        return thumb
+    m = re.match(r"^(.*)/thumb/(.+)\.(jpg|jpeg|png|webp)$", thumb, re.I)
+    if m:
+        return f"{m.group(1)}/cover/{m.group(2)}_b.{m.group(3)}"
+    m = re.match(r"^(.*?)ps\.(jpg|jpeg|png|webp)$", thumb, re.I)
+    if m:
+        return f"{m.group(1)}pl.{m.group(2)}"
+    return thumb
+
+
 # ──────────────────────────────────────────────
 # 列表页解析（卡片级，无需进详情页）
 # ──────────────────────────────────────────────
@@ -54,12 +76,19 @@ def parse_list(html: str, base_url: str, source: str) -> list[dict]:
 
         # 封面 + 标题
         cover = ""
+        cover_thumb = ""
         title = ""
         img = box.select_one(".photo-frame img") or box.select_one("img")
         if img:
             cover = img.get("src") or img.get("data-src") or ""
             cover = _abs_url(cover, base_url)
             title = (img.get("title") or "").strip()
+            # 列表给的是模糊小缩略图：确定性推导清晰大封面，首屏即清晰；
+            # 同时保留原缩略图作前端兜底（大封面偶发 404 时回退，不变差）。
+            hi = _hi_res_cover(cover)
+            if hi != cover:
+                cover_thumb = cover
+                cover = hi
 
         # 番号 + 日期：photo-info 里的 <date> 标签
         code = ""
@@ -89,6 +118,7 @@ def parse_list(html: str, base_url: str, source: str) -> list[dict]:
             "code": code,
             "title": title or code,
             "cover": cover,
+            "cover_thumb": cover_thumb,   # 大封面 404 时前端回退用的缩略图（无则空）
             "url": url,
             "source": source,
             "release_date": release_date,

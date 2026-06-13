@@ -690,6 +690,21 @@ def _iter_video_files(watch_dir: Path):
         _log(f"遍历监控目录失败: {e}")
 
 
+def _under_any(path: Path, roots: set) -> bool:
+    """path 是否等于、或位于 roots 中任一目录的子树下（均按 resolve 比较）。
+    用于发种占用第二层保护：roots 由 publish.active_paths 提供（番号文件夹/原始下载内容路径）。"""
+    if not roots:
+        return False
+    try:
+        p = path.resolve()
+    except Exception:
+        return False
+    for r in roots:
+        if p == r or r in p.parents:
+            return True
+    return False
+
+
 async def _process_completed_file(video_path: Path, config: dict) -> dict:
     """对一个判定为下载完成的视频文件执行：刮削 → 按配置移动归档。"""
     fp = str(video_path)
@@ -763,7 +778,20 @@ async def _scan_once(config: dict) -> int:
     out_dir = config.get("scrape_output_dir", "").strip()
     now = time.time()
     processed = 0
-    n_total = n_done_before = n_incomplete = n_small = n_waiting = n_extra = 0
+    n_total = n_done_before = n_incomplete = n_small = n_waiting = n_extra = n_publish = 0
+
+    # 发种占用：这些文件正被发种流水线原地做种，监控绝不能移动/删除（否则做种丢文件）。
+    # 两层保护互补，命中任一即跳过：
+    #   ① 按番号 active_codes —— 路径对不上（如未拿到 content_path）但番号识别得出时仍保护；
+    #   ② 按路径 active_paths —— 番号识别不出（命名怪异/嵌套深）但文件落在发种占用路径下时仍保护。
+    # 懒加载导入避免与 publish.py 的循环依赖。
+    try:
+        import publish as _publish
+        pub_active = _publish.active_codes()
+        pub_paths = _publish.active_paths(config)
+    except Exception:
+        pub_active = set()
+        pub_paths = set()
 
     _log(f"开始扫描监控目录：{watch}（归档目录：{out_dir or '未配置'}）")
     for vf in _iter_video_files(watch_dir):
@@ -772,6 +800,24 @@ async def _scan_once(config: dict) -> int:
         if fp in _processed:
             n_done_before += 1
             continue
+        # 发种任务占用（未终止）→ 跳过本轮，不入 _processed：待发种结束(终态)后自动恢复正常归档。
+        # ① 按番号：识别必须与归档同深度（上溯各级父目录，复用 _recognize_code）——否则视频嵌在
+        #    「番号/子目录/video.mp4」这类多层结构里时，这里只看文件名+直接父目录会识别不出番号、
+        #    不跳过，而归档却能从祖父目录认出番号照常移动+删原目录，把正在做种的发种数据搬空。
+        # ② 按路径：命名怪异、连父目录都不含番号时，只要文件落在发种占用路径（番号文件夹/原始下载
+        #    内容）的子树下就跳过，作为番号识别的兜底。
+        if pub_active or pub_paths:
+            occupied = False
+            if pub_active:
+                _code_guess = _recognize_code(vf, watch)
+                if _code_guess and _norm(_code_guess) in pub_active:
+                    occupied = True
+            if not occupied and pub_paths and _under_any(vf, pub_paths):
+                occupied = True
+            if occupied:
+                n_publish += 1
+                _size_history.pop(fp, None)
+                continue
         # 仍有 qB 未完成分片标记 → 正在下载
         if _is_incomplete(vf):
             n_incomplete += 1
@@ -833,7 +879,7 @@ async def _scan_once(config: dict) -> int:
 
     _log(f"扫描完成：共 {n_total} 个视频 → 本次处理 {processed}，"
          f"等待稳定 {n_waiting}，下载中 {n_incomplete}，过小 {n_small}，"
-         f"广告/赠片 {n_extra}，先前已处理 {n_done_before}")
+         f"广告/赠片 {n_extra}，发种占用 {n_publish}，先前已处理 {n_done_before}")
     return processed
 
 
