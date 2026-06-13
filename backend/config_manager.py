@@ -93,10 +93,8 @@ DEFAULT_CONFIG = {
     #   下列 publish_* 目录键仅作旧配置兼容兜底（启动时自动迁移到全局键），UI 不再单独编辑。
     "publish_work_dir": "",              # 【已统一→scrape_watch_dir】旧配置兼容兜底
     "publish_work_dir_host": "",         # 【已弃用·可留空】做种 save_path 兜底；现优先取种子自报 save_path
-    # 刮削开关（发种流水线·发种专属）：开=文件名只留番号 + 标题/演员/简介写 NFO + 抓封面；关=保留原文件名
-    "publish_scrape_enabled": True,
-    # 发种是否额外造一份到归档目录给 EMBY（与做种解耦，做种始终留下载目录原地）。发种专属开关
-    "publish_archive_enabled": True,
+    "publish_scrape_enabled": True,      # 【已统一→scrape_meta_enabled】旧配置兼容兜底
+    "publish_archive_enabled": True,     # 【已统一→archive_enabled】旧配置兼容兜底
     "publish_archive_mode": "hardlink",  # 【已统一→archive_mode】旧配置兼容兜底
     "publish_archive_by_month": True,    # 【已统一→archive_by_month】旧配置兼容兜底
     "publish_archive_dir": "",           # 【已统一→scrape_output_dir】旧配置兼容兜底
@@ -140,6 +138,9 @@ DEFAULT_CONFIG = {
                                          #   hardlink/copy 保留原文件；move 移动并清理原下载目录。
                                          #   发种文件因需原地做种，恒按 hardlink/copy（选 move 自动降级为 hardlink）
     "archive_by_month": True,            # 归档是否按年月建子目录（归档目录/YYYYMM/番号/），监控 & 发种共用
+    # 刮削/归档总开关（监控 & 发种共用，全局唯一）：
+    "scrape_meta_enabled": True,         # 刮削：视频改名番号 + 写 NFO/封面；关=保留原文件名、不写 NFO/封面
+    "archive_enabled": True,             # 归档：刮削/发种成品放进归档目录(供 EMBY)；关=不归档(发种仍原地做种)
 }
 
 # 列表抓取硬上限，防止配置过大拖垮服务
@@ -179,6 +180,11 @@ def _migrate_unify_archive(config: dict, saved: dict) -> dict:
         config["archive_mode"] = saved["publish_archive_mode"]
     if "archive_by_month" not in saved and "publish_archive_by_month" in saved:
         config["archive_by_month"] = saved["publish_archive_by_month"]
+    # 刮削/归档总开关：从旧的发种专属开关迁移
+    if "scrape_meta_enabled" not in saved and "publish_scrape_enabled" in saved:
+        config["scrape_meta_enabled"] = saved["publish_scrape_enabled"]
+    if "archive_enabled" not in saved and "publish_archive_enabled" in saved:
+        config["archive_enabled"] = saved["publish_archive_enabled"]
     return config
 
 

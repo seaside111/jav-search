@@ -222,25 +222,6 @@
     </div>
 
     <div class="group">
-      <h3>刮削 & 归档</h3>
-      <div class="row">
-        <label class="chk"><input type="checkbox" id="cfgPubScrapeEnabled"> 启用刮削</label>
-        <span class="hint">开：文件名只留<b>番号</b>，标题/演员/简介写入 NFO，抓封面；关：保留原文件名、不写 NFO/封面</span>
-      </div>
-      <div class="row">
-        <label class="chk"><input type="checkbox" id="cfgPubArchiveEnabled"> 启用归档（额外造一份给 EMBY）</label>
-        <span class="hint">发种做种始终留在下载目录【原地】；开启则<b>额外</b>硬链接/复制一份到归档目录给 EMBY，二者解耦。关闭则可让 EMBY 直接扫下载目录</span>
-      </div>
-      <div class="row">
-        <span class="hint" style="display:block;padding:10px 12px;border:1px dashed var(--border,#888);border-radius:6px;line-height:1.7">
-          📌 <b>下载/工作目录、归档目录、归档方式、按年月</b>已统一到
-          <b>全局设置 → 刮削 &amp; 归档</b>，发种与刮削监控<b>共用同一处</b>，此页不再单独设置（避免两套配置、两头执行）。<br>
-          发种文件因需<b>原地做种</b>，归档恒为<b>硬链接/复制</b>——即使全局选了「移动」也会自动降级，绝不移走做种数据。
-        </span>
-      </div>
-    </div>
-
-    <div class="group">
       <h3>发布参数</h3>
       <div class="row">
         <label class="lbl">发布分类 id（必填）</label>
@@ -386,9 +367,7 @@ async function loadConfig(){
     $('cfgMteamUid').value = c.mteam_uid || '';
     $('cfgMteamSource').value = c.mteam_source_flag || 'M-Team';
     $('cfgCrossseedCategory').value = c.crossseed_category || 'mteam';
-    // 目录/归档方式/按年月已统一到全局设置页，此页不再读写（cfgPubScrapeEnabled/cfgPubArchiveEnabled 仍为发种专属）
-    $('cfgPubScrapeEnabled').checked = c.publish_scrape_enabled !== false;
-    $('cfgPubArchiveEnabled').checked = c.publish_archive_enabled !== false;
+    // 刮削 & 归档（含刮削/归档开关、目录、归档方式、按年月）已全部统一到全局设置页，此页不再读写
     $('cfgPubCategory').value = c.publish_category || '';
     $('cfgPubCountries').value = c.publish_countries || '';
     $('cfgPubMaxActive').value = c.publish_max_active ?? 3;
@@ -416,9 +395,7 @@ async function saveSettings(){
     mteam_uid: $('cfgMteamUid').value.trim(),
     mteam_source_flag: $('cfgMteamSource').value.trim(),
     crossseed_category: $('cfgCrossseedCategory').value.trim(),
-    // 目录/归档方式/按年月已迁到全局设置页，此页不再提交；仅保留发种专属开关
-    publish_scrape_enabled: $('cfgPubScrapeEnabled').checked,
-    publish_archive_enabled: $('cfgPubArchiveEnabled').checked,
+    // 刮削 & 归档相关全部迁到全局设置页，此页不再提交
     publish_category: $('cfgPubCategory').value.trim(),
     publish_countries: $('cfgPubCountries').value.trim(),
     publish_max_active: Math.max(1, parseInt($('cfgPubMaxActive').value)||3),

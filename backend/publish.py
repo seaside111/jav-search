@@ -294,7 +294,8 @@ def _archive_for_emby(pub_folder: Path, code: str, config: dict) -> dict:
       - 跨文件系统(EXDEV) 或显式选 copy：退化为【复制】。
       - publish_archive_by_month=True：归档落到 归档目录/YYYYMM/番号/，否则 归档目录/番号/。
     """
-    if not config.get("publish_archive_enabled", True):
+    # 归档总开关（全局，监控 & 发种共用）；兼容旧 publish_archive_enabled
+    if not config.get("archive_enabled", config.get("publish_archive_enabled", True)):
         return {"info": "未启用归档（可让 EMBY 直接扫描下载目录）", "error": ""}
     # V1.5 统一：归档目录/模式/按年月全取全局键（与刮削监控共用），兼容旧 publish_* 回退。
     arch_root = (config.get("scrape_output_dir") or config.get("publish_archive_dir") or "").strip()
@@ -701,7 +702,8 @@ async def _step_process(t: dict, config: dict):
     meta_dir.mkdir(parents=True, exist_ok=True)
     pub_folder = seed_dir_c / _safe_name(t["code"])   # 番号文件夹（torrent 根目录，原地）
     pub_folder.mkdir(parents=True, exist_ok=True)
-    scrape_on = config.get("publish_scrape_enabled", True)
+    # 刮削总开关（全局，监控 & 发种共用）；兼容旧 publish_scrape_enabled
+    scrape_on = config.get("scrape_meta_enabled", config.get("publish_scrape_enabled", True))
     safe_code = _safe_name(t["code"])
     multi = len(videos) > 1
     moved_videos = []

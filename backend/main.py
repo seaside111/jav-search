@@ -300,6 +300,8 @@ class ConfigUpdateRequest(BaseModel):
     # V1.5 统一归档（监控 & 发种共用）
     archive_mode: Optional[str] = None        # hardlink | copy | move
     archive_by_month: Optional[bool] = None
+    scrape_meta_enabled: Optional[bool] = None   # 刮削总开关：改名番号+写NFO/封面
+    archive_enabled: Optional[bool] = None       # 归档总开关：成品放归档目录
 
 
 # ──────────────────────────────────────────────

@@ -617,12 +617,12 @@ def _transfer(src: Path, dst: Path, mode: str) -> bool:
 
 
 def _archive_file(video_path: Path, output_dir: str, code: str,
-                  mode: str = "hardlink") -> dict:
+                  mode: str = "hardlink", rename: bool = True) -> dict:
     """
-    把视频重命名为「番号.后缀」，连同以番号命名的 NFO/封面，归档到
-    归档目录/年月(可选)/番号/ 子目录下（Emby 单片单目录布局）。
+    把视频归档到 归档目录/年月/番号/ 子目录下（Emby 单片单目录布局）。
+    rename：开（刮削开）= 视频改名「番号.后缀」、随带番号命名的 NFO/封面；
+            关（刮削关）= 保留原文件名、不带 NFO/封面。
     mode：hardlink/copy 保留原下载文件（原文件留存供做种/辅种）；move 移动（原文件离开下载目录）。
-    by_month 由调用方通过 output_dir 之外的全局配置决定，这里仍统一按年月（与发种一致）。
     返回 {archived, moved_original, target_dir, files}。
     """
     mode = (mode or "hardlink").lower()
@@ -638,8 +638,9 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
     folder = video_path.parent
     done = []
 
-    # 1) 视频本体 → 番号.后缀
-    video_dst = target_dir / f"{safe_code}{video_path.suffix.lower()}"
+    # 1) 视频本体 → 番号.后缀（刮削关则保留原文件名）
+    video_name = f"{safe_code}{video_path.suffix.lower()}" if (rename and code) else video_path.name
+    video_dst = target_dir / video_name
     if not _transfer(video_path, video_dst, mode):
         return {"archived": False, "moved_original": False,
                 "error": "视频归档失败", "target_dir": str(target_dir)}
@@ -734,18 +735,28 @@ def _under_any(path: Path, roots: set) -> bool:
 
 
 async def _process_completed_file(video_path: Path, config: dict) -> dict:
-    """对一个判定为下载完成的视频文件执行：刮削 → 按配置移动归档。"""
+    """对一个判定为下载完成的视频文件执行：刮削(可关) → 按配置归档(可关)。"""
     fp = str(video_path)
     output_dir = config.get("scrape_output_dir", "").strip()
     move_on_fail = config.get("scrape_move_on_fail", True)
+    # 全局刮削/归档总开关（监控 & 发种共用）；兼容旧 publish_* 键
+    scrape_meta = config.get("scrape_meta_enabled", config.get("publish_scrape_enabled", True))
+    archive_on = config.get("archive_enabled", config.get("publish_archive_enabled", True))
 
-    try:
-        scrape_res = await _scrape_one(fp, overwrite=False, config=config)
-    except Exception as e:
-        # 刮削过程意外报错也不应阻止移动归档（符合「刮削正常运行但刮不到也移动」）
-        _log(f"刮削过程异常（将按失败处理）：{video_path.name} — {e}")
-        scrape_res = {"success": False, "filepath": fp, "code": await _resolve_code(video_path, config),
-                      "error": f"刮削异常: {e}"}
+    if scrape_meta:
+        try:
+            scrape_res = await _scrape_one(fp, overwrite=False, config=config)
+        except Exception as e:
+            # 刮削过程意外报错也不应阻止归档（符合「刮削正常运行但刮不到也归档」）
+            _log(f"刮削过程异常（将按失败处理）：{video_path.name} — {e}")
+            scrape_res = {"success": False, "filepath": fp, "code": await _resolve_code(video_path, config),
+                          "error": f"刮削异常: {e}"}
+    else:
+        # 刮削关：不抓元数据/不写 NFO/封面，仅识别番号用于归档分目录（保留原文件名）
+        _log(f"刮削已关闭，仅识别番号后归档（保留原文件名）：{video_path.name}")
+        scrape_res = {"success": True, "filepath": fp,
+                      "code": await _resolve_code(video_path, config),
+                      "title_zh": "", "error": "", "skipped": True}
     # success 含「已跳过」；真正失败（找不到番号/影片信息）才是 success=False
     failed = not scrape_res.get("success")
 
@@ -759,8 +770,11 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
-    # 刮削成功，或失败但配置允许，则归档
-    if output_dir and (not failed or move_on_fail):
+    # 归档：需 归档总开关开 + 配了归档目录 + (刮削成功 或 允许失败仍归档)
+    if not archive_on:
+        _log(f"归档已关闭（仅刮削，保留原处）：{video_path.name}")
+        record["note"] = "归档已关闭，保留原处"
+    elif output_dir and (not failed or move_on_fail):
         if failed:
             _log(f"刮削未成功但按配置仍归档：{video_path.name}")
         watch_dir = Path(config.get("scrape_watch_dir", ""))
@@ -769,7 +783,7 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         src_parent = video_path.parent
         # V1.5 统一：归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
         mode = (config.get("archive_mode") or "hardlink").lower()
-        mv = _archive_file(video_path, output_dir, code, mode=mode)
+        mv = _archive_file(video_path, output_dir, code, mode=mode, rename=scrape_meta)
         record["moved"] = mv.get("archived", False)
         record["archive_mode"] = mode
         record["target_dir"] = mv.get("target_dir", "")

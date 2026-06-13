@@ -942,6 +942,18 @@
             <span class="setting-hint">监控下载完成的文件 → 刮削元数据/封面/NFO → 归档（发种任务占用的文件会自动跳过，绝不抢）</span>
           </div>
           <div class="setting-row">
+            <label class="source-chk" style="font-size:13px">
+              <input type="checkbox" id="cfgScrapeMetaEnabled" checked> 刮削（改名番号 + 写 NFO/封面）
+            </label>
+            <span class="setting-hint">监控与发种共用的刮削开关。开：视频改名为<b>番号</b>、标题/演员/简介写入 NFO、抓封面；关：保留原文件名、不写 NFO/封面（直接归档/做种）</span>
+          </div>
+          <div class="setting-row">
+            <label class="source-chk" style="font-size:13px">
+              <input type="checkbox" id="cfgArchiveEnabled" checked> 归档（成品放到归档目录供 EMBY）
+            </label>
+            <span class="setting-hint">监控与发种共用的归档开关。开：刮削/发种成品按下面的「归档方式」放进归档目录；关：不归档（发种仍在下载目录原地做种，监控则只刮削不归档）</span>
+          </div>
+          <div class="setting-row">
             <label class="setting-label">下载/工作目录（监控 &amp; 发种共用）</label>
             <input class="setting-input" id="cfgScrapeWatch" type="text" placeholder="/data/media/qb/jpav">
             <span class="setting-hint">本容器内、实际指向<b>下载器保存数据同一物理目录</b>的挂载名。监控扫它做刮削归档；发种也在此目录【原地】规整/做种。务必与下载器保存目录指向同一块盘</span>
@@ -2234,6 +2246,9 @@ async function openSettings() {
     document.getElementById('cfgScrapeMoveOnFail').checked = cfg.scrape_move_on_fail !== false;
     document.getElementById('cfgArchiveMode').value = ['hardlink','copy','move'].includes(cfg.archive_mode) ? cfg.archive_mode : 'hardlink';
     document.getElementById('cfgArchiveByMonth').checked = cfg.archive_by_month !== false;
+    // 刮削/归档总开关（兼容旧 publish_* 键）
+    document.getElementById('cfgScrapeMetaEnabled').checked = (cfg.scrape_meta_enabled ?? cfg.publish_scrape_enabled) !== false;
+    document.getElementById('cfgArchiveEnabled').checked = (cfg.archive_enabled ?? cfg.publish_archive_enabled) !== false;
     currentProvider = cfg.default_translate_provider || 'baidu';
     // 检测 Jackett 状态
     if (cfg.jackett_url && cfg.jackett_api_key) await checkJackettStatus();
@@ -2530,6 +2545,8 @@ async function saveSettings() {
     // V1.5 统一归档（监控 & 发种共用）
     archive_mode: document.getElementById('cfgArchiveMode').value,
     archive_by_month: document.getElementById('cfgArchiveByMonth').checked,
+    scrape_meta_enabled: document.getElementById('cfgScrapeMetaEnabled').checked,
+    archive_enabled: document.getElementById('cfgArchiveEnabled').checked,
   };
   currentProvider = payload.default_translate_provider;
   prefetchJavdbExtras = payload.javdb_prefetch_extras === true;
