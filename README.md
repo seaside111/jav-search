@@ -50,7 +50,7 @@ docker-compose logs -f
 docker run -d \
   --name jav-search \
   --restart unless-stopped \
-  -p 8085:8085 \
+  --network host                                 `# 与宿主机共用网络栈：同机的 qB/Jackett/FlareSolverr 直接用 http://127.0.0.1:端口 连（不要再加 -p）` \
   -v jav-config:/config                          `# 配置持久化（命名卷，删容器不丢配置）` \
   -v /volume1/downloads/jav:/data/downloads      `# 刮削目录：＝下载器保存目录/刮削监控源，发种就地规整与做种（冒号左侧改成你的真实路径）` \
   -v /volume1/media/jav:/data/media              `# 归档目录：刮削后归档给 EMBY 等媒体库（按 YYYYMM/番号/ 建子目录）` \
@@ -61,11 +61,12 @@ docker run -d \
   -e AUTH_PASSWORD=改成你的强密码                  `# 登录密码，务必修改` \
   -e AUTH_SECRET=一串很长的随机字符串              `# 会话签名密钥，填长随机串` \
   -e AUTH_SESSION_TTL=604800 \
-  --add-host host.docker.internal:host-gateway \
   ghcr.io/seaside111/jav-search:beta
 ```
 
 > 上面 `` `# ...` `` 是行内批注，会被 shell 当空忽略，可整段直接复制运行。挂载冒号**左侧**是宿主机真实路径（按需改），**右侧**是容器内路径——现已统一到 `/data` 下（`/data/downloads` 刮削、`/data/media` 归档），需与「设置 → 刮削 / 发种」里填的容器路径一致。不需要刮削/发种功能就删掉中间两行 `-v`。Windows PowerShell 请去掉行尾 `\` 与批注、写成一行。
+>
+> **关于 `--network host`**：容器与宿主机共用网络，所以**不用也不能再加 `-p`**，容器直接监听宿主机的 `8085`（端口被占就改 `PORT` 与访问端口）。同机的 qB / Jackett / FlareSolverr 一律填 `http://127.0.0.1:对应端口`——容器里的 `localhost` 指容器自身、填本机公网IP 又常因 NAT 回环（hairpin）不通，所以同机互连用 host 网络 + `127.0.0.1` 最稳。若你的下载器/代理在**另一台机器或别的网段**，按需改回 bridge 模式（去掉 `--network host`、加回 `-p 8085:8085`，并视情况加 `--add-host host.docker.internal:host-gateway`）。
 
 **升级 / 重建**（配置在命名卷里，不会丢）：
 
