@@ -164,13 +164,30 @@ def _set(t: dict, state: str = None, error: str = None, note: str = None, **kw):
     _save_tasks()
 
 
+def _needs_file_protection(t: dict) -> bool:
+    """该任务的原地做种文件是否仍需监控保护（不可被移动/归档）。
+    - 未终止状态（排队→做种全程）：一律保护。
+    - 终态特例「已停止 STOPPED 且做种种子未从下载器删除」：分享率/时长达标只是停止
+      『占用流水线槽位』，但 publish_delete_after_stop=False（默认）时官方种子仍留在
+      下载器里【继续做种同一批文件】——此时监控若把文件归档搬走，qB 就会卡在 99.9%/
+      『等待』、PT 上掉种。故只要做种种子还在，就必须继续保护。
+    - 其余终态（站点已有/被抢发/已取消、或已删做种种子的已停止）：文件不再被做种，
+      可由监控正常归档。"""
+    st = t.get("state")
+    if st not in _TERMINAL:
+        return True
+    if st == STOPPED and not t.get("seed_torrent_removed"):
+        return True
+    return False
+
+
 def active_codes() -> set:
-    """供刮削监控排除：正处于发种流程（未终止）的番号集合（归一化：仅字母数字小写）。
+    """供刮削监控排除：文件仍需保护的发种任务番号集合（归一化：仅字母数字小写）。
     这些番号的文件正被发种流水线管理/原地做种，监控绝不能移动或删除它们。
-    终态(已停止/已终止/已取消)的不在内——其文件已可由监控正常归档。"""
+    收录规则见 _needs_file_protection（含「已停止但种子仍在做种」的特例）。"""
     out = set()
     for t in _TASKS.values():
-        if t.get("state") in _TERMINAL:
+        if not _needs_file_protection(t):
             continue
         c = re.sub(r"[^a-z0-9]", "", (t.get("code") or "").lower())
         if c:
@@ -223,7 +240,7 @@ def active_paths(config: dict) -> set:
         return out
     root = Path(our_root)
     for t in _TASKS.values():
-        if t.get("state") in _TERMINAL:
+        if not _needs_file_protection(t):
             continue
         code = t.get("code") or ""
         if code:
@@ -948,7 +965,7 @@ async def _step_seed_check(t: dict, config: dict):
     tor = await _find_torrent(config, t.get("infohash_new") or "")
     ratio = tor.get("ratio", 0) if tor else 0
     seeding_time = tor.get("seeding_time", 0) if tor else 0
-    stop_ratio = float(config.get("publish_stop_ratio", 1.0) or 0)
+    stop_ratio = float(config.get("publish_stop_ratio", 0) or 0)
     stop_hours = float(config.get("publish_stop_hours", 72) or 0)
     hit = False
     if stop_ratio > 0 and ratio >= stop_ratio:
@@ -963,9 +980,14 @@ async def _step_seed_check(t: dict, config: dict):
         hashes = [h for h in [tor["hash"] if tor else ""] if h]
         if hashes:
             await downloader.delete_torrents(config, hashes, delete_files=del_files)
-        _set(t, state=STOPPED, note=f"达停止条件(分享率{ratio:.2f})，已删除做种{'+文件' if del_files else ''}")
+        # 做种种子已从下载器删除 → 文件不再被做种，置位让监控可正常归档
+        _set(t, state=STOPPED, seed_torrent_removed=True,
+             note=f"达停止条件(分享率{ratio:.2f})，已删除做种{'+文件' if del_files else ''}")
     else:
-        _set(t, state=STOPPED, note=f"达停止条件(分享率{ratio:.2f})，停止做种")
+        # 仅停止『占用槽位』，官方种子仍留在下载器继续做种同一批文件 →
+        # 不置 seed_torrent_removed，监控继续保护这些文件（见 _needs_file_protection）
+        _set(t, state=STOPPED,
+             note=f"达停止条件(分享率{ratio:.2f})，停止占用槽位（种子仍在下载器做种，文件继续保护）")
 
 
 # ── 后台 worker ──

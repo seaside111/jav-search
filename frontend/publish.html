@@ -415,7 +415,7 @@ async function loadConfig(){
     $('cfgImgbbKey').value = c.image_imgbb_key || '';
     $('cfgImgchestToken').value = c.image_imgchest_token || '';
     $('cfgFreeimageKey').value = c.image_freeimage_key || '';
-    $('cfgPubStopRatio').value = c.publish_stop_ratio ?? 1.0;
+    $('cfgPubStopRatio').value = c.publish_stop_ratio ?? 0;
     $('cfgPubStopHours').value = c.publish_stop_hours ?? 72;
     $('cfgPubUpLimit').value = c.publish_upload_limit_kbps ?? 0;
     $('cfgPubPoll').value = c.publish_poll_interval ?? 30;

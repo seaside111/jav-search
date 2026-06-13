@@ -101,7 +101,7 @@ DEFAULT_CONFIG = {
     "publish_archive_dir": "",           # 归档目录（容器视角，给 EMBY 扫）：留空则回退 scrape_output_dir
     "publish_archive_dir_host": "",      # 【已弃用】seed-in-place 后做种不再经归档目录，此项不再使用
     "publish_max_active": 3,             # 同时活跃任务数（含做种）；超限排队
-    "publish_stop_ratio": 1.0,           # 做种停止：分享率达此值（0=不按分享率停）
+    "publish_stop_ratio": 0,             # 做种停止：分享率达此值（0=不按分享率停，默认不自动停做种）
     "publish_stop_hours": 72,            # 做种停止：做种时长达此小时（0=不按时长停）
     "publish_delete_after_stop": False,  # 停止后是否删除做种任务
     "publish_delete_files": False,       # 删除做种时是否连同文件（危险，默认否）
