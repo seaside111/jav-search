@@ -9,6 +9,9 @@ qB 会校验 Referer/Origin，需与 WebUI 地址同源，否则返回 403。
 """
 from typing import Optional
 from urllib.parse import quote
+import asyncio
+import base64
+import re
 import httpx
 
 
@@ -43,6 +46,35 @@ def _augment_magnet(magnet: str) -> str:
             continue
         parts.append("&tr=" + enc)
     return magnet + "".join(parts)
+
+
+def _infohash_from_magnet(url: str) -> str:
+    """从磁力链解析 infohash（40位十六进制原样小写；32位 base32 转十六进制）。非磁力返回空。"""
+    m = re.search(r"xt=urn:btih:([0-9a-fA-F]{40}|[A-Za-z2-7]{32})", url or "")
+    if not m:
+        return ""
+    val = m.group(1)
+    if len(val) == 40:
+        return val.lower()
+    try:
+        return base64.b32decode(val.upper()).hex()
+    except Exception:
+        return ""
+
+
+async def _set_upload_limit(client, qb_url: str, infohash: str, kbps: int) -> bool:
+    """对指定种子设单种上传限速（qB 用字节/秒）。返回是否成功。"""
+    if not infohash or kbps <= 0:
+        return False
+    try:
+        resp = await client.post(
+            f"{_base(qb_url)}/api/v2/torrents/setUploadLimit",
+            data={"hashes": infohash.lower(), "limit": str(int(kbps) * 1024)},
+            headers=_headers(qb_url),
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 
 def _base(qb_url: str) -> str:
@@ -244,14 +276,23 @@ async def add_torrent(
             return {"success": False, "error": f"推送请求失败: {e}"}
 
         text = (resp.text or "").strip()
-        if resp.status_code == 200 and text.lower() == "ok.":
-            return {"success": True, "message": "已推送到 qBittorrent"}
-        if resp.status_code == 200:
-            # 某些版本成功也返回空体
-            return {"success": True, "message": "已推送到 qBittorrent"}
         if resp.status_code == 415:
             return {"success": False, "error": "qB 拒绝该种子（链接无效或不是种子）"}
-        return {"success": False, "error": f"推送失败 HTTP {resp.status_code} {text[:80]}"}
+        if resp.status_code != 200:
+            return {"success": False, "error": f"推送失败 HTTP {resp.status_code} {text[:80]}"}
+        # 200（"Ok." 或个别版本空体）即视为成功。
+
+        # 单种上传限速：磁力链在 add 时 upLimit 常被 qB 忽略（add 时尚无元数据，
+        # 限速没落到种子句柄上）。add 成功后再用磁力 infohash 显式 setUploadLimit 一次，
+        # 确保新推送的磁力种子立即生效（.torrent 字节走 add 的 upLimit 已生效，无需此步）。
+        if upload_limit_kbps and upload_limit_kbps > 0:
+            ih = _infohash_from_magnet(download_url) if download_url else ""
+            if ih:
+                for _ in range(3):
+                    if await _set_upload_limit(client, qb_url, ih, upload_limit_kbps):
+                        break
+                    await asyncio.sleep(0.5)
+        return {"success": True, "message": "已推送到 qBittorrent"}
 
 
 async def delete_torrents(qb_url: str, username: str, password: str,

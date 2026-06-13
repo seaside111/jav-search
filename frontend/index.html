@@ -1708,9 +1708,17 @@ async function publishResource(downloadUrl, btnId, idx) {
   if (!code) { showToast('该影片缺少番号，无法发种'); return; }
   if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
   try {
+    // 直接带上「当前点击条目」自身的元数据（封面/来源/该条目详情页URL），
+    // 后端据此精确取封面/标题，不再按番号或标题二次搜索——避免错乱（尤其 FC2）。
     const resp = await fetch(`${API}/api/publish/enqueue`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code, download_url: downloadUrl, title: (m ? m.title : '') }),
+      body: JSON.stringify({
+        code, download_url: downloadUrl,
+        title: (m ? (m.title || '') : ''),
+        cover: m ? (m.cover || m.cover_thumb || '') : '',
+        source: m ? (m.source || '') : '',
+        detail_url: m ? (m.url || '') : '',
+      }),
     });
     if (resp.status === 404) { showToast('发种流水线尚未实现'); if (btn){btn.disabled=false;btn.textContent='发种';} return; }
     const data = await safeJson(resp);

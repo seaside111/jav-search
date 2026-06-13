@@ -126,7 +126,8 @@ def _load_tasks():
         _log(f"任务加载失败: {e}")
 
 
-def _new_task(code: str, download_url: str, title: str) -> dict:
+def _new_task(code: str, download_url: str, title: str,
+              item_meta: dict = None) -> dict:
     tid = uuid.uuid4().hex[:12]
     t = {
         "id": tid, "code": code, "download_url": download_url,
@@ -134,6 +135,8 @@ def _new_task(code: str, download_url: str, title: str) -> dict:
         "infohash": "", "content_path": "", "torrent_path": "",
         "mteam_id": "", "confirmed": False, "created": time.time(), "updated": time.time(),
         "log": [],
+        # 点击条目自带的元数据（封面/来源/该条目详情页URL），供 _scrape_meta 直接采用
+        "item_meta": item_meta or {},
     }
     _TASKS[tid] = t
     _save_tasks()
@@ -540,6 +543,35 @@ async def _scrape_meta(t: dict, config: dict) -> dict:
     if t.get("meta_scraped"):
         return t.get("movie_meta") or {}
     proxy = config.get("proxy") or None
+
+    # ── 优先：直接采用「当前点击条目」自带的元数据 ──
+    # 列表/详情上看到的封面、标题、来源、该条目详情页URL都已是用户实际选中的那一条，
+    # 直接拿来用，绝不再按番号/标题二次搜索——避免错乱（尤其 FC2 番号在 javbus/javdb 查不到，
+    # 二次搜索会命中无关条目或落空）。演员等需开详情页的字段，留到 _step_process 用
+    # 本条目自己的 detail_url（item 自身的 url）enrich 一次补全，仍是同一条目、不会串。
+    seed = t.get("item_meta") or {}
+    if seed.get("cover") or seed.get("detail_url"):
+        raw_title = seed.get("title", "") or t.get("title", "")
+        title_jp = _strip_code_prefix(raw_title, t["code"]) if raw_title else ""
+        movie = {
+            "code": t["code"],
+            "title": raw_title,
+            "cover": seed.get("cover", ""),
+            "source": seed.get("source", ""),
+            "url": seed.get("detail_url", ""),
+            "actors": [],
+        }
+        scrape_result = {
+            "found": True, "title": title_jp,
+            "cover": movie["cover"], "actors": [],
+            "source": movie["source"],
+        }
+        _set(t, title_jp=title_jp, scrape_result=scrape_result,
+             movie_meta=movie, meta_scraped=True,
+             note=f"采用点击条目元数据[{movie['source'] or '?'}]：{title_jp[:40] or '(无标题,处理时按详情页补)'}")
+        return movie
+
+    # ── 兜底：无条目元数据（旧任务/直接调 API）才按番号搜 javbus/javdb ──
     try:
         results = await scraper_search(query=t["code"], mode=SEARCH_MODE_CODE,
                                        proxy=proxy, sources=["javbus", "javdb"])
@@ -1009,6 +1041,11 @@ class EnqueueRequest(BaseModel):
     code: str
     download_url: str
     title: Optional[str] = ""
+    # 「当前点击条目」自带的列表级元数据：后端据此直接取封面/标题/详情页，
+    # 不再按番号或标题二次搜索，避免错乱（尤其 FC2 番号在 javbus/javdb 无对应）。
+    cover: Optional[str] = ""
+    source: Optional[str] = ""
+    detail_url: Optional[str] = ""
 
 
 @router.post("/enqueue")
@@ -1017,7 +1054,14 @@ async def api_enqueue(req: EnqueueRequest):
         raise HTTPException(status_code=400, detail="缺少番号")
     if not req.download_url or not req.download_url.strip():
         raise HTTPException(status_code=400, detail="缺少下载链接")
-    t = _new_task(req.code.strip(), req.download_url.strip(), (req.title or "").strip())
+    item_meta = {
+        "title": (req.title or "").strip(),
+        "cover": (req.cover or "").strip(),
+        "source": (req.source or "").strip(),
+        "detail_url": (req.detail_url or "").strip(),
+    }
+    t = _new_task(req.code.strip(), req.download_url.strip(),
+                  (req.title or "").strip(), item_meta=item_meta)
     _log(f"入队：{t['code']} ({t['id']})")
     # 入队即后台预抓元数据（日文原名/演员/封面），详情页可尽早展示，不阻塞入队响应
     try:
