@@ -95,8 +95,12 @@ async def _login(client: httpx.AsyncClient, qb_url: str,
         return False, "登录失败：IP 可能被 qB 临时封禁（多次密码错误），或未放行"
     if text.lower() == "fails.":
         return False, "登录失败：用户名或密码错误"
-    # 部分配置开启了「对本地主机跳过身份验证」，登录接口可能直接放行
-    if resp.status_code == 200:
+    # 登录成功的几种返回：
+    #  - 老版本：200 + 响应体 "Ok."
+    #  - 新版本 / 开启「对本地主机跳过身份验证」：204 无内容，仅下发 QBT_SID Cookie
+    #  - 部分配置：200 空体
+    # httpx 会自动把 Set-Cookie 存进 client.cookies，后续请求自动带上，故此处直接放行。
+    if resp.status_code in (200, 204):
         return True, "ok"
     return False, f"登录失败：HTTP {resp.status_code} {text[:80]}"
 
