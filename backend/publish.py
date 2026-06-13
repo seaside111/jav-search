@@ -196,8 +196,11 @@ def active_codes() -> set:
 
 
 def _work_root(config: dict) -> str:
-    """刮削目录(本项目容器视角)，统一去尾斜杠/反斜杠。"""
-    return (config.get("publish_work_dir") or "").replace("\\", "/").rstrip("/")
+    """全局下载/工作目录(本项目容器视角)，统一去尾斜杠/反斜杠。
+    V1.5 统一：与刮削监控共用全局 scrape_watch_dir（发种在此原地规整/做种、监控扫同一处）；
+    兼容旧配置回退 publish_work_dir。"""
+    d = config.get("scrape_watch_dir") or config.get("publish_work_dir") or ""
+    return d.replace("\\", "/").rstrip("/")
 
 
 def _content_path_in_workdir(t: dict, config: dict) -> Optional[Path]:
@@ -293,13 +296,17 @@ def _archive_for_emby(pub_folder: Path, code: str, config: dict) -> dict:
     """
     if not config.get("publish_archive_enabled", True):
         return {"info": "未启用归档（可让 EMBY 直接扫描下载目录）", "error": ""}
-    arch_root = (config.get("publish_archive_dir") or config.get("scrape_output_dir") or "").strip()
+    # V1.5 统一：归档目录/模式/按年月全取全局键（与刮削监控共用），兼容旧 publish_* 回退。
+    arch_root = (config.get("scrape_output_dir") or config.get("publish_archive_dir") or "").strip()
     if not arch_root:
         return {"info": "未配置归档目录，跳过归档", "error": ""}
-    force_copy = (config.get("publish_archive_mode") or "hardlink").lower() == "copy"
+    # 发种文件须原地做种 → 归档恒为硬链接/复制；全局选了 move 也降级为 hardlink（绝不移走做种数据）
+    mode = (config.get("archive_mode") or config.get("publish_archive_mode") or "hardlink").lower()
+    force_copy = mode == "copy"
+    by_month = config.get("archive_by_month", config.get("publish_archive_by_month", True))
     try:
         dest = Path(arch_root)
-        if config.get("publish_archive_by_month", True):
+        if by_month:
             dest = dest / datetime.now().strftime("%Y%m")
         dest = dest / _safe_name(code)
         dest.mkdir(parents=True, exist_ok=True)
@@ -628,7 +635,7 @@ async def _step_process(t: dict, config: dict):
     #    定位逻辑抽到 _content_path_in_workdir，与监控占用保护(active_paths)共用同一来源。
     our_root = _work_root(config)
     if not our_root:
-        _set(t, state=FAILED, error="未配置刮削目录(发种设置 → 刮削 & 归档 → 刮削目录)")
+        _set(t, state=FAILED, error="未配置下载/工作目录(全局设置 → 刮削 & 归档 → 下载/工作目录)")
         return
     dl_save = (t.get("dl_save_path") or "").replace("\\", "/").rstrip("/")   # 下载器自报 save_path（后续做种 save_path 用）
     # 定位下载内容（content_path 映射 + 番号兜底，单一来源 _locate_download，与下载轮询闸门一致）
@@ -688,7 +695,7 @@ async def _step_process(t: dict, config: dict):
     # 3) 规整：在【下载目录原地】建「番号文件夹」，视频移入其中（制种/做种都以该文件夹为单位）
     #    刮削开=视频改名番号.ext + 写 NFO/封面入文件夹；刮削关=保留原文件名、不写 NFO/封面
     #    .meta（截图/种子产物，不进种子）放工作目录根下，作番号文件夹的兄弟，不污染番号文件夹
-    meta_root = Path(config.get("publish_work_dir") or "") or seed_dir_c
+    meta_root = Path(_work_root(config) or "") or seed_dir_c
     meta_dir = meta_root / ".meta" / t["code"]
     shots_dir = meta_dir / "shots"
     meta_dir.mkdir(parents=True, exist_ok=True)

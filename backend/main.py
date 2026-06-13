@@ -297,6 +297,9 @@ class ConfigUpdateRequest(BaseModel):
     scrape_translate_enabled: Optional[bool] = None
     scrape_translate_provider: Optional[str] = None
     scrape_move_on_fail: Optional[bool] = None
+    # V1.5 统一归档（监控 & 发种共用）
+    archive_mode: Optional[str] = None        # hardlink | copy | move
+    archive_by_month: Optional[bool] = None
 
 
 # ──────────────────────────────────────────────

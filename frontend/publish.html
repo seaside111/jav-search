@@ -228,30 +228,15 @@
         <span class="hint">开：文件名只留<b>番号</b>，标题/演员/简介写入 NFO，抓封面；关：保留原文件名、不写 NFO/封面</span>
       </div>
       <div class="row">
-        <label class="lbl">刮削目录(本项目容器视角)</label>
-        <input type="text" id="cfgPubWorkDir" placeholder="/data/media/qb/jpav">
-        <span class="hint"><b>本容器 /data 下、实际指向下载器保存数据的同一物理目录</b>的挂载名（通常 = 刮削监控目录）。读取/刮削/规整/归档全基于此目录，做种在此【原地】完成</span>
+        <label class="chk"><input type="checkbox" id="cfgPubArchiveEnabled"> 启用归档（额外造一份给 EMBY）</label>
+        <span class="hint">发种做种始终留在下载目录【原地】；开启则<b>额外</b>硬链接/复制一份到归档目录给 EMBY，二者解耦。关闭则可让 EMBY 直接扫下载目录</span>
       </div>
       <div class="row">
-        <label class="chk"><input type="checkbox" id="cfgPubArchiveEnabled"> 启用归档（供 EMBY 等媒体库）</label>
-        <span class="hint">额外造一份到归档目录给 EMBY；做种始终留在下载目录原地，二者解耦。关闭则可让 EMBY 直接扫下载目录</span>
-      </div>
-      <div class="row">
-        <label class="lbl">归档方式</label>
-        <select id="cfgPubArchiveMode">
-          <option value="hardlink">硬链接（不占额外空间；跨卷自动改为复制）</option>
-          <option value="copy">复制（始终复制一份，占双倍空间）</option>
-        </select>
-        <span class="hint">硬链接需归档目录与下载目录在<b>同一卷</b>；跨卷无法硬链接会自动退化为复制</span>
-      </div>
-      <div class="row">
-        <label class="chk"><input type="checkbox" id="cfgPubArchiveByMonth"> 按年月建子目录（归档目录/YYYYMM/番号/）</label>
-        <span class="hint">与刮削监控的归档结构一致；关闭则直接 归档目录/番号/</span>
-      </div>
-      <div class="row">
-        <label class="lbl">归档目录(容器视角)</label>
-        <input type="text" id="cfgPubArchiveDir" placeholder="/data/ 下的子目录">
-        <span class="hint">本项目里的挂载名，给 EMBY 扫。需与刮削目录在同一卷才能硬链接（留空则用刮削归档目录）</span>
+        <span class="hint" style="display:block;padding:10px 12px;border:1px dashed var(--border,#888);border-radius:6px;line-height:1.7">
+          📌 <b>下载/工作目录、归档目录、归档方式、按年月</b>已统一到
+          <b>全局设置 → 刮削 &amp; 归档</b>，发种与刮削监控<b>共用同一处</b>，此页不再单独设置（避免两套配置、两头执行）。<br>
+          发种文件因需<b>原地做种</b>，归档恒为<b>硬链接/复制</b>——即使全局选了「移动」也会自动降级，绝不移走做种数据。
+        </span>
       </div>
     </div>
 
@@ -401,12 +386,9 @@ async function loadConfig(){
     $('cfgMteamUid').value = c.mteam_uid || '';
     $('cfgMteamSource').value = c.mteam_source_flag || 'M-Team';
     $('cfgCrossseedCategory').value = c.crossseed_category || 'mteam';
-    $('cfgPubWorkDir').value = c.publish_work_dir || '/data/';   // 默认预填 compose 挂载根，子目录由用户补全
-    $('cfgPubArchiveDir').value = c.publish_archive_dir || '/data/';   // 默认预填挂载根，子目录由用户补全
+    // 目录/归档方式/按年月已统一到全局设置页，此页不再读写（cfgPubScrapeEnabled/cfgPubArchiveEnabled 仍为发种专属）
     $('cfgPubScrapeEnabled').checked = c.publish_scrape_enabled !== false;
     $('cfgPubArchiveEnabled').checked = c.publish_archive_enabled !== false;
-    $('cfgPubArchiveMode').value = (c.publish_archive_mode === 'copy') ? 'copy' : 'hardlink';
-    $('cfgPubArchiveByMonth').checked = c.publish_archive_by_month !== false;
     $('cfgPubCategory').value = c.publish_category || '';
     $('cfgPubCountries').value = c.publish_countries || '';
     $('cfgPubMaxActive').value = c.publish_max_active ?? 3;
@@ -434,12 +416,9 @@ async function saveSettings(){
     mteam_uid: $('cfgMteamUid').value.trim(),
     mteam_source_flag: $('cfgMteamSource').value.trim(),
     crossseed_category: $('cfgCrossseedCategory').value.trim(),
-    publish_work_dir: $('cfgPubWorkDir').value.trim(),
-    publish_archive_dir: $('cfgPubArchiveDir').value.trim(),
+    // 目录/归档方式/按年月已迁到全局设置页，此页不再提交；仅保留发种专属开关
     publish_scrape_enabled: $('cfgPubScrapeEnabled').checked,
     publish_archive_enabled: $('cfgPubArchiveEnabled').checked,
-    publish_archive_mode: $('cfgPubArchiveMode').value,
-    publish_archive_by_month: $('cfgPubArchiveByMonth').checked,
     publish_category: $('cfgPubCategory').value.trim(),
     publish_countries: $('cfgPubCountries').value.trim(),
     publish_max_active: Math.max(1, parseInt($('cfgPubMaxActive').value)||3),

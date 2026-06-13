@@ -88,17 +88,18 @@ DEFAULT_CONFIG = {
     # 刮削目录＝本项目容器(/data)里、实际指向下载器保存数据同一物理目录的挂载名：
     #   规整在此目录原地完成、做种也留原地。下载器的下载目录沿用全局下载器设置(qb_save_path 等)，
     #   首次下磁力与最后重新做种由下载器按它自己的保存目录处理，发种这里不再单独设。
-    "publish_work_dir": "",              # 刮削目录（本项目容器视角）：读写/规整/归档文件用
-    "publish_work_dir_host": "",         # 【已弃用·可留空】做种 save_path 兜底；现优先取种子自报 save_path，
-                                         #   再兜底全局下载器默认保存目录，故一般无需填
-    # 刮削开关（发种流水线）：开=文件名只留番号 + 标题/演员/简介写 NFO + 抓封面；关=保留原文件名、不写NFO/封面
+    # 【1.5 统一·已迁移到全局「刮削 & 归档」】下载/工作目录、归档目录、归档模式、按年月
+    #   现统一取全局 scrape_watch_dir / scrape_output_dir / archive_mode / archive_by_month，
+    #   下列 publish_* 目录键仅作旧配置兼容兜底（启动时自动迁移到全局键），UI 不再单独编辑。
+    "publish_work_dir": "",              # 【已统一→scrape_watch_dir】旧配置兼容兜底
+    "publish_work_dir_host": "",         # 【已弃用·可留空】做种 save_path 兜底；现优先取种子自报 save_path
+    # 刮削开关（发种流水线·发种专属）：开=文件名只留番号 + 标题/演员/简介写 NFO + 抓封面；关=保留原文件名
     "publish_scrape_enabled": True,
-    # 归档开关 + 模式：开=额外造一份到归档目录给 EMBY（与做种解耦，做种始终留下载目录）
-    #   hardlink=同卷硬链接(不占空间)、跨卷自动退化为复制；copy=始终复制
+    # 发种是否额外造一份到归档目录给 EMBY（与做种解耦，做种始终留下载目录原地）。发种专属开关
     "publish_archive_enabled": True,
-    "publish_archive_mode": "hardlink",  # hardlink | copy
-    "publish_archive_by_month": True,    # 归档是否按年月建子目录（归档目录/YYYYMM/番号/）
-    "publish_archive_dir": "",           # 归档目录（容器视角，给 EMBY 扫）：留空则回退 scrape_output_dir
+    "publish_archive_mode": "hardlink",  # 【已统一→archive_mode】旧配置兼容兜底
+    "publish_archive_by_month": True,    # 【已统一→archive_by_month】旧配置兼容兜底
+    "publish_archive_dir": "",           # 【已统一→scrape_output_dir】旧配置兼容兜底
     "publish_archive_dir_host": "",      # 【已弃用】seed-in-place 后做种不再经归档目录，此项不再使用
     "publish_max_active": 3,             # 同时活跃任务数（含做种）；超限排队
     "publish_stop_ratio": 0,             # 做种停止：分享率达此值（0=不按分享率停，默认不自动停做种）
@@ -131,7 +132,14 @@ DEFAULT_CONFIG = {
     "scrape_min_size_mb": 100,           # 小于此大小（MB）的视频忽略（样板/预告）
     "scrape_translate_enabled": True,    # 刮削时是否翻译标题/简介；关闭则直接用日文原标题写入 NFO
     "scrape_translate_provider": "",     # 刮削翻译服务，留空用默认翻译服务
-    "scrape_move_on_fail": True,         # 刮削失败也照常移动归档
+    "scrape_move_on_fail": True,         # 刮削失败也照常归档
+    # V1.5：刮削归档统一（监控 & 发种共用同一目录与归档行为；见上方 publish_* 已迁移说明）
+    #   scrape_watch_dir  = 全局下载/工作目录（监控扫它、发种也在此原地规整/做种）
+    #   scrape_output_dir = 全局归档目录（监控与发种都归档到此，供 EMBY 扫）
+    "archive_mode": "hardlink",          # hardlink | copy | move —— 监控孤儿下载的归档方式：
+                                         #   hardlink/copy 保留原文件；move 移动并清理原下载目录。
+                                         #   发种文件因需原地做种，恒按 hardlink/copy（选 move 自动降级为 hardlink）
+    "archive_by_month": True,            # 归档是否按年月建子目录（归档目录/YYYYMM/番号/），监控 & 发种共用
 }
 
 # 列表抓取硬上限，防止配置过大拖垮服务
@@ -156,12 +164,31 @@ def _apply_env_fallbacks(config: dict) -> dict:
     return config
 
 
+def _migrate_unify_archive(config: dict, saved: dict) -> dict:
+    """V1.5 统一：把旧版发种独立的「刮削目录/归档目录/归档模式/按年月」迁移到全局键。
+    刮削监控与发种从此共用同一下载目录与归档行为，杜绝两套配置、两头执行。
+    幂等：全局键一旦有值就不再覆盖；只在全局键缺省、而旧 publish_* 有用户值时回填。
+    （只改运行时 config，不强制落盘；用户在统一后的设置页保存一次即固化。）"""
+    # 目录：全局留空且旧发种目录有值 → 回填
+    if not (config.get("scrape_watch_dir") or "").strip() and (saved.get("publish_work_dir") or "").strip():
+        config["scrape_watch_dir"] = saved["publish_work_dir"]
+    if not (config.get("scrape_output_dir") or "").strip() and (saved.get("publish_archive_dir") or "").strip():
+        config["scrape_output_dir"] = saved["publish_archive_dir"]
+    # 归档模式/按年月：用户从未设过全局键、但设过旧发种键 → 沿用旧值
+    if "archive_mode" not in saved and saved.get("publish_archive_mode"):
+        config["archive_mode"] = saved["publish_archive_mode"]
+    if "archive_by_month" not in saved and "publish_archive_by_month" in saved:
+        config["archive_by_month"] = saved["publish_archive_by_month"]
+    return config
+
+
 def load() -> dict:
     try:
         if CONFIG_PATH.exists():
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             config = {**DEFAULT_CONFIG, **saved}
+            config = _migrate_unify_archive(config, saved)
             return _apply_env_fallbacks(config)
     except Exception as e:
         print(f"[Config] load error: {e}")

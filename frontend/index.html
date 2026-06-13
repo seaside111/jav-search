@@ -928,7 +928,8 @@
       <!-- 刮削：媒体库 -->
       <div class="settings-pane" id="pane-scrape">
         <div class="setting-group">
-          <h3>媒体库刮削监控</h3>
+          <h3>刮削 &amp; 归档（全局·监控与发种共用）</h3>
+          <div class="setting-hint" style="margin:-4px 0 8px">此处的<b>下载/工作目录、归档目录、归档模式、按年月</b>为全局唯一来源，刮削监控与发种流水线都用它，避免两套配置、两头执行。发种中心不再单独设这些目录。</div>
           <div class="jackett-status-row">
             <div class="jackett-status-dot" id="scrapeDot"></div>
             <span class="jackett-status-text" id="scrapeStatusText">未启用</span>
@@ -938,17 +939,32 @@
             <label class="source-chk" style="font-size:13px">
               <input type="checkbox" id="cfgScrapeEnabled"> 启用后台自动刮削监控
             </label>
-            <span class="setting-hint">监控下载完成的文件 → 刮削元数据/封面/NFO → 移动归档</span>
+            <span class="setting-hint">监控下载完成的文件 → 刮削元数据/封面/NFO → 归档（发种任务占用的文件会自动跳过，绝不抢）</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label">监控目录</label>
-            <input class="setting-input" id="cfgScrapeWatch" type="text" placeholder="/downloads/jav">
-            <span class="setting-hint">下载器保存的目录（容器内路径）。下载完成的视频会被刮削</span>
+            <label class="setting-label">下载/工作目录（监控 &amp; 发种共用）</label>
+            <input class="setting-input" id="cfgScrapeWatch" type="text" placeholder="/data/media/qb/jpav">
+            <span class="setting-hint">本容器内、实际指向<b>下载器保存数据同一物理目录</b>的挂载名。监控扫它做刮削归档；发种也在此目录【原地】规整/做种。务必与下载器保存目录指向同一块盘</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label">归档目录</label>
-            <input class="setting-input" id="cfgScrapeOutput" type="text" placeholder="/media/jav">
-            <span class="setting-hint">刮削后移动到此目录，并按当前年月建子目录（如 202605）存放</span>
+            <label class="setting-label">归档目录（监控 &amp; 发种共用，供 EMBY 扫）</label>
+            <input class="setting-input" id="cfgScrapeOutput" type="text" placeholder="/data/media/emby">
+            <span class="setting-hint">刮削/发种后把番号文件夹放到此目录。硬链接需与下载目录<b>同一卷</b>（跨卷自动退化为复制）</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">归档方式</label>
+            <select class="setting-input" id="cfgArchiveMode">
+              <option value="hardlink">硬链接（保留原文件，同卷不占空间）</option>
+              <option value="copy">复制（保留原文件，占双倍空间）</option>
+              <option value="move">移动（原文件移走、清空下载目录）</option>
+            </select>
+            <span class="setting-hint">监控孤儿下载的归档方式。<b>发种文件因需原地做种，恒为硬链接/复制</b>（选「移动」也自动降级为硬链接，绝不移走做种数据）</span>
+          </div>
+          <div class="setting-row">
+            <label class="source-chk" style="font-size:13px">
+              <input type="checkbox" id="cfgArchiveByMonth" checked> 按年月建子目录（归档目录/YYYYMM/番号/）
+            </label>
+            <span class="setting-hint">关闭则直接 归档目录/番号/。监控与发种共用此结构</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">轮询间隔（秒）</label>
@@ -973,9 +989,9 @@
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
-              <input type="checkbox" id="cfgScrapeMoveOnFail" checked> 刮削失败也照常移动归档
+              <input type="checkbox" id="cfgScrapeMoveOnFail" checked> 刮削失败也照常归档
             </label>
-            <span class="setting-hint">监控正常但无法刮到内容时，仍把视频移动到归档目录</span>
+            <span class="setting-hint">监控正常但无法刮到内容时，仍按上面的归档方式把视频归档</span>
           </div>
           <button class="jackett-test-btn" style="margin-left:0;align-self:flex-start" onclick="runScrapeOnce()">立即扫描一次</button>
           <div class="setting-hint" id="scrapeRunMsg"></div>
@@ -2216,6 +2232,8 @@ async function openSettings() {
     document.getElementById('cfgScrapeMinSize').value     = cfg.scrape_min_size_mb ?? 100;
     document.getElementById('cfgScrapeTranslate').checked = cfg.scrape_translate_enabled !== false;
     document.getElementById('cfgScrapeMoveOnFail').checked = cfg.scrape_move_on_fail !== false;
+    document.getElementById('cfgArchiveMode').value = ['hardlink','copy','move'].includes(cfg.archive_mode) ? cfg.archive_mode : 'hardlink';
+    document.getElementById('cfgArchiveByMonth').checked = cfg.archive_by_month !== false;
     currentProvider = cfg.default_translate_provider || 'baidu';
     // 检测 Jackett 状态
     if (cfg.jackett_url && cfg.jackett_api_key) await checkJackettStatus();
@@ -2509,6 +2527,9 @@ async function saveSettings() {
     scrape_min_size_mb: Math.max(0, parseInt(document.getElementById('cfgScrapeMinSize').value) || 0),
     scrape_translate_enabled: document.getElementById('cfgScrapeTranslate').checked,
     scrape_move_on_fail: document.getElementById('cfgScrapeMoveOnFail').checked,
+    // V1.5 统一归档（监控 & 发种共用）
+    archive_mode: document.getElementById('cfgArchiveMode').value,
+    archive_by_month: document.getElementById('cfgArchiveByMonth').checked,
   };
   currentProvider = payload.default_translate_provider;
   prefetchJavdbExtras = payload.javdb_prefetch_extras === true;

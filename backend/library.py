@@ -13,6 +13,7 @@
   - 后台监控协程 start_monitor()/stop_monitor()，由主程序在启动事件中拉起
 """
 import asyncio
+import os
 import re
 import shutil
 import sys
@@ -587,14 +588,44 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
 
 
 # ─────────────────────────────────────────
-# 归档移动：视频(重命名为番号) + NFO/封面 → output_dir/YYYYMM/番号/
+# 归档：视频(重命名为番号) + NFO/封面 → output_dir/YYYYMM/番号/
+#   V1.5 统一：归档方式由全局 archive_mode 决定（hardlink/copy 保留原文件；move 移动后清原目录），
+#   与发种流水线共用同一归档目录与按年月结构。
 # ─────────────────────────────────────────
 
-def _archive_file(video_path: Path, output_dir: str, code: str) -> dict:
+def _transfer(src: Path, dst: Path, mode: str) -> bool:
+    """按归档模式把 src 落到 dst：move=移动；hardlink=硬链接(跨卷自动退化为复制)；copy=复制。"""
+    try:
+        if dst.exists():
+            dst.unlink()
+    except Exception:
+        pass
+    try:
+        if mode == "move":
+            shutil.move(str(src), str(dst))
+        elif mode == "copy":
+            shutil.copy2(str(src), str(dst))
+        else:  # hardlink（默认）
+            try:
+                os.link(str(src), str(dst))
+            except OSError:
+                shutil.copy2(str(src), str(dst))   # 跨卷无法硬链 → 复制
+        return True
+    except Exception as e:
+        _log(f"归档落地失败 {src.name}（{mode}）: {e}")
+        return False
+
+
+def _archive_file(video_path: Path, output_dir: str, code: str,
+                  mode: str = "hardlink") -> dict:
     """
-    把视频重命名为「番号.后缀」，连同以番号命名的 NFO/封面，
-    移动到 归档目录/当前年月/番号/ 子目录下（Emby 单片单目录布局）。
+    把视频重命名为「番号.后缀」，连同以番号命名的 NFO/封面，归档到
+    归档目录/年月(可选)/番号/ 子目录下（Emby 单片单目录布局）。
+    mode：hardlink/copy 保留原下载文件（原文件留存供做种/辅种）；move 移动（原文件离开下载目录）。
+    by_month 由调用方通过 output_dir 之外的全局配置决定，这里仍统一按年月（与发种一致）。
+    返回 {archived, moved_original, target_dir, files}。
     """
+    mode = (mode or "hardlink").lower()
     safe_code = _safe_name(code) if code else video_path.stem
     out = Path(output_dir)
     target_dir = out / datetime.now().strftime("%Y%m") / safe_code
@@ -602,35 +633,32 @@ def _archive_file(video_path: Path, output_dir: str, code: str) -> dict:
         target_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         _log(f"无法创建归档目录 {target_dir}: {e}")
-        return {"moved": False, "error": f"无法创建归档目录: {e}"}
+        return {"archived": False, "moved_original": False, "error": f"无法创建归档目录: {e}"}
 
     folder = video_path.parent
-    moved = []
+    done = []
 
     # 1) 视频本体 → 番号.后缀
     video_dst = target_dir / f"{safe_code}{video_path.suffix.lower()}"
-    if video_dst.exists():
-        video_dst = target_dir / f"{safe_code}_{uuid.uuid4().hex[:6]}{video_path.suffix.lower()}"
-    try:
-        shutil.move(str(video_path), str(video_dst))
-        moved.append(video_dst.name)
-    except Exception as e:
-        _log(f"视频移动失败 {video_path.name}: {e}")
-        return {"moved": False, "error": f"视频移动失败: {e}", "target_dir": str(target_dir)}
+    if not _transfer(video_path, video_dst, mode):
+        return {"archived": False, "moved_original": False,
+                "error": "视频归档失败", "target_dir": str(target_dir)}
+    done.append(video_dst.name)
 
     # 2) 以番号命名的 NFO/封面（刮削时已按番号生成）
     for extra in (folder / f"{safe_code}.nfo",
                   folder / f"{safe_code}-poster.jpg",
                   folder / f"{safe_code}-fanart.jpg"):
         if extra.exists():
-            try:
-                shutil.move(str(extra), str(target_dir / extra.name))
-                moved.append(extra.name)
-            except Exception as e:
-                _log(f"附属文件移动失败 {extra.name}: {e}")
+            # NFO/封面体积小：move 模式随视频一起移走；hardlink/copy 模式一律复制一份（不动原件）
+            sub_mode = "move" if mode == "move" else "copy"
+            if _transfer(extra, target_dir / extra.name, sub_mode):
+                done.append(extra.name)
 
-    _log(f"归档移动：{len(moved)} 个文件 → {target_dir} （{', '.join(moved)}）")
-    return {"moved": bool(moved), "target_dir": str(target_dir), "files": moved}
+    how = {"move": "移动", "copy": "复制", "hardlink": "硬链接"}.get(mode, mode)
+    _log(f"归档（{how}）：{len(done)} 个文件 → {target_dir} （{', '.join(done)}）")
+    return {"archived": bool(done), "moved_original": (mode == "move"),
+            "target_dir": str(target_dir), "files": done}
 
 
 def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int):
@@ -731,25 +759,29 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
-    # 刮削成功，或失败但配置允许，则移动归档
+    # 刮削成功，或失败但配置允许，则归档
     if output_dir and (not failed or move_on_fail):
         if failed:
-            _log(f"刮削未成功但按配置仍移动归档：{video_path.name}")
+            _log(f"刮削未成功但按配置仍归档：{video_path.name}")
         watch_dir = Path(config.get("scrape_watch_dir", ""))
         min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
         code = scrape_res.get("code", "") or await _resolve_code(video_path, config)
         src_parent = video_path.parent
-        mv = _archive_file(video_path, output_dir, code)
-        record["moved"] = mv.get("moved", False)
+        # V1.5 统一：归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
+        mode = (config.get("archive_mode") or "hardlink").lower()
+        mv = _archive_file(video_path, output_dir, code, mode=mode)
+        record["moved"] = mv.get("archived", False)
+        record["archive_mode"] = mode
         record["target_dir"] = mv.get("target_dir", "")
-        if mv.get("moved"):
-            # 移动成功后清理原下载目录（含遗留广告/样板文件，连同子目录删除）
+        if mv.get("moved_original"):
+            # 仅 move 模式：原文件已移走，清理原下载目录（含遗留广告/样板文件，连同子目录删除）。
+            # hardlink/copy 模式保留原文件（可继续做种/辅种），绝不删原目录。
             _cleanup_source(src_parent, watch_dir, min_bytes)
     elif not output_dir:
-        _log(f"未配置归档目录，仅刮削未移动：{video_path.name}")
-        record["note"] = "未配置归档目录，仅刮削未移动"
+        _log(f"未配置归档目录，仅刮削未归档：{video_path.name}")
+        record["note"] = "未配置归档目录，仅刮削未归档"
     else:
-        _log(f"刮削失败且未开启「失败仍移动」，保留原处：{video_path.name}")
+        _log(f"刮削失败且未开启「失败仍归档」，保留原处：{video_path.name}")
 
     return record
 
