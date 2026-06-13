@@ -17,9 +17,9 @@ set -e
 IMAGE="ghcr.io/seaside111/jav-search:beta"   # beta 测试镜像（锁版本可改成 :V1.5.0-beta；求稳用 :latest）
 PORT=8085                                     # 网页端口（宿主机侧，冲突就改这里）
 
-# 媒体库刮削目录（冒号左侧改成你的真实路径）。不需要刮削可把这两行留默认或删掉对应 -v。
-DOWNLOADS_DIR="/volume1/downloads/jav"        # 下载器保存目录＝刮削监控源
-MEDIA_DIR="/volume1/media/jav"                # 刮削后归档目录（自动按 YYYYMM/番号 建子目录）
+# 媒体库目录（冒号左侧改成你的真实路径，容器侧统一在 /data 下）。不需要刮削/发种可删掉对应 -v。
+DOWNLOADS_DIR="/volume1/downloads/jav"        # 刮削目录：＝下载器保存目录/刮削监控源（发种就地规整与做种）
+MEDIA_DIR="/volume1/media/jav"                # 归档目录：刮削后归档给 EMBY 等（按 YYYYMM/番号 建子目录）
 
 # 登录认证（务必修改密码与密钥！）
 AUTH_USERNAME="admin"
@@ -33,8 +33,8 @@ docker rm -f jav-search 2>/dev/null || true
 docker run -d --name jav-search --restart unless-stopped \
   -p "${PORT}:8085" \
   -v jav-config:/config \
-  -v "${DOWNLOADS_DIR}:/downloads/jav" \
-  -v "${MEDIA_DIR}:/media/jav" \
+  -v "${DOWNLOADS_DIR}:/data/downloads" \
+  -v "${MEDIA_DIR}:/data/media" \
   -e CONFIG_DIR=/config -e PORT=8085 -e TZ=Asia/Shanghai \
   -e AUTH_USERNAME="${AUTH_USERNAME}" \
   -e AUTH_PASSWORD="${AUTH_PASSWORD}" \

@@ -52,8 +52,8 @@ docker run -d \
   --restart unless-stopped \
   -p 8085:8085 \
   -v jav-config:/config                          `# 配置持久化（命名卷，删容器不丢配置）` \
-  -v /volume1/downloads/jav:/downloads/jav       `# 下载器保存目录＝刮削监控源／发种工作目录（冒号左侧改成你的真实路径）` \
-  -v /volume1/media/jav:/media/jav               `# 刮削后归档目录（自动按 YYYYMM/番号/ 建子目录）` \
+  -v /volume1/downloads/jav:/data/downloads      `# 刮削目录：＝下载器保存目录/刮削监控源，发种就地规整与做种（冒号左侧改成你的真实路径）` \
+  -v /volume1/media/jav:/data/media              `# 归档目录：刮削后归档给 EMBY 等媒体库（按 YYYYMM/番号/ 建子目录）` \
   -e CONFIG_DIR=/config \
   -e PORT=8085 \
   -e TZ=Asia/Shanghai \
@@ -65,7 +65,7 @@ docker run -d \
   ghcr.io/seaside111/jav-search:beta
 ```
 
-> 上面 `` `# ...` `` 是行内批注，会被 shell 当空忽略，可整段直接复制运行。挂载冒号**左侧**是宿主机真实路径（按需改），**右侧**是容器内路径，需与「设置 → 刮削」里填的一致。不需要刮削功能就删掉中间两行 `-v`。Windows PowerShell 请去掉行尾 `\` 与批注、写成一行。
+> 上面 `` `# ...` `` 是行内批注，会被 shell 当空忽略，可整段直接复制运行。挂载冒号**左侧**是宿主机真实路径（按需改），**右侧**是容器内路径——现已统一到 `/data` 下（`/data/downloads` 刮削、`/data/media` 归档），需与「设置 → 刮削 / 发种」里填的容器路径一致。不需要刮削/发种功能就删掉中间两行 `-v`。Windows PowerShell 请去掉行尾 `\` 与批注、写成一行。
 
 **升级 / 重建**（配置在命名卷里，不会丢）：
 

@@ -18,12 +18,12 @@ services:
       #   mkdir -p /volume1/docker/jav-search/config
       # - /volume1/docker/jav-search/config:/config
       #
-      # ── V1.4 媒体库刮削目录映射 ──
-      # 让容器能访问 qBittorrent 的下载目录（监控）与媒体归档目录（移动目标）。
-      # 路径需与「设置 → 刮削」里填写的容器内路径一致（即冒号右侧）。
-      # 监控目录建议与 qBittorrent 的保存目录指向同一份宿主机数据：
-      # - /volume1/downloads/jav:/downloads/jav        # 下载器保存目录（监控源）
-      # - /volume1/media/jav:/media/jav                # 刮削后归档目录（按 YYYYMM 建子目录）
+      # ── 媒体库刮削/发种目录映射（容器侧统一在 /data 下）──
+      # 让容器能访问下载目录（刮削监控源/发种就地规整）与归档目录（给 EMBY 扫）。
+      # 路径需与「设置 → 刮削 / 发种」里填写的容器内路径一致（即冒号右侧）。
+      # 刮削目录建议与 qBittorrent 的保存目录指向同一份宿主机数据：
+      # - /volume1/downloads/jav:/data/downloads       # 刮削目录：＝下载器保存目录/监控源（发种就地做种）
+      # - /volume1/media/jav:/data/media               # 归档目录：刮削后归档（按 YYYYMM 建子目录）
     environment:
       - CONFIG_DIR=/config
       - PORT=8085
