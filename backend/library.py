@@ -560,34 +560,33 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
 
     name_zh = name_part            # 默认保留原文（非日文时不翻译）
     plot_zh = desc
-    segments, tags = [], []
-    if name_part and _has_jp(name_part):
-        segments.append(name_part); tags.append("name")
-    if desc and _has_jp(desc):
-        segments.append(desc); tags.append("desc")
 
-    # 刮削翻译总开关：关闭时直接保留日文原标题/简介，不调翻译服务
+    # 刮削翻译总开关：
+    #   关：标题/简介全部保留日文原文，不调翻译服务。
+    #   开：标题、简介【各自独立翻译】、各自整体替换原日文——绝不拼接后再切分。
+    #       （旧实现把标题+简介用 \n\n 拼一起翻译再按 \n\n 切回，简介含空行/翻译服务不保留
+    #        分隔符时会错位：简介译文窜到标题、日文简介还残留在简介——本次修复点。）
     translate_on = config.get("scrape_translate_enabled", True)
     if not translate_on:
         _log(f"刮削翻译已关闭，标题/简介保留日文原文：{code}")
-        segments = []
+    else:
+        async def _tr(text: str, what: str) -> str:
+            # 空或不含日文：原样返回（不强译、不混日文）；翻译失败也回退原文
+            if not text or not _has_jp(text):
+                return text
+            r = await translate(text=text, provider=provider, config=config)
+            if r.get("success") and (r.get("result") or "").strip():
+                return r["result"].strip()
+            _log(f"翻译失败（保留原文）：{code} {what} — {r.get('error', '')}")
+            return text
 
-    if segments:
-        _log(f"翻译（仅日文部分）：{code}（服务 {provider}，{len(segments)} 段）")
-        trans = await translate(text="\n\n".join(segments), provider=provider, config=config)
-        if trans.get("success"):
-            outs = trans["result"].split("\n\n")
-            for i, tg in enumerate(tags):
-                val = outs[i].strip() if i < len(outs) else ""
-                if tg == "name" and val:
-                    name_zh = val
-                elif tg == "desc" and val:
-                    plot_zh = val
+        if (name_part and _has_jp(name_part)) or (desc and _has_jp(desc)):
+            _log(f"翻译（标题/简介各自独立）：{code}（服务 {provider}）")
+            name_zh = await _tr(name_part, "标题")
+            plot_zh = await _tr(desc, "简介")
             _log(f"翻译完成：{code} → 片名《{name_zh[:40]}》")
         else:
-            _log(f"翻译失败（保留原文）：{code} — {trans.get('error','')}")
-    elif translate_on:
-        _log(f"无需翻译（无日文片名/简介）：{code}")
+            _log(f"无需翻译（无日文片名/简介）：{code}")
 
     # NFO <title> = 番号 + 中文片名（番号永不翻译）
     title_for_nfo = _compose_title(code, name_zh)
