@@ -293,6 +293,32 @@ def _is_extra_video(video_path: Path, watch_dir: str = "") -> bool:
     return False
 
 
+def _same_code_main_videos(video_path: Path, code: str, watch_dir: str = "") -> list:
+    """同一直接父目录下、与 code 同番号的全部「正片」视频（含自身、排除广告/赠片），
+    按文件名排序返回。用于多分段（CD1/CD2、A/B/C、1/2/3…）归档时确定各段顺序。
+    分段文件（纯编号/字母/CDx）经 _recognize_code 会从父目录认出同一番号，故能聚到一起。"""
+    norm = _norm(code)
+    mains = []
+    for s in _sibling_videos(video_path):
+        if _is_extra_video(s, watch_dir):
+            continue
+        if _norm(_recognize_code(s, watch_dir)) == norm:
+            mains.append(s)
+    mains.sort(key=lambda p: p.name.lower())
+    return mains
+
+
+def _part_suffix(video_path: Path, code: str, watch_dir: str = "") -> str:
+    """同番号在同目录有多个正片（分段）时，返回该视频的分段后缀「-cd{N}」
+    （Emby/Kodi 多文件堆叠为同一影片）；单文件返回 ""。
+    N 取该视频在「同番号正片按文件名排序」中的位次，与处理顺序无关、稳定不冲突。"""
+    mains = _same_code_main_videos(video_path, code, watch_dir)
+    if len(mains) <= 1:
+        return ""
+    idx = next((i for i, p in enumerate(mains) if p.name == video_path.name), 0)
+    return f"-cd{idx + 1}"
+
+
 async def _resolve_code(video_path: Path, config: dict) -> str:
     """
     番号识别：直接分析「文件名 + 各级父目录名」（不做提前标记，不依赖下载器 API）。
@@ -654,12 +680,14 @@ def _transfer(src: Path, dst: Path, mode: str) -> bool:
 
 
 def _archive_file(video_path: Path, output_dir: str, code: str,
-                  mode: str = "hardlink", rename: bool = True) -> dict:
+                  mode: str = "hardlink", rename: bool = True,
+                  watch_dir: str = "") -> dict:
     """
     把视频归档到 归档目录/年月/番号/ 子目录下（Emby 单片单目录布局）。
     rename：开（刮削开）= 视频改名「番号.后缀」、随带番号命名的 NFO/封面；
             关（刮削关）= 保留原文件名、不带 NFO/封面。
     mode：hardlink/copy 保留原下载文件（原文件留存供做种/辅种）；move 移动（原文件离开下载目录）。
+    多分段（同番号多个正片）：视频名加 -cd1/-cd2… 堆叠后缀，避免同名互相覆盖、确保全部归档。
     返回 {archived, moved_original, target_dir, files}。
     """
     mode = (mode or "hardlink").lower()
@@ -675,8 +703,10 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
     folder = video_path.parent
     done = []
 
-    # 1) 视频本体 → 番号.后缀（刮削关则保留原文件名）
-    video_name = f"{safe_code}{video_path.suffix.lower()}" if (rename and code) else video_path.name
+    # 1) 视频本体 → 番号[-cdN].后缀（刮削关则保留原文件名）
+    #    多分段时加 -cd1/-cd2… 堆叠后缀，确保 A/B/C、1/2/3、CD1/CD2 等全部归档不互相覆盖。
+    part = _part_suffix(video_path, code, watch_dir) if (rename and code) else ""
+    video_name = f"{safe_code}{part}{video_path.suffix.lower()}" if (rename and code) else video_path.name
     video_dst = target_dir / video_name
     if not _transfer(video_path, video_dst, mode):
         return {"archived": False, "moved_original": False,
@@ -820,7 +850,8 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         src_parent = video_path.parent
         # V1.5 统一：归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
         mode = (config.get("archive_mode") or "hardlink").lower()
-        mv = _archive_file(video_path, output_dir, code, mode=mode, rename=scrape_meta)
+        mv = _archive_file(video_path, output_dir, code, mode=mode, rename=scrape_meta,
+                           watch_dir=str(watch_dir))
         record["moved"] = mv.get("archived", False)
         record["archive_mode"] = mode
         record["target_dir"] = mv.get("target_dir", "")
