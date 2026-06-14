@@ -13,6 +13,7 @@ import re
 from typing import Optional
 
 from . import javbus, javdb, avsox, avmoo, fc2
+from . import _detailcache
 
 SEARCH_MODE_CODE = "code"
 SEARCH_MODE_ACTOR = "actor"
@@ -182,6 +183,11 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
         mod = SOURCE_MODULES.get(source)
         if not mod or not url:
             return None
+        # 缓存命中即直接返回——前台预抓/点开详情/刮削回源共用这份缓存，
+        # 「后台已抓过的内容刮削直接拿，没抓过才真去抓」。
+        cached = _detailcache.get(url)
+        if cached is not None:
+            return cached
         use_fs = source in _FLARESOLVERR_SOURCES and flaresolverr_on
         # FlareSolverr 来源：全局串行闸 + 32s 超时；其余：并发信号量 + 快速超时
         gate = _FLARESOLVERR_GATE if use_fs else sem
@@ -189,7 +195,10 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
         async with gate:
             await asyncio.sleep(0.05)
             try:
-                return await asyncio.wait_for(mod.fetch_detail(url, proxy), timeout=timeout)
+                res = await asyncio.wait_for(mod.fetch_detail(url, proxy), timeout=timeout)
+                if res:                       # 仅缓存成功结果，失败不缓存以便重试
+                    _detailcache.put(url, res)
+                return res
             except asyncio.TimeoutError:
                 print(f"[enrich] {source} {url} timeout")
                 return None

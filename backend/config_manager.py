@@ -65,6 +65,9 @@ DEFAULT_CONFIG = {
     # 首次经「推送」入口（搜索结果磁力/种子直推下载器）添加的种子上传限速(KB/s)，0=不限。
     #   仅作用于此处首推，不影响 PT 发种（那条线另有 publish_upload_limit_kbps）。
     "magnet_upload_limit_kbps": 0,
+    # 经「推送」入口加入的磁力链下载完成后是否自动删除种子（保留文件）：磁力只用于下载、不做种。
+    #   仅作用于此处首推的磁力种子，由 intake 后台轮询执行；不影响发种/做种与你手动添加的种子。
+    "magnet_delete_completed": False,
     # V1.4：qBittorrent 下载器（群晖中部署）
     "qb_url": "",                        # qBittorrent WebUI 地址，如 http://192.168.1.100:8080
     "qb_username": "",                   # WebUI 用户名

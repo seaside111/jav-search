@@ -860,6 +860,11 @@
             <input class="setting-input" id="cfgMagnetUpLimit" type="number" min="0" step="1" placeholder="0">
             <span class="setting-hint">首次经「推送」把搜索结果的磁力/种子加入下载器时，给该种子设单种上传限速(KB/s)，0=不限。仅作用于此处首推，不影响 PT 发种（发种限速在发布页设置）</span>
           </div>
+          <div class="setting-row">
+            <label class="setting-label">完成后删除磁力</label>
+            <label class="source-chk"><input type="checkbox" id="cfgMagnetDeleteCompleted"> 磁力链下载完成后删除种子（保留文件）</label>
+            <span class="setting-hint">仅作用于经「推送」加入的磁力链：下完即删种、保留文件（磁力只用于下载、不做种）。由后台轮询执行，不影响 PT 发种/做种与你手动添加的种子</span>
+          </div>
           <div class="jackett-status-row">
             <div class="jackett-status-dot" id="qbDot"></div>
             <span class="jackett-status-text" id="qbStatusText">未检测</span>
@@ -1774,7 +1779,7 @@ async function pushToQb(downloadUrl, btnId, idx) {
   try {
     const resp = await fetch(`${API}/api/qbittorrent/add`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ download_url: downloadUrl, code, title }),
+      body: JSON.stringify({ download_url: downloadUrl, code, title, meta: m || undefined }),
     });
     const data = await safeJson(resp);
     if (resp.ok && data.success) {
@@ -2216,6 +2221,7 @@ async function openSettings() {
     // V1.5 下载器类型
     document.getElementById('cfgDownloaderType').value = cfg.downloader_type || 'qb';
     document.getElementById('cfgMagnetUpLimit').value = cfg.magnet_upload_limit_kbps || 0;
+    document.getElementById('cfgMagnetDeleteCompleted').checked = !!cfg.magnet_delete_completed;
     // V1.4 qBittorrent
     document.getElementById('cfgQbUrl').value      = cfg.qb_url || '';
     document.getElementById('cfgQbUser').value     = cfg.qb_username || '';
@@ -2515,6 +2521,7 @@ async function saveSettings() {
     // V1.5 下载器类型
     downloader_type: document.getElementById('cfgDownloaderType').value,
     magnet_upload_limit_kbps: parseInt(document.getElementById('cfgMagnetUpLimit').value, 10) || 0,
+    magnet_delete_completed: document.getElementById('cfgMagnetDeleteCompleted').checked,
     // V1.4 qBittorrent
     qb_url: document.getElementById('cfgQbUrl').value.trim(),
     qb_username: document.getElementById('cfgQbUser').value.trim(),

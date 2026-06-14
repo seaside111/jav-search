@@ -293,6 +293,32 @@ def _is_extra_video(video_path: Path, watch_dir: str = "") -> bool:
     return False
 
 
+def _same_code_main_videos(video_path: Path, code: str, watch_dir: str = "") -> list:
+    """同一直接父目录下、与 code 同番号的全部「正片」视频（含自身、排除广告/赠片），
+    按文件名排序返回。用于多分段（CD1/CD2、A/B/C、1/2/3…）归档时确定各段顺序。
+    分段文件（纯编号/字母/CDx）经 _recognize_code 会从父目录认出同一番号，故能聚到一起。"""
+    norm = _norm(code)
+    mains = []
+    for s in _sibling_videos(video_path):
+        if _is_extra_video(s, watch_dir):
+            continue
+        if _norm(_recognize_code(s, watch_dir)) == norm:
+            mains.append(s)
+    mains.sort(key=lambda p: p.name.lower())
+    return mains
+
+
+def _part_suffix(video_path: Path, code: str, watch_dir: str = "") -> str:
+    """同番号在同目录有多个正片（分段）时，返回该视频的分段后缀「-cd{N}」
+    （Emby/Kodi 多文件堆叠为同一影片）；单文件返回 ""。
+    N 取该视频在「同番号正片按文件名排序」中的位次，与处理顺序无关、稳定不冲突。"""
+    mains = _same_code_main_videos(video_path, code, watch_dir)
+    if len(mains) <= 1:
+        return ""
+    idx = next((i for i, p in enumerate(mains) if p.name == video_path.name), 0)
+    return f"-cd{idx + 1}"
+
+
 async def _resolve_code(video_path: Path, config: dict) -> str:
     """
     番号识别：直接分析「文件名 + 各级父目录名」（不做提前标记，不依赖下载器 API）。
@@ -474,12 +500,27 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         _log(f"刮削跳过：文件不存在 {filepath}")
         return {"success": False, "filepath": filepath, "error": "文件不存在"}
 
-    code = await _resolve_code(path, config)
-    if not code:
-        _log(f"刮削失败：无法从文件名提取番号 → {path.name}")
-        return {"success": False, "filepath": filepath, "error": "无法从文件名提取番号"}
+    # 优先：用「推送时列表已呈现的元数据」（番号/封面/演员/标签…）。
+    #   命中则直接拿来刮削，免去从文件名重识别番号 + 重新刮削——纯数字番号(如 AVSOX「061326_01」)
+    #   在文件名识别阶段易出错刮错封面/NFO，用已呈现内容最准。未命中再回退常规识别+搜索。
+    pushed_meta = None
+    try:
+        import intake
+        _ih, pushed_meta = await intake.resolve_for_file(
+            path, config.get("scrape_watch_dir", ""), config)
+    except Exception as e:
+        _log(f"读取推送入库元数据失败（忽略，回退常规刮削）：{e}")
+        pushed_meta = None
 
-    _log(f"开始刮削：{path.name} → 番号 {code}")
+    if pushed_meta and pushed_meta.get("code"):
+        code = pushed_meta["code"]
+        _log(f"命中推送元数据：{path.name} → 番号 {code}（用已呈现内容刮削，免重识别/重刮削）")
+    else:
+        code = await _resolve_code(path, config)
+        if not code:
+            _log(f"刮削失败：无法从文件名提取番号 → {path.name}")
+            return {"success": False, "filepath": filepath, "error": "无法从文件名提取番号"}
+        _log(f"开始刮削：{path.name} → 番号 {code}")
 
     status = _get_file_status(path, code)
     if not overwrite and status["has_nfo"] and status["has_cover"]:
@@ -491,28 +532,51 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     provider = (config.get("scrape_translate_provider")
                 or config.get("default_translate_provider", "baidu"))
 
-    _log(f"搜索元数据：{code}（数据源 javbus/javdb，代理 {'有' if proxy else '无'}）")
-    results = await search(query=code, mode=SEARCH_MODE_CODE, proxy=proxy,
-                           sources=["javbus", "javdb"])
-    if not results:
-        _log(f"未找到影片信息：{code}（站点不可达或无该番号）")
-        return {"success": False, "filepath": filepath, "code": code, "error": "未找到影片信息"}
+    if pushed_meta and pushed_meta.get("code"):
+        # 用推送时已呈现的元数据（番号/封面/标题最准）。
+        movie = {k: v for k, v in pushed_meta.items() if not k.startswith("_")}
+        # 但推送可能发生在详情尚未加载完时（点太快），元数据不全。此时【回到该条目自己的
+        # 数据源、按它的 url 补抓】缺失字段，而不是按番号盲目搜索（纯数字番号会搜错来源/错片）。
+        #   - detail_loaded=False：列表级条目，详情没加载过 → 补抓；
+        #   - 或关键字段缺失（标题/封面）作兜底触发。
+        # 只补「当前缺的」字段，已有的（来自展示）不覆盖；不同源字段差异（如 AVSOX 有简介、
+        # 别的源没有）天然由「只查这一个源」保证——该源没有的就是没有，不去别处硬凑。
+        incomplete = (not movie.get("detail_loaded")) or not movie.get("title") or not movie.get("cover")
+        if incomplete and movie.get("url"):
+            try:
+                from scrapers import enrich
+                enriched = await enrich([{"url": movie["url"], "source": movie.get("source", "")}], proxy=proxy)
+                if enriched and enriched[0]:
+                    filled = [k for k, v in enriched[0].items() if v and not movie.get(k)]
+                    for k in filled:
+                        movie[k] = enriched[0][k]
+                    _log(f"推送元数据不全，回原源补抓：{code}（{movie.get('source','')}，补全 {len(filled)} 项）")
+            except Exception as e:
+                _log(f"原源补抓失败（用已有内容继续）：{code}: {e}")
+        _log(f"用推送元数据刮削：{code} 标题《{(movie.get('title') or '')[:40]}》来源 {movie.get('source','')}")
+    else:
+        _log(f"搜索元数据：{code}（数据源 javbus/javdb，代理 {'有' if proxy else '无'}）")
+        results = await search(query=code, mode=SEARCH_MODE_CODE, proxy=proxy,
+                               sources=["javbus", "javdb"])
+        if not results:
+            _log(f"未找到影片信息：{code}（站点不可达或无该番号）")
+            return {"success": False, "filepath": filepath, "code": code, "error": "未找到影片信息"}
 
-    # 列表条目可能缺详情，补全第一条
-    movie = results[0]
-    _log(f"命中影片：{code} 标题《{(movie.get('title') or '')[:40]}》来源 {movie.get('source','')}")
-    if not movie.get("actors") and movie.get("url"):
-        try:
-            from scrapers import enrich
-            enriched = await enrich([{"url": movie["url"], "source": movie.get("source", "")}], proxy=proxy)
-            if enriched and enriched[0]:
-                detail = enriched[0]
-                for k, v in detail.items():
-                    if v and not movie.get(k):
-                        movie[k] = v
-                _log(f"详情补全完成：{code}（演员 {len(movie.get('actors') or [])} 人）")
-        except Exception as e:
-            _log(f"详情补全失败 {code}: {e}")
+        # 列表条目可能缺详情，补全第一条
+        movie = results[0]
+        _log(f"命中影片：{code} 标题《{(movie.get('title') or '')[:40]}》来源 {movie.get('source','')}")
+        if not movie.get("actors") and movie.get("url"):
+            try:
+                from scrapers import enrich
+                enriched = await enrich([{"url": movie["url"], "source": movie.get("source", "")}], proxy=proxy)
+                if enriched and enriched[0]:
+                    detail = enriched[0]
+                    for k, v in detail.items():
+                        if v and not movie.get(k):
+                            movie[k] = v
+                    _log(f"详情补全完成：{code}（演员 {len(movie.get('actors') or [])} 人）")
+            except Exception as e:
+                _log(f"详情补全失败 {code}: {e}")
 
     # ── 标题/简介翻译 ──
     # 番号（字母+数字）不翻译，仅作前缀；只对真正的日文片名/简介长句翻译。
@@ -522,34 +586,33 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
 
     name_zh = name_part            # 默认保留原文（非日文时不翻译）
     plot_zh = desc
-    segments, tags = [], []
-    if name_part and _has_jp(name_part):
-        segments.append(name_part); tags.append("name")
-    if desc and _has_jp(desc):
-        segments.append(desc); tags.append("desc")
 
-    # 刮削翻译总开关：关闭时直接保留日文原标题/简介，不调翻译服务
+    # 刮削翻译总开关：
+    #   关：标题/简介全部保留日文原文，不调翻译服务。
+    #   开：标题、简介【各自独立翻译】、各自整体替换原日文——绝不拼接后再切分。
+    #       （旧实现把标题+简介用 \n\n 拼一起翻译再按 \n\n 切回，简介含空行/翻译服务不保留
+    #        分隔符时会错位：简介译文窜到标题、日文简介还残留在简介——本次修复点。）
     translate_on = config.get("scrape_translate_enabled", True)
     if not translate_on:
         _log(f"刮削翻译已关闭，标题/简介保留日文原文：{code}")
-        segments = []
+    else:
+        async def _tr(text: str, what: str) -> str:
+            # 空或不含日文：原样返回（不强译、不混日文）；翻译失败也回退原文
+            if not text or not _has_jp(text):
+                return text
+            r = await translate(text=text, provider=provider, config=config)
+            if r.get("success") and (r.get("result") or "").strip():
+                return r["result"].strip()
+            _log(f"翻译失败（保留原文）：{code} {what} — {r.get('error', '')}")
+            return text
 
-    if segments:
-        _log(f"翻译（仅日文部分）：{code}（服务 {provider}，{len(segments)} 段）")
-        trans = await translate(text="\n\n".join(segments), provider=provider, config=config)
-        if trans.get("success"):
-            outs = trans["result"].split("\n\n")
-            for i, tg in enumerate(tags):
-                val = outs[i].strip() if i < len(outs) else ""
-                if tg == "name" and val:
-                    name_zh = val
-                elif tg == "desc" and val:
-                    plot_zh = val
+        if (name_part and _has_jp(name_part)) or (desc and _has_jp(desc)):
+            _log(f"翻译（标题/简介各自独立）：{code}（服务 {provider}）")
+            name_zh = await _tr(name_part, "标题")
+            plot_zh = await _tr(desc, "简介")
             _log(f"翻译完成：{code} → 片名《{name_zh[:40]}》")
         else:
-            _log(f"翻译失败（保留原文）：{code} — {trans.get('error','')}")
-    elif translate_on:
-        _log(f"无需翻译（无日文片名/简介）：{code}")
+            _log(f"无需翻译（无日文片名/简介）：{code}")
 
     # NFO <title> = 番号 + 中文片名（番号永不翻译）
     title_for_nfo = _compose_title(code, name_zh)
@@ -617,12 +680,14 @@ def _transfer(src: Path, dst: Path, mode: str) -> bool:
 
 
 def _archive_file(video_path: Path, output_dir: str, code: str,
-                  mode: str = "hardlink", rename: bool = True) -> dict:
+                  mode: str = "hardlink", rename: bool = True,
+                  watch_dir: str = "") -> dict:
     """
     把视频归档到 归档目录/年月/番号/ 子目录下（Emby 单片单目录布局）。
     rename：开（刮削开）= 视频改名「番号.后缀」、随带番号命名的 NFO/封面；
             关（刮削关）= 保留原文件名、不带 NFO/封面。
     mode：hardlink/copy 保留原下载文件（原文件留存供做种/辅种）；move 移动（原文件离开下载目录）。
+    多分段（同番号多个正片）：视频名加 -cd1/-cd2… 堆叠后缀，避免同名互相覆盖、确保全部归档。
     返回 {archived, moved_original, target_dir, files}。
     """
     mode = (mode or "hardlink").lower()
@@ -638,8 +703,10 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
     folder = video_path.parent
     done = []
 
-    # 1) 视频本体 → 番号.后缀（刮削关则保留原文件名）
-    video_name = f"{safe_code}{video_path.suffix.lower()}" if (rename and code) else video_path.name
+    # 1) 视频本体 → 番号[-cdN].后缀（刮削关则保留原文件名）
+    #    多分段时加 -cd1/-cd2… 堆叠后缀，确保 A/B/C、1/2/3、CD1/CD2 等全部归档不互相覆盖。
+    part = _part_suffix(video_path, code, watch_dir) if (rename and code) else ""
+    video_name = f"{safe_code}{part}{video_path.suffix.lower()}" if (rename and code) else video_path.name
     video_dst = target_dir / video_name
     if not _transfer(video_path, video_dst, mode):
         return {"archived": False, "moved_original": False,
@@ -783,7 +850,8 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         src_parent = video_path.parent
         # V1.5 统一：归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
         mode = (config.get("archive_mode") or "hardlink").lower()
-        mv = _archive_file(video_path, output_dir, code, mode=mode, rename=scrape_meta)
+        mv = _archive_file(video_path, output_dir, code, mode=mode, rename=scrape_meta,
+                           watch_dir=str(watch_dir))
         record["moved"] = mv.get("archived", False)
         record["archive_mode"] = mode
         record["target_dir"] = mv.get("target_dir", "")

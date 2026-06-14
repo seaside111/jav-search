@@ -38,6 +38,7 @@ import monitor
 import mteam_enums
 import logbus
 import library
+import intake
 import auth
 
 APP_VERSION = "1.5.0-beta"
@@ -86,6 +87,11 @@ async def _on_startup():
         publish.start_worker()
     except Exception as e:
         print(f"[启动] 发种 worker 启动失败: {e}", flush=True)
+    # 推送入库后台轮询：磁力下完即删（保留文件）+ 给刮削补记下载内容名
+    try:
+        intake.start_poller(load_config)
+    except Exception as e:
+        print(f"[启动] 推送入库轮询启动失败: {e}", flush=True)
 
 # ──────────────────────────────────────────────
 # 认证：放行白名单 + Cookie 校验中间件
@@ -240,6 +246,7 @@ class ConfigUpdateRequest(BaseModel):
     # V1.5 下载器类型
     downloader_type: Optional[str] = None
     magnet_upload_limit_kbps: Optional[int] = None   # 磁力推送单种上传限速(KB/s)
+    magnet_delete_completed: Optional[bool] = None    # 磁力下载完成后自动删种(保留文件)
     # V1.4 qBittorrent
     qb_url: Optional[str] = None
     qb_username: Optional[str] = None
@@ -927,6 +934,7 @@ class QbAddRequest(BaseModel):
     category: Optional[str] = None     # 覆盖默认分类
     code: Optional[str] = None         # 该影片番号（来自搜索结果，用于刮削时精确识别）
     title: Optional[str] = None        # 该影片标题（辅助匹配）
+    meta: Optional[dict] = None        # 列表/详情里已呈现的整条元数据（供下载后刮削直接复用）
 
 
 @app.post("/api/qbittorrent/add")
@@ -954,8 +962,24 @@ async def api_qb_add(req: QbAddRequest):
         print(f"[推送] 失败：{result.get('error', '')}", flush=True)
         raise HTTPException(status_code=502, detail=result.get("error", "推送失败"))
     print("[推送] 成功", flush=True)
-    # 不再做番号提前标记：刮削时直接分析「文件名 + 各级父目录名」识别番号
-    # （站点域名/方括号等噪声已在 library._clean_noise 中剔除）。
+
+    # 记下「列表里已呈现的元数据」，供下载完成后刮削直接使用（不再从文件名重识别番号+重刮削，
+    #   修纯数字番号识别出错）；磁力链且开了「下完即删」则标记，由后台轮询下完后删种(保留文件)。
+    is_magnet = (req.download_url or "").lower().startswith("magnet:")
+    meta = dict(req.meta) if isinstance(req.meta, dict) else {}
+    if req.code and not meta.get("code"):
+        meta["code"] = req.code
+    if req.title and not meta.get("title"):
+        meta["title"] = req.title
+    ih = (result.get("hash") or "").lower()
+    if ih:
+        autodel = is_magnet and bool(config.get("magnet_delete_completed", False))
+        try:
+            intake.register(ih, meta, autodelete=autodel)
+            if autodel:
+                print(f"[推送] 已标记下完即删（保留文件）hash={ih[:12]}", flush=True)
+        except Exception as e:
+            print(f"[推送] 记录入库元数据失败：{e}", flush=True)
     return result
 
 
