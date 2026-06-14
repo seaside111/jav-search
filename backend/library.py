@@ -249,6 +249,13 @@ def _sibling_videos(video_path: Path) -> list:
         return []
 
 
+def _has_primary_sibling(video_path: Path) -> bool:
+    """同目录是否存在「正片」兄弟视频（带番号或分集标记 CD1/A/1）。
+    用于判定本文件是否为发布目录里的广告/赠片——有正片兄弟才认定，避免误删独立小视频。"""
+    return any(s != video_path and (_code_from_name(s.stem) or _has_cd_marker(s.stem))
+               for s in _sibling_videos(video_path))
+
+
 def _looks_primary(video_path: Path, watch_dir: str = "") -> bool:
     """
     该视频自身是否「像正片」（用于判断目录是否还有待处理正片，决定能否清理整目录）。
@@ -944,18 +951,28 @@ async def _scan_once(config: dict) -> int:
         except Exception as e:
             _log(f"读取文件信息失败，跳过：{vf.name}（{e}）")
             continue
+        # 广告/赠片清理（一律清理）：该视频自身无番号、无分集标记，且同目录存在「正片兄弟」
+        #   （带番号或分集标记的视频）→ 确认是发布目录里的广告/赠片，【直接删除】（含过小小广告）。
+        #   主片/分段/其它番号正片绝不删。不论 hardlink/move 归档模式都执行；必须放在「过小忽略」
+        #   之前，否则小广告会先被尺寸过滤跳过、永远清不掉（用户反馈的现象）。
+        #   注意：若该种子整体仍在做种，删其中文件会让该种子校验缺文件（用户已知并选择一律清理）。
+        #   发种占用的目录已在上方按番号/路径跳过，不会走到这里。
+        if (not _code_from_name(vf.stem) and not _has_cd_marker(vf.stem)
+                and _has_primary_sibling(vf)
+                and (_is_extra_video(vf, watch) or size < min_bytes)):
+            try:
+                vf.unlink()
+                n_extra += 1
+                _log(f"已删除广告/赠片视频：{vf.name}（{round(size/1024/1024,1)}MB）")
+            except Exception as e:
+                _log(f"删除广告/赠片视频失败：{vf.name} — {e}")
+                _processed.add(fp)   # 删不掉就别每轮重试刷屏
+            _size_history.pop(fp, None)
+            continue
+
         if size < min_bytes:
             n_small += 1
             _log(f"文件过小忽略：{vf.name}（{round(size/1024/1024,1)}MB < {min_bytes//1024//1024}MB）")
-            continue
-
-        # 广告/赠片过滤：同目录已有带正确番号的正片（或分集），而该文件自身无番号、
-        # 无分集标记 → 判为广告/赠片，跳过刮削（标记为已处理，后续随原目录一并清理）。
-        if _is_extra_video(vf, watch):
-            n_extra += 1
-            _log(f"广告/赠片视频，跳过刮削：{vf.name}")
-            _processed.add(fp)
-            _size_history.pop(fp, None)
             continue
 
         # 完成判定（无 .!qB 前提下，满足任一即视为下载完成）：
