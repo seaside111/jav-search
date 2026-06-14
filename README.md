@@ -64,6 +64,8 @@ docker run -d \
 
 > 上面 `` `# ...` `` 是行内批注，会被 shell 当空忽略，可整段直接复制运行。挂载冒号**左侧**是宿主机真实路径（按需改），**右侧**是容器内路径——已统一到 `/data` 下（`/data/downloads` 刮削、`/data/media` 归档），需与「设置 → 刮削」里填的容器路径一致。不需要刮削功能就删掉中间两行 `-v`。Windows PowerShell 请去掉行尾 `\` 与批注、写成一行。
 
+> **host 模式**：若代理/下载器在其它网段、bridge 路由不到（搜索日志报 `ConnectTimeout`），把上面命令里的 `-p 8085:8085` 与 `--add-host host.docker.internal:host-gateway` 两行删掉，改成一行 `--network host`，容器即与宿主机共用网络栈（端口直接是宿主机的 8085）。此时代理/Jackett/qB 地址改用 `http://localhost:端口` 或 `http://<群晖IP>:端口`，详见下方「网络模式与代理」。
+
 **升级 / 重建**（配置在命名卷里，不会丢）：
 
 ```bash
@@ -132,7 +134,7 @@ environment:
 
 访问 JavBus / JavDB 通常需要科学上网。若搜索时日志出现 `ConnectTimeout`，多半是 **网络模式** 问题：默认 bridge 网络的容器路由不到其它网段的代理。
 
-项目附带 `docker-compose.host.yml`，让容器与群晖共用网络栈：
+项目附带 `docker-compose.host.yml`，让容器与群晖共用网络栈（纯 `docker run` 部署同理：删掉 `-p 8085:8085` 与 `--add-host …`，改用一行 `--network host`）：
 
 ```bash
 docker-compose down
