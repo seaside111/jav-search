@@ -50,13 +50,23 @@ DEFAULT_CONFIG = {
         "javdb": 40,
         "avsox": 40,
         "avmoo": 40,
-        "fc2": 60,                       # FC2 抓前 2 页汇总（fc2_latest_pages），上限放到 60 才装得下两页
+        "fc2": 60,                       # FC2 最新条数；走 sukebei 按需翻页发现，硬上限 100（见 fc2.FC2_LATEST_MAX）
     },
+    # 资源搜索（磁力/种子）：默认用 sukebei.nyaa.si（直连、免配置）；
+    # jackett_enabled=True 且配置了 Jackett 时，Jackett 优先、sukebei 兜底。
+    "jackett_enabled": False,            # 资源搜索是否启用 Jackett（默认关＝只用 sukebei）
     # Jackett
     "jackett_url": "",                   # Jackett 地址，如 http://192.168.1.100:9117
     "jackett_api_key": "",               # Jackett API Key
     "jackett_indexers": "all",           # 索引器，多个用逗号分隔
     "jackett_timeout": 20,               # 搜索超时秒数
+    # V1.5：下载器类型切换（qb=qBittorrent / transmission=Transmission）
+    "downloader_type": "qb",             # 当前启用的下载器后端
+    # 首次经「推送」入口（搜索结果磁力/种子直推下载器）添加的种子上传限速(KB/s)，0=不限。
+    "magnet_upload_limit_kbps": 0,
+    # 开：经「推送」加入的磁力链种子下载完成后，自动删除该种子记录（保留已下载文件）。
+    #   这里的磁力链只用于下载文件、不做种，故下完即可移除种子，免得一直占着挂在下载器里。
+    "magnet_delete_completed": False,
     # V1.4：qBittorrent 下载器（群晖中部署）
     "qb_url": "",                        # qBittorrent WebUI 地址，如 http://192.168.1.100:8080
     "qb_username": "",                   # WebUI 用户名
@@ -64,8 +74,56 @@ DEFAULT_CONFIG = {
     "qb_save_path": "",                  # 推送任务的保存目录（qB 主机视角），留空用 qB 默认
     "qb_category": "jav",                # 任务分类，便于刮削监控筛选；留空不分类
     "qb_paused": False,                  # 推送后是否暂停（先不下载）
+    # V1.5：Transmission 下载器（与 qB 并列，由 downloader_type 选择）
+    "tr_url": "",                        # Transmission RPC 地址，如 http://192.168.1.100:9091
+    "tr_username": "",                   # RPC 用户名（可空）
+    "tr_password": "",                   # RPC 密码（可空）
+    "tr_save_path": "",                  # 推送任务保存目录（TR 主机视角），留空用 TR 默认
+    "tr_category": "jav",                # 任务标签（labels），便于筛选；留空不打标签
+    # V1.5：M-Team PT 站（辅种/发种）。开发期连测试站，正式接口后续替换。
+    "mteam_api_base": "https://test2.m-team.cc/api",  # API 根地址（测试站）
+    "mteam_api_key": "",                 # M-Team API 密钥（控制台→实验室→API密钥生成）
+    "mteam_uid": "",                     # M-Team 用户 uid（个人页 URL 里的数字；监控全局数据用）
+    "mteam_source_flag": "M-Team",       # 制种 source 标记（影响 infohash，发种用）
+    "crossseed_category": "mteam",       # 发种做种打的分类/标签（受种子管理保护，永不自动删）
+    # V1.5：发种流水线（seed-in-place + 硬链接归档）
+    # 刮削目录＝本项目容器(/data)里、实际指向下载器保存数据同一物理目录的挂载名：
+    #   规整在此目录原地完成、做种也留原地。下载器的下载目录沿用全局下载器设置(qb_save_path 等)，
+    #   首次下磁力与最后重新做种由下载器按它自己的保存目录处理，发种这里不再单独设。
+    # 【1.5 统一·已迁移到全局「刮削 & 归档」】下载/工作目录、归档目录、归档模式、按年月
+    #   现统一取全局 scrape_watch_dir / scrape_output_dir / archive_mode / archive_by_month，
+    #   下列 publish_* 目录键仅作旧配置兼容兜底（启动时自动迁移到全局键），UI 不再单独编辑。
+    "publish_work_dir": "",              # 【已统一→scrape_watch_dir】旧配置兼容兜底
+    "publish_work_dir_host": "",         # 【已弃用·可留空】做种 save_path 兜底；现优先取种子自报 save_path
+    "publish_scrape_enabled": True,      # 【已统一→scrape_meta_enabled】旧配置兼容兜底
+    "publish_archive_enabled": True,     # 【已统一→archive_enabled】旧配置兼容兜底
+    "publish_archive_mode": "hardlink",  # 【已统一→archive_mode】旧配置兼容兜底
+    "publish_archive_by_month": True,    # 【已统一→archive_by_month】旧配置兼容兜底
+    "publish_archive_dir": "",           # 【已统一→scrape_output_dir】旧配置兼容兜底
+    "publish_archive_dir_host": "",      # 【已弃用】seed-in-place 后做种不再经归档目录，此项不再使用
+    "publish_max_active": 3,             # 同时活跃任务数（含做种）；超限排队
+    "publish_stop_ratio": 0,             # 做种停止：分享率达此值（0=不按分享率停，默认不自动停做种）
+    "publish_stop_hours": 72,            # 做种停止：做种时长达此小时（0=不按时长停）
+    "publish_delete_after_stop": False,  # 停止后是否删除做种任务
+    "publish_delete_files": False,       # 删除做种时是否连同文件（危险，默认否）
+    "publish_screenshot_count": 6,       # 发种截图张数
+    # 优先图床：发种简介图按此图床优先上传，失败自动兜底其它。
+    #   catbox(免key,但封机房/代理IP) / pixhost(免key,部分代理不通) / imgbb(需key,机房代理最稳)
+    "image_host": "catbox",              # imgbb | imgchest | freeimage | catbox | pixhost（postimage 已移除：key 版接口被官方停用）
+    "image_imgbb_key": "",               # imgbb API Key（https://api.imgbb.com 免费申请）
+    "image_imgchest_token": "",          # imgchest 个人 access token（imgchest.com 账号→API 生成）；允许 NSFW、直链走 Cloudflare
+    "image_freeimage_key": "",           # freeimage.host API key，留空用内置公开 key；直链 iili.io 走 Cloudflare
+    "image_postimage_key": "",           # 【已弃用·保留兼容】postimage 已移除，此项不再使用
+    "publish_auto": False,               # 发布闸门：False=人工确认，True=复查通过自动发布
+    "publish_anonymous": False,          # 是否匿名发布
+    "publish_category": "",              # 发布分类 id（必填，从 /torrent/categoryList 取）；手填优先于智能识别
+    "publish_countries": "",             # 国家/地区 id（createOredit countries 字段，从 /system/countryList 取）
+    "publish_poll_interval": 30,         # 发种 worker 轮询间隔（秒）
+    "publish_upload_limit_kbps": 0,      # 单个发种种子的上传限速(KB/s)，0=不限。防超 PT 单种限速被封
+    # V1.5：日志详略。True=详细(每步+每次API,beta排查用)；定型后设 False 只看主要动作
+    "log_verbose": True,
     # V1.4：媒体库刮削（监控下载目录 → 刮削 → 移动归档）
-    "scrape_enabled": False,             # 是否启用后台自动刮削监控
+    "scrape_enabled": False,             # 【已废弃为独立开关】监控改由 scrape_meta_enabled/archive_enabled 任一开启自动运行，此键不再起作用
     "scrape_watch_dir": "",              # 监控目录（下载器保存的目录，容器内视角）
     "scrape_output_dir": "",             # 刮削后归档目录（按 YYYYMM 建子目录存放）
     "scrape_interval": 300,              # 监控轮询间隔（秒）
@@ -74,7 +132,17 @@ DEFAULT_CONFIG = {
     "scrape_min_size_mb": 100,           # 小于此大小（MB）的视频忽略（样板/预告）
     "scrape_translate_enabled": True,    # 刮削时是否翻译标题/简介；关闭则直接用日文原标题写入 NFO
     "scrape_translate_provider": "",     # 刮削翻译服务，留空用默认翻译服务
-    "scrape_move_on_fail": True,         # 刮削失败也照常移动归档
+    "scrape_move_on_fail": True,         # 刮削失败也照常归档
+    # V1.5：刮削归档统一（监控 & 发种共用同一目录与归档行为；见上方 publish_* 已迁移说明）
+    #   scrape_watch_dir  = 全局下载/工作目录（监控扫它、发种也在此原地规整/做种）
+    #   scrape_output_dir = 全局归档目录（监控与发种都归档到此，供 EMBY 扫）
+    "archive_mode": "hardlink",          # hardlink | copy | move —— 监控孤儿下载的归档方式：
+                                         #   hardlink/copy 保留原文件；move 移动并清理原下载目录。
+                                         #   发种文件因需原地做种，恒按 hardlink/copy（选 move 自动降级为 hardlink）
+    "archive_by_month": True,            # 归档是否按年月建子目录（归档目录/YYYYMM/番号/），监控 & 发种共用
+    # 刮削/归档总开关（监控 & 发种共用，全局唯一）：
+    "scrape_meta_enabled": True,         # 刮削：视频改名番号 + 写 NFO/封面；关=保留原文件名、不写 NFO/封面
+    "archive_enabled": True,             # 归档：刮削/发种成品放进归档目录(供 EMBY)；关=不归档(发种仍原地做种)
 }
 
 # 列表抓取硬上限，防止配置过大拖垮服务
@@ -99,12 +167,36 @@ def _apply_env_fallbacks(config: dict) -> dict:
     return config
 
 
+def _migrate_unify_archive(config: dict, saved: dict) -> dict:
+    """V1.5 统一：把旧版发种独立的「刮削目录/归档目录/归档模式/按年月」迁移到全局键。
+    刮削监控与发种从此共用同一下载目录与归档行为，杜绝两套配置、两头执行。
+    幂等：全局键一旦有值就不再覆盖；只在全局键缺省、而旧 publish_* 有用户值时回填。
+    （只改运行时 config，不强制落盘；用户在统一后的设置页保存一次即固化。）"""
+    # 目录：全局留空且旧发种目录有值 → 回填
+    if not (config.get("scrape_watch_dir") or "").strip() and (saved.get("publish_work_dir") or "").strip():
+        config["scrape_watch_dir"] = saved["publish_work_dir"]
+    if not (config.get("scrape_output_dir") or "").strip() and (saved.get("publish_archive_dir") or "").strip():
+        config["scrape_output_dir"] = saved["publish_archive_dir"]
+    # 归档模式/按年月：用户从未设过全局键、但设过旧发种键 → 沿用旧值
+    if "archive_mode" not in saved and saved.get("publish_archive_mode"):
+        config["archive_mode"] = saved["publish_archive_mode"]
+    if "archive_by_month" not in saved and "publish_archive_by_month" in saved:
+        config["archive_by_month"] = saved["publish_archive_by_month"]
+    # 刮削/归档总开关：从旧的发种专属开关迁移
+    if "scrape_meta_enabled" not in saved and "publish_scrape_enabled" in saved:
+        config["scrape_meta_enabled"] = saved["publish_scrape_enabled"]
+    if "archive_enabled" not in saved and "publish_archive_enabled" in saved:
+        config["archive_enabled"] = saved["publish_archive_enabled"]
+    return config
+
+
 def load() -> dict:
     try:
         if CONFIG_PATH.exists():
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             config = {**DEFAULT_CONFIG, **saved}
+            config = _migrate_unify_archive(config, saved)
             return _apply_env_fallbacks(config)
     except Exception as e:
         print(f"[Config] load error: {e}")

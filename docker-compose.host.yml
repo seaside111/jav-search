@@ -15,9 +15,9 @@ services:
       - jav-config:/config
       # 如需把配置放到群晖文件夹方便编辑（需先 mkdir 该目录）：
       # - /volume1/docker/jav-search/config:/config
-      # ── V1.4 媒体库刮削目录映射（按需启用，冒号右侧为容器内路径，需与「设置 → 刮削」一致）──
-      # - /volume1/downloads/jav:/downloads/jav        # 下载器保存目录（监控源）
-      # - /volume1/media/jav:/media/jav                # 刮削后归档目录（按 YYYYMM 建子目录）
+      # ── 媒体库刮削/发种目录映射（容器侧统一在 /data 下，按需启用，需与「设置 → 刮削 / 发种」一致）──
+      # - /volume1/downloads/jav:/data/downloads       # 刮削目录：＝下载器保存目录/监控源（发种就地做种）
+      # - /volume1/media/jav:/data/media               # 归档目录：刮削后归档（按 YYYYMM 建子目录）
     environment:
       - CONFIG_DIR=/config
       - PORT=8085
@@ -29,6 +29,8 @@ services:
       - AUTH_SECRET=please-change-this-to-a-long-random-string
       # 会话有效期（秒），默认 7 天
       - AUTH_SESSION_TTL=604800
+      # 封面/图片磁盘缓存上限(MB)：落盘到 /config/imgcache，重启不丢、多用户共享。默认 500，设 0 关闭。
+      # - IMG_DISK_CACHE_MB=500
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/api/health')"]
       interval: 30s

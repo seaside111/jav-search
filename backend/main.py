@@ -4,6 +4,9 @@ JAV Search — FastAPI 后端主程序
 import os
 import re
 import sys
+import json
+import time
+import hashlib
 from pathlib import Path
 from typing import Optional
 
@@ -25,12 +28,17 @@ from scrapers import javdb as javdb_scraper
 from scrapers import fc2 as fc2_scraper
 from translator import translate
 from config_manager import load as load_config, save as save_config, MAX_RESULTS_HARD_CAP
+import jackett
 from jackett import search_jackett
+from scrapers._sukebei import search_sukebei
 import qbittorrent
+import downloader
+import intake
+import logbus
 import library
 import auth
 
-APP_VERSION = "1.4.4"
+APP_VERSION = "1.4.5"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -49,12 +57,22 @@ app.include_router(library.router)
 
 @app.on_event("startup")
 async def _on_startup():
+    # 按配置初始化日志详略
+    try:
+        logbus.set_verbose(load_config().get("log_verbose", True))
+    except Exception:
+        pass
     # 按配置拉起后台刮削监控
     print(f"[启动] JAV Search {APP_VERSION} 启动完成，初始化刮削监控…", flush=True)
     try:
         library.start_monitor()
     except Exception as e:
         print(f"[启动] 刮削监控启动失败: {e}", flush=True)
+    # 推送入库轮询：磁力下完即删（保留文件）+ 给在库种子补记内容名供刮削按名匹配
+    try:
+        intake.start_poller(load_config)
+    except Exception as e:
+        print(f"[启动] 推送入库轮询启动失败: {e}", flush=True)
 
 # ──────────────────────────────────────────────
 # 认证：放行白名单 + Cookie 校验中间件
@@ -166,7 +184,11 @@ class JackettSearchRequest(BaseModel):
 
 
 class ConfigUpdateRequest(BaseModel):
-    proxy: Optional[str] = ""
+    # 注意：所有字段默认必须是 None。保存接口用 req.dict(exclude_none=True) 合并，
+    # 只有 None 才会被排除。若默认给 "" / "baidu" / 12 之类的非 None 值，则当某个
+    # 设置页（如「发种中心」/publish）保存时未提交这些字段，Pydantic 会用默认值填上，
+    # exclude_none 排不掉，从而把用户已存的 proxy / jackett / 翻译密钥等悄悄清空。
+    proxy: Optional[str] = None
     sources: Optional[list[str]] = None
     # V1.4.2 JavDB 反爬增强
     javdb_flaresolverr_url: Optional[str] = None
@@ -186,21 +208,26 @@ class ConfigUpdateRequest(BaseModel):
     # V1.4.4 后台预抓 FC2 最新的 MissAV（标题/封面/样品图，低负担）
     fc2_prefetch_missav: Optional[bool] = None
     fc2_prefetch_count: Optional[int] = None
-    baidu_app_id: Optional[str] = ""
-    baidu_secret_key: Optional[str] = ""
-    aliyun_access_key_id: Optional[str] = ""
-    aliyun_access_key_secret: Optional[str] = ""
-    default_translate_provider: Optional[str] = "baidu"
-    results_per_page: Optional[int] = 12
+    baidu_app_id: Optional[str] = None
+    baidu_secret_key: Optional[str] = None
+    aliyun_access_key_id: Optional[str] = None
+    aliyun_access_key_secret: Optional[str] = None
+    default_translate_provider: Optional[str] = None
+    results_per_page: Optional[int] = None
     max_results: Optional[int] = None
     show_latest: Optional[bool] = None
     latest_sources: Optional[list[str]] = None
     latest_per_source: Optional[int] = None
     latest_limits: Optional[dict] = None
-    jackett_url: Optional[str] = ""
-    jackett_api_key: Optional[str] = ""
-    jackett_indexers: Optional[str] = "all"
-    jackett_timeout: Optional[int] = 20
+    jackett_enabled: Optional[bool] = None
+    jackett_url: Optional[str] = None
+    jackett_api_key: Optional[str] = None
+    jackett_indexers: Optional[str] = None
+    jackett_timeout: Optional[int] = None
+    # V1.5 下载器类型
+    downloader_type: Optional[str] = None
+    magnet_upload_limit_kbps: Optional[int] = None   # 磁力推送单种上传限速(KB/s)
+    magnet_delete_completed: Optional[bool] = None    # 磁力链下完后自动删种(保留文件)
     # V1.4 qBittorrent
     qb_url: Optional[str] = None
     qb_username: Optional[str] = None
@@ -208,6 +235,46 @@ class ConfigUpdateRequest(BaseModel):
     qb_save_path: Optional[str] = None
     qb_category: Optional[str] = None
     qb_paused: Optional[bool] = None
+    # V1.5 Transmission
+    tr_url: Optional[str] = None
+    tr_username: Optional[str] = None
+    tr_password: Optional[str] = None
+    tr_save_path: Optional[str] = None
+    tr_category: Optional[str] = None
+    # V1.5 M-Team PT
+    mteam_api_base: Optional[str] = None
+    mteam_api_key: Optional[str] = None
+    mteam_uid: Optional[str] = None
+    mteam_source_flag: Optional[str] = None
+    crossseed_category: Optional[str] = None
+    # V1.5 发种流水线
+    publish_work_dir: Optional[str] = None
+    publish_work_dir_host: Optional[str] = None
+    publish_max_active: Optional[int] = None
+    publish_stop_ratio: Optional[float] = None
+    publish_stop_hours: Optional[float] = None
+    publish_delete_after_stop: Optional[bool] = None
+    publish_delete_files: Optional[bool] = None
+    publish_screenshot_count: Optional[int] = None
+    image_host: Optional[str] = None
+    image_imgbb_key: Optional[str] = None
+    image_imgchest_token: Optional[str] = None
+    image_freeimage_key: Optional[str] = None
+    image_postimage_key: Optional[str] = None
+    publish_auto: Optional[bool] = None
+    publish_anonymous: Optional[bool] = None
+    publish_category: Optional[str] = None
+    publish_countries: Optional[str] = None
+    publish_poll_interval: Optional[int] = None
+    publish_upload_limit_kbps: Optional[int] = None
+    publish_scrape_enabled: Optional[bool] = None
+    publish_archive_enabled: Optional[bool] = None
+    publish_archive_mode: Optional[str] = None
+    publish_archive_by_month: Optional[bool] = None
+    publish_archive_dir: Optional[str] = None
+    publish_archive_dir_host: Optional[str] = None
+    # V1.5 日志详略
+    log_verbose: Optional[bool] = None
     # V1.4 刮削
     scrape_enabled: Optional[bool] = None
     scrape_watch_dir: Optional[str] = None
@@ -219,6 +286,11 @@ class ConfigUpdateRequest(BaseModel):
     scrape_translate_enabled: Optional[bool] = None
     scrape_translate_provider: Optional[str] = None
     scrape_move_on_fail: Optional[bool] = None
+    # V1.5 统一归档（监控 & 发种共用）
+    archive_mode: Optional[str] = None        # hardlink | copy | move
+    archive_by_month: Optional[bool] = None
+    scrape_meta_enabled: Optional[bool] = None   # 刮削总开关：改名番号+写NFO/封面
+    archive_enabled: Optional[bool] = None       # 归档总开关：成品放归档目录
 
 
 # ──────────────────────────────────────────────
@@ -298,12 +370,145 @@ async def api_version(force: bool = Query(False, description="是否强制刷新
     return result
 
 
-# 图片缓存（内存，简单 LRU 效果）
+import asyncio as _asyncio
+import hashlib as _hashlib
+
+# ── 图片缓存：内存（热）+ 磁盘（持久）两级 ──────────────────────────
+# 一级：内存 LRU（最快，进程内）。二级：磁盘持久缓存（容器重启不丢、多用户/多实例共享、
+# 命中即零上游请求）。封面是首页最高优先级，两级缓存让冷启动也能秒出。
 _img_cache: dict[str, tuple[bytes, str]] = {}
 _IMG_CACHE_MAX = 800
-# 图片代理并发上限：防止一页十几张封面 + 详情样品图同时打满代理导致整体超时。
-import asyncio as _asyncio
-_img_semaphore = _asyncio.Semaphore(12)
+_img_disk_tasks: set = set()   # 持有后台落盘任务引用，防止被 GC 提前回收
+
+# 磁盘缓存目录：默认放进已持久化的 CONFIG_DIR 下，现有用户无需改 compose 即生效。
+_IMG_DISK_DIR = Path(os.getenv("CONFIG_DIR", "/config")) / "imgcache"
+# 磁盘缓存总量上限（MB）：超出按最旧访问时间(LRU)淘汰。可用环境变量覆盖，默认 500MB。
+try:
+    _IMG_DISK_CACHE_MB = max(0, int(os.getenv("IMG_DISK_CACHE_MB", "500")))
+except ValueError:
+    _IMG_DISK_CACHE_MB = 500
+_IMG_DISK_ENABLED = _IMG_DISK_CACHE_MB > 0
+_img_disk_write_counter = 0   # 写入计数：每累计若干次才做一次全量扫描淘汰，避免每写都扫盘
+
+# 图片代理并发上限：封面是首页最高优先级，图片来自 CDN、并发被封风险低，
+# 放宽到 18 让「首屏十几张大封面 + 相邻页封面预热」更快齐发（详情样品图共用此闸）。
+_img_semaphore = _asyncio.Semaphore(18)
+
+# content-type ↔ 扩展名映射（磁盘文件名用扩展名记录类型，读回时还原 content-type）
+_CTYPE_EXT = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+              "image/webp": "webp", "image/gif": "gif", "image/avif": "avif"}
+_EXT_CTYPE = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp",
+              "gif": "image/gif", "avif": "image/avif"}
+
+
+def _img_disk_path(url: str, ctype: str = "") -> Path:
+    """URL → 磁盘缓存文件路径（sha256 命名，扩展名记录 content-type）。"""
+    h = _hashlib.sha256(url.encode("utf-8")).hexdigest()
+    ext = _CTYPE_EXT.get((ctype or "").split(";")[0].strip().lower(), "jpg")
+    return _IMG_DISK_DIR / f"{h}.{ext}"
+
+
+def _img_disk_find(url: str) -> Optional[Path]:
+    """按 URL 找已落盘的缓存文件（任一已知扩展名命中即可）。"""
+    if not _IMG_DISK_ENABLED:
+        return None
+    h = _hashlib.sha256(url.encode("utf-8")).hexdigest()
+    for ext in _EXT_CTYPE:
+        p = _IMG_DISK_DIR / f"{h}.{ext}"
+        if p.exists():
+            return p
+    return None
+
+
+def _img_disk_get_sync(url: str) -> Optional[tuple[bytes, str]]:
+    """磁盘命中则读出 (bytes, content-type)，并更新访问时间(LRU)。阻塞操作，放线程执行。"""
+    try:
+        p = _img_disk_find(url)
+        if not p:
+            return None
+        data = p.read_bytes()
+        if not data:
+            return None
+        ctype = _EXT_CTYPE.get(p.suffix.lstrip(".").lower(), "image/jpeg")
+        try:
+            os.utime(p, None)   # 触碰 mtime 作为 LRU 近期访问标记
+        except OSError:
+            pass
+        return data, ctype
+    except Exception:
+        return None
+
+
+def _img_disk_put_sync(url: str, content: bytes, ctype: str) -> None:
+    """原子写入磁盘缓存，并按需触发 LRU 淘汰。阻塞操作，放线程执行。"""
+    global _img_disk_write_counter
+    if not _IMG_DISK_ENABLED or not content:
+        return
+    try:
+        _IMG_DISK_DIR.mkdir(parents=True, exist_ok=True)
+        p = _img_disk_path(url, ctype)
+        tmp = p.with_suffix(p.suffix + f".tmp{os.getpid()}")
+        tmp.write_bytes(content)
+        os.replace(tmp, p)   # 原子替换，避免并发下读到半截文件
+        _img_disk_write_counter += 1
+        # 每累计 50 次写入做一次全量扫描淘汰（摊薄扫盘开销）
+        if _img_disk_write_counter >= 50:
+            _img_disk_write_counter = 0
+            _img_disk_evict_sync()
+    except Exception:
+        pass
+
+
+def _img_mem_put(url: str, content: bytes, ctype: str) -> None:
+    """写入内存 LRU 缓存（满则淘汰最旧）。"""
+    if len(_img_cache) >= _IMG_CACHE_MAX:
+        _img_cache.pop(next(iter(_img_cache)))
+    _img_cache[url] = (content, ctype)
+
+
+def _img_disk_put_bg(url: str, content: bytes, ctype: str) -> None:
+    """后台落盘（fire-and-forget），不阻塞图片响应。"""
+    if not _IMG_DISK_ENABLED or not content:
+        return
+    try:
+        t = _asyncio.create_task(_asyncio.to_thread(_img_disk_put_sync, url, content, ctype))
+        _img_disk_tasks.add(t)
+        t.add_done_callback(_img_disk_tasks.discard)
+    except RuntimeError:
+        pass
+
+
+def _img_disk_evict_sync() -> None:
+    """磁盘缓存超过上限时，按访问时间(mtime)从旧到新删除直到回落到上限之下。"""
+    if not _IMG_DISK_ENABLED:
+        return
+    try:
+        cap = _IMG_DISK_CACHE_MB * 1024 * 1024
+        files = []
+        total = 0
+        with os.scandir(_IMG_DISK_DIR) as it:
+            for e in it:
+                if not e.is_file():
+                    continue
+                try:
+                    st = e.stat()
+                except OSError:
+                    continue
+                files.append((st.st_mtime, st.st_size, e.path))
+                total += st.st_size
+        if total <= cap:
+            return
+        files.sort()   # 最旧访问的在前
+        for _mtime, size, path in files:
+            if total <= cap:
+                break
+            try:
+                os.remove(path)
+                total -= size
+            except OSError:
+                pass
+    except Exception:
+        pass
 
 
 def _img_referer_candidates(url: str) -> list[str]:
@@ -346,9 +551,17 @@ async def api_img_proxy(url: str = Query(..., description="原始图片 URL")):
     if not url or not url.startswith("http"):
         raise HTTPException(status_code=400, detail="无效的图片地址")
 
-    # 命中缓存
+    # 一级：内存缓存命中（最快）
     if url in _img_cache:
         content, ctype = _img_cache[url]
+        return Response(content=content, media_type=ctype,
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+    # 二级：磁盘持久缓存命中（容器重启不丢、多用户共享；命中即零上游请求）
+    disk = await _asyncio.to_thread(_img_disk_get_sync, url)
+    if disk:
+        content, ctype = disk
+        _img_mem_put(url, content, ctype)   # 回填内存，下次走一级
         return Response(content=content, media_type=ctype,
                         headers={"Cache-Control": "public, max-age=86400"})
 
@@ -390,9 +603,8 @@ async def api_img_proxy(url: str = Query(..., description="原始图片 URL")):
                            (ctype.startswith("image/") or "image" in ctype or not ctype):
                             content = resp.content
                             ctype = ctype or "image/jpeg"
-                            if len(_img_cache) >= _IMG_CACHE_MAX:
-                                _img_cache.pop(next(iter(_img_cache)))
-                            _img_cache[url] = (content, ctype)
+                            _img_mem_put(url, content, ctype)     # 内存（热）
+                            _img_disk_put_bg(url, content, ctype)  # 磁盘（持久，后台落盘）
                             return Response(content=content, media_type=ctype,
                                             headers={"Cache-Control": "public, max-age=86400"})
             except Exception:
@@ -444,6 +656,8 @@ async def api_details(req: DetailsRequest):
     """
     按需补全详情。前台对「当前页 + 预取下一页」的条目调用本接口，
     服务端并发抓取各自来源的详情页并返回（与输入顺序一致，失败项为 null）。
+    详情缓存在 scrapers.enrich 内部统一处理（按 url 缓存，前台预抓/点开/刮削回源共享），
+    故命中缓存的条目直接返回、不重复抓取（尤其 JavDB 经 FlareSolverr 的磁力/样品图）。
     """
     if not req.items:
         return {"success": True, "results": []}
@@ -525,63 +739,56 @@ async def api_fc2_test():
 
 @app.post("/api/jackett/search")
 async def api_jackett_search(req: JackettSearchRequest):
-    """调用 Jackett 搜索磁力/种子资源"""
+    """
+    资源搜索（磁力/种子）。
+      - 默认数据源：sukebei.nyaa.si（直连、磁力齐全），无需任何配置即可用。
+      - jackett_enabled 开启且已配置 Jackett 时：Jackett 优先；Jackett 无结果/失败再用 sukebei 兜底。
+    """
     if not req.query or not req.query.strip():
         raise HTTPException(status_code=400, detail="搜索词不能为空")
 
     config = load_config()
+    query = req.query.strip()
+    proxy = config.get("proxy") or None
+    jackett_enabled = bool(config.get("jackett_enabled", False))
     jackett_url = config.get("jackett_url", "").strip()
     api_key = config.get("jackett_api_key", "").strip()
 
-    if not jackett_url:
-        raise HTTPException(status_code=400, detail="未配置 Jackett 地址，请在设置中填写")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="未配置 Jackett API Key，请在设置中填写")
-
-    indexers = req.indexers or config.get("jackett_indexers", "all") or "all"
-    timeout = int(config.get("jackett_timeout", 20))
-    # Jackett 通常不需要翻墙代理，留空即可；如有需要可复用 proxy
-    proxy = None  # config.get("proxy") or None
-
+    results, source = [], "sukebei"
     try:
-        results = await search_jackett(
-            query=req.query.strip(),
-            jackett_url=jackett_url,
-            api_key=api_key,
-            indexers=indexers,
-            proxy=proxy,
-            timeout=timeout,
-        )
-        return {
-            "success": True,
-            "total": len(results),
-            "results": results,
-        }
+        if jackett_enabled and jackett_url and api_key:
+            indexers = req.indexers or config.get("jackett_indexers", "all") or "all"
+            timeout = int(config.get("jackett_timeout", 20))
+            try:
+                results = await search_jackett(
+                    query=query, jackett_url=jackett_url, api_key=api_key,
+                    indexers=indexers, proxy=None, timeout=timeout,
+                )
+                source = "jackett"
+            except Exception as e:
+                print(f"[资源搜索] Jackett 失败，回退 sukebei: {e!r}")
+                results = []
+            if not results:
+                results = await search_sukebei(query, proxy=proxy)
+                source = "sukebei(Jackett兜底)"
+        else:
+            results = await search_sukebei(query, proxy=proxy)
+            source = "sukebei"
+        return {"success": True, "total": len(results), "results": results, "source": source}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Jackett 搜索失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"资源搜索失败: {str(e)}")
 
 
 @app.get("/api/jackett/status")
 async def api_jackett_status():
-    """检测 Jackett 是否可用"""
+    """检测 Jackett 是否可用（轻量探活，不触发真实搜索，详见 jackett.check_status）。"""
     config = load_config()
-    jackett_url = config.get("jackett_url", "").strip()
-    api_key = config.get("jackett_api_key", "").strip()
-
-    if not jackett_url or not api_key:
-        return {"configured": False, "online": False, "message": "未配置"}
-
-    import httpx
-    try:
-        url = jackett_url.rstrip("/") + f"/api/v2.0/indexers/all/results?apikey={api_key}&Query=test"
-        async with httpx.AsyncClient(timeout=8) as client:
-            resp = await client.get(url)
-        if resp.status_code == 200:
-            return {"configured": True, "online": True, "message": "连接正常"}
-        else:
-            return {"configured": True, "online": False, "message": f"HTTP {resp.status_code}"}
-    except Exception as e:
-        return {"configured": True, "online": False, "message": str(e)}
+    timeout = int(config.get("jackett_timeout", 15) or 15)
+    return await jackett.check_status(
+        config.get("jackett_url", "").strip(),
+        config.get("jackett_api_key", "").strip(),
+        timeout=timeout,
+    )
 
 
 @app.get("/api/jackett/download")
@@ -636,7 +843,7 @@ async def api_get_config():
     config = load_config()
     # 脱敏返回（隐藏密钥）
     safe_config = dict(config)
-    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "javdb_cookie", "fc2_cookie"]:
+    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "mteam_api_key", "javdb_cookie", "fc2_cookie", "image_imgbb_key", "image_imgchest_token", "image_freeimage_key", "image_postimage_key"]:
         if safe_config.get(key):
             v = safe_config[key]
             safe_config[key] = "***" + v[-4:] if len(v) > 4 else "****"
@@ -650,14 +857,19 @@ async def api_set_config(req: ConfigUpdateRequest):
 
     update = req.dict(exclude_none=True)
     # 如果是脱敏值则不更新
-    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "javdb_cookie", "fc2_cookie"]:
+    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "mteam_api_key", "javdb_cookie", "fc2_cookie", "image_imgbb_key", "image_imgchest_token", "image_freeimage_key", "image_postimage_key"]:
         v = update.get(key, "")
         if v and v.startswith("***"):
             update.pop(key, None)
 
     config.update(update)
     ok = save_config(config)
-    # 配置变更后按最新的 scrape_enabled 启停后台监控
+    # 配置变更后同步日志详略
+    try:
+        logbus.set_verbose(config.get("log_verbose", True))
+    except Exception:
+        pass
+    # 配置变更后启停后台监控（刮削/归档任一开启即运行）
     try:
         library.ensure_monitor()
     except Exception as e:
@@ -666,7 +878,7 @@ async def api_set_config(req: ConfigUpdateRequest):
 
 
 # ──────────────────────────────────────────────
-# qBittorrent 下载器（V1.4）
+# 下载器（V1.4 qBittorrent / V1.5 + Transmission，经 downloader 抽象层调度）
 # ──────────────────────────────────────────────
 
 class QbAddRequest(BaseModel):
@@ -675,51 +887,67 @@ class QbAddRequest(BaseModel):
     category: Optional[str] = None     # 覆盖默认分类
     code: Optional[str] = None         # 该影片番号（来自搜索结果，用于刮削时精确识别）
     title: Optional[str] = None        # 该影片标题（辅助匹配）
+    meta: Optional[dict] = None        # 该影片列表/详情里已呈现的完整元数据，供下载完成后直接刮削
 
 
 @app.post("/api/qbittorrent/add")
 async def api_qb_add(req: QbAddRequest):
-    """把磁力链/种子推送到 qBittorrent"""
+    """把磁力链/种子推送到当前下载器（qB 或 Transmission，由 downloader_type 决定）。"""
     config = load_config()
-    qb_url = config.get("qb_url", "").strip()
-    if not qb_url:
-        raise HTTPException(status_code=400, detail="未配置 qBittorrent 地址，请在设置中填写")
-    save_path = req.save_path if req.save_path is not None else config.get("qb_save_path", "")
-    category = req.category if req.category is not None else config.get("qb_category", "")
-    print(f"[qB推送] → {qb_url}  保存目录={save_path or 'qB默认'}  分类={category or '无'}  "
+    if not downloader.is_configured(config):
+        raise HTTPException(status_code=400,
+                            detail=f"未配置下载器（{downloader.active_type(config)}）地址，请在设置中填写")
+    print(f"[推送→{downloader.active_type(config)}] 保存目录="
+          f"{(req.save_path if req.save_path is not None else downloader.default_save_path(config)) or '默认'}  "
+          f"分类={(req.category if req.category is not None else downloader.default_category(config)) or '无'}  "
           f"链接={req.download_url[:60]}", flush=True)
-    result = await qbittorrent.add_torrent(
-        qb_url=qb_url,
-        username=config.get("qb_username", ""),
-        password=config.get("qb_password", ""),
+    magnet_limit = int(config.get("magnet_upload_limit_kbps", 0) or 0)
+    if magnet_limit > 0:
+        print(f"[推送] 单种上传限速={magnet_limit} KB/s", flush=True)
+    result = await downloader.add_torrent(
+        config,
         download_url=req.download_url,
-        save_path=(save_path or "").strip(),
-        category=(category or "").strip(),
-        paused=bool(config.get("qb_paused", False)),
+        save_path=req.save_path,
+        category=req.category,
+        upload_limit_kbps=magnet_limit,
     )
     if not result.get("success"):
-        print(f"[qB推送] 失败：{result.get('error', '')}", flush=True)
+        print(f"[推送] 失败：{result.get('error', '')}", flush=True)
         raise HTTPException(status_code=502, detail=result.get("error", "推送失败"))
-    print("[qB推送] 成功", flush=True)
-    # 不再做番号提前标记：刮削时直接分析「文件名 + 各级父目录名」识别番号
-    # （站点域名/方括号等噪声已在 library._clean_noise 中剔除）。
+    print("[推送] 成功", flush=True)
+
+    # 记下「列表里已呈现的元数据」，供下载完成后刮削直接使用（不再从文件名重识别番号+重刮削，
+    #   修纯数字番号识别出错）；磁力链且开了「下完即删」则标记，由后台轮询下完后删种(保留文件)。
+    is_magnet = (req.download_url or "").lower().startswith("magnet:")
+    meta = dict(req.meta) if isinstance(req.meta, dict) else {}
+    if req.code and not meta.get("code"):
+        meta["code"] = req.code
+    if req.title and not meta.get("title"):
+        meta["title"] = req.title
+    ih = (result.get("hash") or "").lower()
+    if ih:
+        autodel = is_magnet and bool(config.get("magnet_delete_completed", False))
+        try:
+            intake.register(ih, meta, autodelete=autodel)
+            if autodel:
+                print(f"[推送] 已标记下完即删（保留文件）hash={ih[:12]}", flush=True)
+        except Exception as e:
+            print(f"[推送] 记录入库元数据失败：{e}", flush=True)
     return result
 
 
 @app.get("/api/qbittorrent/status")
 async def api_qb_status():
-    """检测 qBittorrent 连通性与登录"""
+    """检测当前下载器连通性（保留旧路径，前端兼容）。"""
     config = load_config()
-    qb_url = config.get("qb_url", "").strip()
-    if not qb_url:
-        return {"configured": False, "online": False, "message": "未配置"}
-    res = await qbittorrent.get_version(
-        qb_url=qb_url,
-        username=config.get("qb_username", ""),
-        password=config.get("qb_password", ""),
-    )
-    res["configured"] = True
-    return res
+    return await downloader.get_status(config)
+
+
+@app.get("/api/downloader/status")
+async def api_downloader_status():
+    """检测当前下载器连通性（通用路径，返回含 type 字段）。"""
+    config = load_config()
+    return await downloader.get_status(config)
 
 
 # ──────────────────────────────────────────────

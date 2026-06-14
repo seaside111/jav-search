@@ -25,6 +25,11 @@ from ._fsgate import (flaresolverr_request as _fs_request, discover_auto as _fs_
 FC2_BASE = "https://fc2ppvdb.com"
 SOURCE = "FC2"
 
+# FC2 首页最新「条数」硬上限。实测 sukebei 每页去重后约 64-70 个唯一番号，
+# fetch_fc2_latest 支持按需翻页，两页即可稳定覆盖 100。封顶 100 保证始终走 sukebei 快路，
+# 不会因数值过大被迫回退慢的 fc2ppvdb（过盾易超时→首页空）。前端输入也按此值收口。
+FC2_LATEST_MAX = 100
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -679,7 +684,14 @@ async def get_latest(proxy: Optional[str] = None, max_results: int = 40) -> list
     既新又快。② sukebei 不够 / 关闭 / 失败时，再抓 fc2ppvdb 首页补足（字段更全）。
     两路按番号去重后统一编号降序、截取最新 max_results。sukebei 卡的标题/封面较朴素
     （种子标题 + fourhoi 封面），完整信息在点开详情时由 fc2ppvdb/MissAV 按需补全。"""
-    pool = max(max_results * 2, 200)
+    # 硬上限 FC2_LATEST_MAX（=100）：实测 sukebei 每页去重后约 64-70 个唯一番号，
+    # fetch_fc2_latest 已支持按需翻页，两页即可稳定覆盖 100。封顶后始终走 sukebei 快路、
+    # 不会被迫回退慢的 fc2ppvdb（过盾易超时→首页空）。设置里数值再大也按 100 处理，
+    # 防止用户改大导致抓取不正常。
+    max_results = max(1, min(int(max_results or 40), FC2_LATEST_MAX))
+    # sukebei 已按 id 倒序（最新在前），取 max_results 个即可（多页累积）；
+    # 不再放大 pool，保证小数量(如默认 60)仍是单页、最快。
+    pool = max_results
 
     sukebei_items = []
     if _sukebei_enabled():

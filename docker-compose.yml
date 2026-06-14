@@ -18,12 +18,12 @@ services:
       #   mkdir -p /volume1/docker/jav-search/config
       # - /volume1/docker/jav-search/config:/config
       #
-      # ── V1.4 媒体库刮削目录映射 ──
-      # 让容器能访问 qBittorrent 的下载目录（监控）与媒体归档目录（移动目标）。
-      # 路径需与「设置 → 刮削」里填写的容器内路径一致（即冒号右侧）。
-      # 监控目录建议与 qBittorrent 的保存目录指向同一份宿主机数据：
-      # - /volume1/downloads/jav:/downloads/jav        # 下载器保存目录（监控源）
-      # - /volume1/media/jav:/media/jav                # 刮削后归档目录（按 YYYYMM 建子目录）
+      # ── 媒体库刮削/发种目录映射（容器侧统一在 /data 下）──
+      # 让容器能访问下载目录（刮削监控源/发种就地规整）与归档目录（给 EMBY 扫）。
+      # 路径需与「设置 → 刮削 / 发种」里填写的容器内路径一致（即冒号右侧）。
+      # 刮削目录建议与 qBittorrent 的保存目录指向同一份宿主机数据：
+      # - /volume1/downloads/jav:/data/downloads       # 刮削目录：＝下载器保存目录/监控源（发种就地做种）
+      # - /volume1/media/jav:/data/media               # 归档目录：刮削后归档（按 YYYYMM 建子目录）
     environment:
       - CONFIG_DIR=/config
       - PORT=8085
@@ -33,6 +33,10 @@ services:
       - AUTH_PASSWORD=change_me_please
       - AUTH_SECRET=please-change-this-to-a-long-random-string
       - AUTH_SESSION_TTL=604800
+      # ── 封面/图片磁盘缓存上限（MB）──
+      # 图片经 /api/img 代理后落盘到 /config/imgcache：容器重启不丢、多用户/多实例共享、
+      # 命中即零上游请求。超上限按最旧访问淘汰(LRU)。默认 500；设 0 关闭磁盘缓存（仅内存）。
+      # - IMG_DISK_CACHE_MB=500
       # ── 新增数据源域名（AVSOX/AVMOO 域名常变，失效时改这里）──
       # - AVSOX_BASE=https://avsox.click
       # - AVMOO_BASE=https://avmoo.website

@@ -64,6 +64,55 @@ def _abs(href: str) -> str:
     return JAVDB_BASE + href
 
 
+def _looks_like_image(u: str) -> bool:
+    """粗判一个 URL 是否指向图片（用于确认灯箱 href 是大图而非跳转链接）。"""
+    u = (u or "").lower()
+    return bool(re.search(r"\.(jpe?g|png|webp)(\?|#|$)", u)) or "jdbstatic" in u
+
+
+def _hi_res_cover(url: str) -> str:
+    """
+    JavDB 缩略图 → 高清大封面：确定性 URL 升级，零额外网络请求。
+
+    列表/部分详情给的是缩略图，与高清大封面 URL 仅路径段不同、文件名(hash)完全相同：
+      https://c0.jdbstatic.com/thumbs/yw/YwGVre.jpg
+      → https://c0.jdbstatic.com/covers/yw/YwGVre.jpg
+    无 /thumbs/ 段的 URL 原样返回（已是大图或无法识别，前端仍以缩略图兜底，不会变差）。
+    """
+    if not url:
+        return url
+    return re.sub(r"/thumbs/", "/covers/", url, count=1)
+
+
+def _pick_detail_cover(soup) -> str:
+    """
+    取详情页 DVD 完整高清大封面。
+
+    JavDB 改版后，详情页主封面 <img> 的 src 往往是低清缩略占位（懒加载），
+    真正的高清原图在「点击放大」的灯箱链接(a 的 href)上。因此：
+      ① 优先取灯箱原图 href（a.video-cover / 封面容器内的 a / data-fancybox）；
+      ② 退回 <img> 的 data-src（懒加载真图）；
+      ③ 最后才用 <img> 的 src（可能是缩略占位，保底不空）。
+    """
+    cover = ""
+    cover_link = (soup.select_one("a.video-cover[href]")
+                  or soup.select_one("div.column-video-cover a[href]")
+                  or soup.select_one("a[data-fancybox][href]"))
+    if cover_link:
+        href = cover_link.get("href") or ""
+        if _looks_like_image(href):
+            cover = href
+    if not cover:
+        cover_tag = (soup.select_one("div.column-video-cover img")
+                     or soup.select_one("img.video-cover"))
+        if cover_tag:
+            cover = cover_tag.get("data-src") or cover_tag.get("src") or ""
+    if cover.startswith("//"):
+        cover = "https:" + cover
+    # 无论抓到的是 covers 大图还是 thumbs 缩略图，统一升级为高清大封面
+    return _hi_res_cover(cover)
+
+
 # ──────────────────────────────────────────────
 # JavDB 运行时配置（FlareSolverr / 手动 Cookie）
 # 由 config_manager 懒加载，避免改动聚合器与上层签名
@@ -216,11 +265,18 @@ def _parse_list(html: str) -> list[dict]:
             continue
 
         cover = ""
+        cover_thumb = ""
         img = item.select_one("div.cover img") or item.select_one("img")
         if img:
             cover = img.get("src") or img.get("data-src") or ""
             if cover.startswith("//"):
                 cover = "https:" + cover
+            # 列表给的是 thumbs 缩略图：确定性升级为 covers 高清大封面，首页即清晰；
+            # 同时保留原缩略图作前端兜底（大封面偶发 404 时回退，不会变差）。
+            hi = _hi_res_cover(cover)
+            if hi != cover:
+                cover_thumb = cover
+                cover = hi
 
         code = ""
         title = ""
@@ -257,6 +313,7 @@ def _parse_list(html: str) -> list[dict]:
             "code": code,
             "title": title or code,
             "cover": cover,
+            "cover_thumb": cover_thumb,   # 大封面 404 时前端回退用的缩略图（无则空）
             "url": url,
             "source": SOURCE,
             "release_date": release_date,
@@ -367,12 +424,7 @@ def _parse_detail(html: str, url: str) -> Optional[dict]:
         return None
     title = title_tag.get_text(strip=True)
 
-    cover = ""
-    cover_tag = soup.select_one("div.column-video-cover img") or soup.select_one("img.video-cover")
-    if cover_tag:
-        cover = cover_tag.get("src") or cover_tag.get("data-src") or ""
-        if cover.startswith("//"):
-            cover = "https:" + cover
+    cover = _pick_detail_cover(soup)
 
     info = {
         "title": title, "cover": cover, "url": url, "source": SOURCE,

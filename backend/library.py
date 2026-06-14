@@ -13,6 +13,7 @@
   - 后台监控协程 start_monitor()/stop_monitor()，由主程序在启动事件中拉起
 """
 import asyncio
+import os
 import re
 import shutil
 import sys
@@ -473,12 +474,27 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         _log(f"刮削跳过：文件不存在 {filepath}")
         return {"success": False, "filepath": filepath, "error": "文件不存在"}
 
-    code = await _resolve_code(path, config)
-    if not code:
-        _log(f"刮削失败：无法从文件名提取番号 → {path.name}")
-        return {"success": False, "filepath": filepath, "error": "无法从文件名提取番号"}
+    # 优先：用「推送时列表已呈现的元数据」（番号/封面/演员/标签…）。
+    #   命中则直接拿来刮削，免去从文件名重识别番号 + 重新刮削——纯数字番号(如 AVSOX「061326_01」)
+    #   在文件名识别阶段易出错刮错封面/NFO，用已呈现内容最准。未命中再回退常规识别+搜索。
+    pushed_meta = None
+    try:
+        import intake
+        _ih, pushed_meta = await intake.resolve_for_file(
+            path, config.get("scrape_watch_dir", ""), config)
+    except Exception as e:
+        _log(f"读取推送入库元数据失败（忽略，回退常规刮削）：{e}")
+        pushed_meta = None
 
-    _log(f"开始刮削：{path.name} → 番号 {code}")
+    if pushed_meta and pushed_meta.get("code"):
+        code = pushed_meta["code"]
+        _log(f"命中推送元数据：{path.name} → 番号 {code}（用已呈现内容刮削，免重识别/重刮削）")
+    else:
+        code = await _resolve_code(path, config)
+        if not code:
+            _log(f"刮削失败：无法从文件名提取番号 → {path.name}")
+            return {"success": False, "filepath": filepath, "error": "无法从文件名提取番号"}
+        _log(f"开始刮削：{path.name} → 番号 {code}")
 
     status = _get_file_status(path, code)
     if not overwrite and status["has_nfo"] and status["has_cover"]:
@@ -490,28 +506,51 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     provider = (config.get("scrape_translate_provider")
                 or config.get("default_translate_provider", "baidu"))
 
-    _log(f"搜索元数据：{code}（数据源 javbus/javdb，代理 {'有' if proxy else '无'}）")
-    results = await search(query=code, mode=SEARCH_MODE_CODE, proxy=proxy,
-                           sources=["javbus", "javdb"])
-    if not results:
-        _log(f"未找到影片信息：{code}（站点不可达或无该番号）")
-        return {"success": False, "filepath": filepath, "code": code, "error": "未找到影片信息"}
+    if pushed_meta and pushed_meta.get("code"):
+        # 用推送时已呈现的元数据（番号/封面/标题最准）。
+        movie = {k: v for k, v in pushed_meta.items() if not k.startswith("_")}
+        # 但推送可能发生在详情尚未加载完时（点太快），元数据不全。此时【回到该条目自己的
+        # 数据源、按它的 url 补抓】缺失字段，而不是按番号盲目搜索（纯数字番号会搜错来源/错片）。
+        #   - detail_loaded=False：列表级条目，详情没加载过 → 补抓；
+        #   - 或关键字段缺失（标题/封面）作兜底触发。
+        # 只补「当前缺的」字段，已有的（来自展示）不覆盖；不同源字段差异（如 AVSOX 有简介、
+        # 别的源没有）天然由「只查这一个源」保证——该源没有的就是没有，不去别处硬凑。
+        incomplete = (not movie.get("detail_loaded")) or not movie.get("title") or not movie.get("cover")
+        if incomplete and movie.get("url"):
+            try:
+                from scrapers import enrich
+                enriched = await enrich([{"url": movie["url"], "source": movie.get("source", "")}], proxy=proxy)
+                if enriched and enriched[0]:
+                    filled = [k for k, v in enriched[0].items() if v and not movie.get(k)]
+                    for k in filled:
+                        movie[k] = enriched[0][k]
+                    _log(f"推送元数据不全，回原源补抓：{code}（{movie.get('source','')}，补全 {len(filled)} 项）")
+            except Exception as e:
+                _log(f"原源补抓失败（用已有内容继续）：{code}: {e}")
+        _log(f"用推送元数据刮削：{code} 标题《{(movie.get('title') or '')[:40]}》来源 {movie.get('source','')}")
+    else:
+        _log(f"搜索元数据：{code}（数据源 javbus/javdb，代理 {'有' if proxy else '无'}）")
+        results = await search(query=code, mode=SEARCH_MODE_CODE, proxy=proxy,
+                               sources=["javbus", "javdb"])
+        if not results:
+            _log(f"未找到影片信息：{code}（站点不可达或无该番号）")
+            return {"success": False, "filepath": filepath, "code": code, "error": "未找到影片信息"}
 
-    # 列表条目可能缺详情，补全第一条
-    movie = results[0]
-    _log(f"命中影片：{code} 标题《{(movie.get('title') or '')[:40]}》来源 {movie.get('source','')}")
-    if not movie.get("actors") and movie.get("url"):
-        try:
-            from scrapers import enrich
-            enriched = await enrich([{"url": movie["url"], "source": movie.get("source", "")}], proxy=proxy)
-            if enriched and enriched[0]:
-                detail = enriched[0]
-                for k, v in detail.items():
-                    if v and not movie.get(k):
-                        movie[k] = v
-                _log(f"详情补全完成：{code}（演员 {len(movie.get('actors') or [])} 人）")
-        except Exception as e:
-            _log(f"详情补全失败 {code}: {e}")
+        # 列表条目可能缺详情，补全第一条
+        movie = results[0]
+        _log(f"命中影片：{code} 标题《{(movie.get('title') or '')[:40]}》来源 {movie.get('source','')}")
+        if not movie.get("actors") and movie.get("url"):
+            try:
+                from scrapers import enrich
+                enriched = await enrich([{"url": movie["url"], "source": movie.get("source", "")}], proxy=proxy)
+                if enriched and enriched[0]:
+                    detail = enriched[0]
+                    for k, v in detail.items():
+                        if v and not movie.get(k):
+                            movie[k] = v
+                    _log(f"详情补全完成：{code}（演员 {len(movie.get('actors') or [])} 人）")
+            except Exception as e:
+                _log(f"详情补全失败 {code}: {e}")
 
     # ── 标题/简介翻译 ──
     # 番号（字母+数字）不翻译，仅作前缀；只对真正的日文片名/简介长句翻译。
@@ -587,14 +626,44 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
 
 
 # ─────────────────────────────────────────
-# 归档移动：视频(重命名为番号) + NFO/封面 → output_dir/YYYYMM/番号/
+# 归档：视频(重命名为番号) + NFO/封面 → output_dir/YYYYMM/番号/
+#   V1.5 统一：归档方式由全局 archive_mode 决定（hardlink/copy 保留原文件；move 移动后清原目录），
+#   与发种流水线共用同一归档目录与按年月结构。
 # ─────────────────────────────────────────
 
-def _archive_file(video_path: Path, output_dir: str, code: str) -> dict:
+def _transfer(src: Path, dst: Path, mode: str) -> bool:
+    """按归档模式把 src 落到 dst：move=移动；hardlink=硬链接(跨卷自动退化为复制)；copy=复制。"""
+    try:
+        if dst.exists():
+            dst.unlink()
+    except Exception:
+        pass
+    try:
+        if mode == "move":
+            shutil.move(str(src), str(dst))
+        elif mode == "copy":
+            shutil.copy2(str(src), str(dst))
+        else:  # hardlink（默认）
+            try:
+                os.link(str(src), str(dst))
+            except OSError:
+                shutil.copy2(str(src), str(dst))   # 跨卷无法硬链 → 复制
+        return True
+    except Exception as e:
+        _log(f"归档落地失败 {src.name}（{mode}）: {e}")
+        return False
+
+
+def _archive_file(video_path: Path, output_dir: str, code: str,
+                  mode: str = "hardlink", rename: bool = True) -> dict:
     """
-    把视频重命名为「番号.后缀」，连同以番号命名的 NFO/封面，
-    移动到 归档目录/当前年月/番号/ 子目录下（Emby 单片单目录布局）。
+    把视频归档到 归档目录/年月/番号/ 子目录下（Emby 单片单目录布局）。
+    rename：开（刮削开）= 视频改名「番号.后缀」、随带番号命名的 NFO/封面；
+            关（刮削关）= 保留原文件名、不带 NFO/封面。
+    mode：hardlink/copy 保留原下载文件（原文件留存供做种/辅种）；move 移动（原文件离开下载目录）。
+    返回 {archived, moved_original, target_dir, files}。
     """
+    mode = (mode or "hardlink").lower()
     safe_code = _safe_name(code) if code else video_path.stem
     out = Path(output_dir)
     target_dir = out / datetime.now().strftime("%Y%m") / safe_code
@@ -602,35 +671,33 @@ def _archive_file(video_path: Path, output_dir: str, code: str) -> dict:
         target_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         _log(f"无法创建归档目录 {target_dir}: {e}")
-        return {"moved": False, "error": f"无法创建归档目录: {e}"}
+        return {"archived": False, "moved_original": False, "error": f"无法创建归档目录: {e}"}
 
     folder = video_path.parent
-    moved = []
+    done = []
 
-    # 1) 视频本体 → 番号.后缀
-    video_dst = target_dir / f"{safe_code}{video_path.suffix.lower()}"
-    if video_dst.exists():
-        video_dst = target_dir / f"{safe_code}_{uuid.uuid4().hex[:6]}{video_path.suffix.lower()}"
-    try:
-        shutil.move(str(video_path), str(video_dst))
-        moved.append(video_dst.name)
-    except Exception as e:
-        _log(f"视频移动失败 {video_path.name}: {e}")
-        return {"moved": False, "error": f"视频移动失败: {e}", "target_dir": str(target_dir)}
+    # 1) 视频本体 → 番号.后缀（刮削关则保留原文件名）
+    video_name = f"{safe_code}{video_path.suffix.lower()}" if (rename and code) else video_path.name
+    video_dst = target_dir / video_name
+    if not _transfer(video_path, video_dst, mode):
+        return {"archived": False, "moved_original": False,
+                "error": "视频归档失败", "target_dir": str(target_dir)}
+    done.append(video_dst.name)
 
     # 2) 以番号命名的 NFO/封面（刮削时已按番号生成）
     for extra in (folder / f"{safe_code}.nfo",
                   folder / f"{safe_code}-poster.jpg",
                   folder / f"{safe_code}-fanart.jpg"):
         if extra.exists():
-            try:
-                shutil.move(str(extra), str(target_dir / extra.name))
-                moved.append(extra.name)
-            except Exception as e:
-                _log(f"附属文件移动失败 {extra.name}: {e}")
+            # NFO/封面体积小：move 模式随视频一起移走；hardlink/copy 模式一律复制一份（不动原件）
+            sub_mode = "move" if mode == "move" else "copy"
+            if _transfer(extra, target_dir / extra.name, sub_mode):
+                done.append(extra.name)
 
-    _log(f"归档移动：{len(moved)} 个文件 → {target_dir} （{', '.join(moved)}）")
-    return {"moved": bool(moved), "target_dir": str(target_dir), "files": moved}
+    how = {"move": "移动", "copy": "复制", "hardlink": "硬链接"}.get(mode, mode)
+    _log(f"归档（{how}）：{len(done)} 个文件 → {target_dir} （{', '.join(done)}）")
+    return {"archived": bool(done), "moved_original": (mode == "move"),
+            "target_dir": str(target_dir), "files": done}
 
 
 def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int):
@@ -690,19 +757,44 @@ def _iter_video_files(watch_dir: Path):
         _log(f"遍历监控目录失败: {e}")
 
 
+def _under_any(path: Path, roots: set) -> bool:
+    """path 是否等于、或位于 roots 中任一目录的子树下（均按 resolve 比较）。
+    用于发种占用第二层保护：roots 由 publish.active_paths 提供（番号文件夹/原始下载内容路径）。"""
+    if not roots:
+        return False
+    try:
+        p = path.resolve()
+    except Exception:
+        return False
+    for r in roots:
+        if p == r or r in p.parents:
+            return True
+    return False
+
+
 async def _process_completed_file(video_path: Path, config: dict) -> dict:
-    """对一个判定为下载完成的视频文件执行：刮削 → 按配置移动归档。"""
+    """对一个判定为下载完成的视频文件执行：刮削(可关) → 按配置归档(可关)。"""
     fp = str(video_path)
     output_dir = config.get("scrape_output_dir", "").strip()
     move_on_fail = config.get("scrape_move_on_fail", True)
+    # 全局刮削/归档总开关（监控 & 发种共用）；兼容旧 publish_* 键
+    scrape_meta = config.get("scrape_meta_enabled", config.get("publish_scrape_enabled", True))
+    archive_on = config.get("archive_enabled", config.get("publish_archive_enabled", True))
 
-    try:
-        scrape_res = await _scrape_one(fp, overwrite=False, config=config)
-    except Exception as e:
-        # 刮削过程意外报错也不应阻止移动归档（符合「刮削正常运行但刮不到也移动」）
-        _log(f"刮削过程异常（将按失败处理）：{video_path.name} — {e}")
-        scrape_res = {"success": False, "filepath": fp, "code": await _resolve_code(video_path, config),
-                      "error": f"刮削异常: {e}"}
+    if scrape_meta:
+        try:
+            scrape_res = await _scrape_one(fp, overwrite=False, config=config)
+        except Exception as e:
+            # 刮削过程意外报错也不应阻止归档（符合「刮削正常运行但刮不到也归档」）
+            _log(f"刮削过程异常（将按失败处理）：{video_path.name} — {e}")
+            scrape_res = {"success": False, "filepath": fp, "code": await _resolve_code(video_path, config),
+                          "error": f"刮削异常: {e}"}
+    else:
+        # 刮削关：不抓元数据/不写 NFO/封面，仅识别番号用于归档分目录（保留原文件名）
+        _log(f"刮削已关闭，仅识别番号后归档（保留原文件名）：{video_path.name}")
+        scrape_res = {"success": True, "filepath": fp,
+                      "code": await _resolve_code(video_path, config),
+                      "title_zh": "", "error": "", "skipped": True}
     # success 含「已跳过」；真正失败（找不到番号/影片信息）才是 success=False
     failed = not scrape_res.get("success")
 
@@ -716,25 +808,32 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
-    # 刮削成功，或失败但配置允许，则移动归档
-    if output_dir and (not failed or move_on_fail):
+    # 归档：需 归档总开关开 + 配了归档目录 + (刮削成功 或 允许失败仍归档)
+    if not archive_on:
+        _log(f"归档已关闭（仅刮削，保留原处）：{video_path.name}")
+        record["note"] = "归档已关闭，保留原处"
+    elif output_dir and (not failed or move_on_fail):
         if failed:
-            _log(f"刮削未成功但按配置仍移动归档：{video_path.name}")
+            _log(f"刮削未成功但按配置仍归档：{video_path.name}")
         watch_dir = Path(config.get("scrape_watch_dir", ""))
         min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
         code = scrape_res.get("code", "") or await _resolve_code(video_path, config)
         src_parent = video_path.parent
-        mv = _archive_file(video_path, output_dir, code)
-        record["moved"] = mv.get("moved", False)
+        # V1.5 统一：归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
+        mode = (config.get("archive_mode") or "hardlink").lower()
+        mv = _archive_file(video_path, output_dir, code, mode=mode, rename=scrape_meta)
+        record["moved"] = mv.get("archived", False)
+        record["archive_mode"] = mode
         record["target_dir"] = mv.get("target_dir", "")
-        if mv.get("moved"):
-            # 移动成功后清理原下载目录（含遗留广告/样板文件，连同子目录删除）
+        if mv.get("moved_original"):
+            # 仅 move 模式：原文件已移走，清理原下载目录（含遗留广告/样板文件，连同子目录删除）。
+            # hardlink/copy 模式保留原文件（可继续做种/辅种），绝不删原目录。
             _cleanup_source(src_parent, watch_dir, min_bytes)
     elif not output_dir:
-        _log(f"未配置归档目录，仅刮削未移动：{video_path.name}")
-        record["note"] = "未配置归档目录，仅刮削未移动"
+        _log(f"未配置归档目录，仅刮削未归档：{video_path.name}")
+        record["note"] = "未配置归档目录，仅刮削未归档"
     else:
-        _log(f"刮削失败且未开启「失败仍移动」，保留原处：{video_path.name}")
+        _log(f"刮削失败且未开启「失败仍归档」，保留原处：{video_path.name}")
 
     return record
 
@@ -763,7 +862,20 @@ async def _scan_once(config: dict) -> int:
     out_dir = config.get("scrape_output_dir", "").strip()
     now = time.time()
     processed = 0
-    n_total = n_done_before = n_incomplete = n_small = n_waiting = n_extra = 0
+    n_total = n_done_before = n_incomplete = n_small = n_waiting = n_extra = n_publish = 0
+
+    # 发种占用：这些文件正被发种流水线原地做种，监控绝不能移动/删除（否则做种丢文件）。
+    # 两层保护互补，命中任一即跳过：
+    #   ① 按番号 active_codes —— 路径对不上（如未拿到 content_path）但番号识别得出时仍保护；
+    #   ② 按路径 active_paths —— 番号识别不出（命名怪异/嵌套深）但文件落在发种占用路径下时仍保护。
+    # 懒加载导入避免与 publish.py 的循环依赖。
+    try:
+        import publish as _publish
+        pub_active = _publish.active_codes()
+        pub_paths = _publish.active_paths(config)
+    except Exception:
+        pub_active = set()
+        pub_paths = set()
 
     _log(f"开始扫描监控目录：{watch}（归档目录：{out_dir or '未配置'}）")
     for vf in _iter_video_files(watch_dir):
@@ -772,6 +884,24 @@ async def _scan_once(config: dict) -> int:
         if fp in _processed:
             n_done_before += 1
             continue
+        # 发种任务占用（未终止）→ 跳过本轮，不入 _processed：待发种结束(终态)后自动恢复正常归档。
+        # ① 按番号：识别必须与归档同深度（上溯各级父目录，复用 _recognize_code）——否则视频嵌在
+        #    「番号/子目录/video.mp4」这类多层结构里时，这里只看文件名+直接父目录会识别不出番号、
+        #    不跳过，而归档却能从祖父目录认出番号照常移动+删原目录，把正在做种的发种数据搬空。
+        # ② 按路径：命名怪异、连父目录都不含番号时，只要文件落在发种占用路径（番号文件夹/原始下载
+        #    内容）的子树下就跳过，作为番号识别的兜底。
+        if pub_active or pub_paths:
+            occupied = False
+            if pub_active:
+                _code_guess = _recognize_code(vf, watch)
+                if _code_guess and _norm(_code_guess) in pub_active:
+                    occupied = True
+            if not occupied and pub_paths and _under_any(vf, pub_paths):
+                occupied = True
+            if occupied:
+                n_publish += 1
+                _size_history.pop(fp, None)
+                continue
         # 仍有 qB 未完成分片标记 → 正在下载
         if _is_incomplete(vf):
             n_incomplete += 1
@@ -833,8 +963,17 @@ async def _scan_once(config: dict) -> int:
 
     _log(f"扫描完成：共 {n_total} 个视频 → 本次处理 {processed}，"
          f"等待稳定 {n_waiting}，下载中 {n_incomplete}，过小 {n_small}，"
-         f"广告/赠片 {n_extra}，先前已处理 {n_done_before}")
+         f"广告/赠片 {n_extra}，发种占用 {n_publish}，先前已处理 {n_done_before}")
     return processed
+
+
+def _monitor_should_run(config: dict) -> bool:
+    """监控是否该运行：刮削、归档任一开启即运行（无单独的监控开关）。
+    两者都关＝无事可做＝不监控。监控只负责非发种的下载/手动放入文件，按这两个全局
+    开关统一处理（发种任务占用的文件由 active_codes/active_paths 自动跳过）。"""
+    scrape_meta = config.get("scrape_meta_enabled", config.get("publish_scrape_enabled", True))
+    archive_on = config.get("archive_enabled", config.get("publish_archive_enabled", True))
+    return bool(scrape_meta or archive_on)
 
 
 async def _monitor_loop():
@@ -842,11 +981,11 @@ async def _monitor_loop():
     _log("刮削监控协程已启动")
     while True:
         config = load_config()
-        if not config.get("scrape_enabled"):
+        if not _monitor_should_run(config):
             _monitor_state["enabled"] = False
-            _monitor_state["message"] = "监控已停用"
+            _monitor_state["message"] = "未启用（刮削、归档都关闭）"
             _monitor_state["running"] = False
-            _log("检测到监控开关已关闭，协程退出")
+            _log("检测到刮削与归档均关闭，监控协程退出")
             return
         _monitor_state["enabled"] = True
         _monitor_state["watch_dir"] = config.get("scrape_watch_dir", "")
@@ -868,12 +1007,12 @@ async def _monitor_loop():
 
 
 def start_monitor():
-    """主程序启动事件中调用；若配置启用则拉起监控协程。"""
+    """主程序启动事件中调用；刮削或归档任一开启则拉起监控协程。"""
     global _monitor_task
     config = load_config()
-    if not config.get("scrape_enabled"):
-        _log("启动：刮削监控未启用（可在设置中开启）")
-        _monitor_state["message"] = "未启用（可在设置中开启）"
+    if not _monitor_should_run(config):
+        _log("启动：刮削与归档均关闭，监控未启用")
+        _monitor_state["message"] = "未启用（刮削、归档都关闭）"
         return
     if _monitor_task and not _monitor_task.done():
         _log("启动：监控已在运行，跳过")
@@ -888,15 +1027,15 @@ def ensure_monitor():
     """配置变更后调用：按最新配置启动或保持监控。"""
     global _monitor_task
     config = load_config()
-    if config.get("scrape_enabled"):
+    if _monitor_should_run(config):
         if not _monitor_task or _monitor_task.done():
-            _log(f"配置变更：启用监控，拉起协程（监控目录 {config.get('scrape_watch_dir') or '未配置'}）")
+            _log(f"配置变更：刮削/归档已开，拉起监控协程（监控目录 {config.get('scrape_watch_dir') or '未配置'}）")
             _monitor_task = asyncio.create_task(_monitor_loop())
         else:
             _log("配置变更：监控已在运行，沿用现有协程（新配置下轮扫描生效）")
     else:
-        _log("配置变更：监控开关为关闭状态")
-    # 停用时由循环自身检测 scrape_enabled 后退出
+        _log("配置变更：刮削与归档均关闭，监控将停止")
+    # 停用时由循环自身检测后退出
 
 
 # ─────────────────────────────────────────
