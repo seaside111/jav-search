@@ -87,10 +87,12 @@ async def add_torrent(
     paused: bool = False,
     skip_checking: bool = False,
     upload_limit_kbps: int = 0,
+    reannounce: bool = True,
 ) -> dict:
     """
     向当前下载器添加种子（链接或字节）。save_path/category 为 None 时用配置默认值。
     upload_limit_kbps>0 时给该种子设单种上传限速（防超 PT 单种限速被封）。
+    reannounce=True 时加种后自动强制 tracker 重新汇报，规避「工作中却无 peer」。
     """
     t = active_type(config)
     url, user, pwd = _conn(config, t)
@@ -104,12 +106,12 @@ async def add_torrent(
         return await transmission.add_torrent(
             url, user, pwd, download_url=download_url, torrent_bytes=torrent_bytes,
             save_path=sp, category=cat, paused=paused, skip_checking=skip_checking,
-            upload_limit_kbps=upload_limit_kbps,
+            upload_limit_kbps=upload_limit_kbps, reannounce=reannounce,
         )
     return await qbittorrent.add_torrent(
         url, user, pwd, download_url=download_url, torrent_bytes=torrent_bytes,
         save_path=sp, category=cat, paused=paused, skip_checking=skip_checking,
-        upload_limit_kbps=upload_limit_kbps,
+        upload_limit_kbps=upload_limit_kbps, reannounce=reannounce,
     )
 
 

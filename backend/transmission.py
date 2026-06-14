@@ -144,6 +144,7 @@ async def add_torrent(
     paused: bool = False,
     skip_checking: bool = False,  # Transmission 不支持跳过校验，留参保持接口一致
     upload_limit_kbps: int = 0,
+    reannounce: bool = True,
     timeout: int = 30,
 ) -> dict:
     """
@@ -179,8 +180,8 @@ async def add_torrent(
         return {"success": False, "error": "下载链接为空"}
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        data, _sid, err = await _rpc(client, url, _auth(username, password), "",
-                                     "torrent-add", args)
+        data, sid, err = await _rpc(client, url, _auth(username, password), "",
+                                    "torrent-add", args)
         if err:
             return {"success": False, "error": err}
         result = (data or {}).get("result", "")
@@ -189,11 +190,19 @@ async def add_torrent(
         a = (data.get("arguments") or {})
         if "torrent-duplicate" in a:
             dup = a["torrent-duplicate"]
+            ih = (dup.get("hashString") or "").lower()
+            if reannounce and ih:
+                await _rpc(client, url, _auth(username, password), sid,
+                           "torrent-reannounce", {"ids": [ih]})
             return {"success": True, "message": "种子已存在于 Transmission（重复）",
-                    "hash": (dup.get("hashString") or "").lower(), "duplicate": True}
+                    "hash": ih, "duplicate": True}
         added = a.get("torrent-added") or {}
-        return {"success": True, "message": "已添加到 Transmission",
-                "hash": (added.get("hashString") or "").lower()}
+        ih = (added.get("hashString") or "").lower()
+        # 强制 tracker 立即汇报，规避新加种子卡在「工作中却无 peer」。
+        if reannounce and ih:
+            await _rpc(client, url, _auth(username, password), sid,
+                       "torrent-reannounce", {"ids": [ih]})
+        return {"success": True, "message": "已添加到 Transmission", "hash": ih}
 
 
 async def delete_torrents(tr_url: str, username: str, password: str,

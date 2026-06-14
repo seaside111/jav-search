@@ -62,19 +62,135 @@ def _infohash_from_magnet(url: str) -> str:
         return ""
 
 
-async def _set_upload_limit(client, qb_url: str, infohash: str, kbps: int) -> bool:
-    """对指定种子设单种上传限速（qB 用字节/秒）。返回是否成功。"""
-    if not infohash or kbps <= 0:
+async def _post_upload_limit(client, qb_url: str, infohash: str, limit_bytes: int) -> bool:
+    """调用 setUploadLimit 设单种上传限速（qB 用字节/秒）。返回接口是否回 200。
+    注意：qB 对【不存在/未注册的 hash 也会回 200】，因此不能只看这里的返回判定成功，
+    必须再用 _get_upload_limit 回查确认限速真正落到了种子句柄上。"""
+    if not infohash or limit_bytes <= 0:
         return False
     try:
         resp = await client.post(
             f"{_base(qb_url)}/api/v2/torrents/setUploadLimit",
-            data={"hashes": infohash.lower(), "limit": str(int(kbps) * 1024)},
+            data={"hashes": infohash.lower(), "limit": str(int(limit_bytes))},
             headers=_headers(qb_url),
         )
         return resp.status_code == 200
     except Exception:
         return False
+
+
+async def _get_upload_limit(client, qb_url: str, infohash: str) -> int:
+    """回查指定种子当前的单种上传限速（字节/秒）。未知 hash 返回 -1（区别于 0=不限）。"""
+    if not infohash:
+        return -1
+    try:
+        resp = await client.post(
+            f"{_base(qb_url)}/api/v2/torrents/uploadLimit",
+            data={"hashes": infohash.lower()},
+            headers=_headers(qb_url),
+        )
+        if resp.status_code != 200:
+            return -1
+        data = resp.json()
+        if isinstance(data, dict):
+            # 返回 {hash: limit_bytes}；hash 不存在时该键缺失
+            val = data.get(infohash.lower())
+            return int(val) if val is not None else -1
+    except Exception:
+        pass
+    return -1
+
+
+async def _ensure_upload_limit(client, qb_url: str, infohash: str, kbps: int,
+                               tries: int = 6, delay: float = 1.0) -> bool:
+    """设单种上传限速并【回查确认真正生效】。
+    磁力 add 时 upLimit 常被忽略（彼时无元数据），add 后立刻 setUploadLimit 也可能因
+    种子尚未完全注册而落空——且 qB 对未知 hash 仍回 200，光看返回会误判成功。
+    故这里反复「设置→读回比对」，直到读回值等于目标值或重试用尽。"""
+    if not infohash or kbps <= 0:
+        return False
+    target = int(kbps) * 1024
+    for _ in range(tries):
+        await _post_upload_limit(client, qb_url, infohash, target)
+        if await _get_upload_limit(client, qb_url, infohash) == target:
+            return True
+        await asyncio.sleep(delay)
+    return False
+
+
+async def _list_hashes(client, qb_url: str) -> set:
+    """取 qB 当前全部种子的 infohash 集合（小写）。失败返回空集。"""
+    try:
+        resp = await client.get(f"{_base(qb_url)}/api/v2/torrents/info",
+                                headers=_headers(qb_url))
+        if resp.status_code == 200:
+            data = resp.json()
+            return {(t.get("hash") or "").lower() for t in data if isinstance(t, dict)}
+    except Exception:
+        pass
+    return set()
+
+
+async def _resolve_added_hash(client, qb_url: str, pre_hashes: set,
+                              magnet_ih: str, tries: int = 8,
+                              delay: float = 1.0) -> str:
+    """取 qB 实际入库的新种子 infohash：用 add 前后列表差集（最权威，能扛 v2/混合种、
+    base32 磁力导致的 btih 与实际 hash 不一致）。多个新增时优先与磁力 btih 吻合的那个；
+    始终拿不到则兜底返回磁力 btih。"""
+    magnet_ih = (magnet_ih or "").lower()
+    # 磁力本就已在 qB（重复添加）：差集永远为空，无需空等，直接用其 btih。
+    if magnet_ih and magnet_ih in pre_hashes:
+        return magnet_ih
+    for _ in range(tries):
+        cur = await _list_hashes(client, qb_url)
+        new = [h for h in cur if h not in pre_hashes]
+        if new:
+            if magnet_ih and magnet_ih in new:
+                return magnet_ih
+            return new[0]
+        await asyncio.sleep(delay)
+    return magnet_ih
+
+
+async def _reannounce(client, qb_url: str, infohash: str) -> None:
+    """强制该种子立即向 tracker 重新汇报（reannounce）。失败静默。"""
+    if not infohash:
+        return
+    try:
+        await client.post(f"{_base(qb_url)}/api/v2/torrents/reannounce",
+                          data={"hashes": infohash.lower()},
+                          headers=_headers(qb_url))
+    except Exception:
+        pass
+
+
+# 持有后台 reannounce 任务的强引用，避免任务被 GC 提前回收（asyncio 已知坑）。
+_BG_TASKS: set = set()
+
+
+def _spawn_reannounce(qb_url: str, username: str, password: str, infohash: str,
+                      delays=(5, 20)) -> None:
+    """后台延迟多次强制 reannounce：新加种子 qB 有时迟迟不 announce，私有站会卡在
+    「tracker 工作中却连不到 peer」，须手动强制汇报后 peer 才回来。这里替用户在加种后
+    隔几秒自动汇报几次（用独立短连接，不阻塞 add 的响应）。"""
+    if not infohash:
+        return
+    async def _runner():
+        for d in delays:
+            await asyncio.sleep(d)
+            try:
+                async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+                    ok, _ = await _login(c, qb_url, username, password)
+                    if ok:
+                        await _reannounce(c, qb_url, infohash)
+            except Exception:
+                pass
+    try:
+        task = asyncio.get_event_loop().create_task(_runner())
+        _BG_TASKS.add(task)
+        task.add_done_callback(_BG_TASKS.discard)
+    except Exception:
+        pass
 
 
 def _base(qb_url: str) -> str:
@@ -209,6 +325,7 @@ async def add_torrent(
     paused: bool = False,
     skip_checking: bool = False,
     upload_limit_kbps: int = 0,
+    reannounce: bool = True,
     timeout: int = 20,
 ) -> dict:
     """
@@ -231,6 +348,10 @@ async def add_torrent(
         ok, msg = await _login(client, qb_url, username, password)
         if not ok:
             return {"success": False, "error": msg}
+
+        # 加种前快照现有 hash，供 add 后用差集拿到 qB 实际入库的真实 hash
+        # （限速回查、tracker 重新汇报、返回 hash 给上层都依赖它）。
+        pre_hashes = await _list_hashes(client, qb_url)
 
         # 关闭自动种子管理，savepath 才会生效
         data = {
@@ -282,17 +403,26 @@ async def add_torrent(
             return {"success": False, "error": f"推送失败 HTTP {resp.status_code} {text[:80]}"}
         # 200（"Ok." 或个别版本空体）即视为成功。
 
-        # 单种上传限速：磁力链在 add 时 upLimit 常被 qB 忽略（add 时尚无元数据，
-        # 限速没落到种子句柄上）。add 成功后再用磁力 infohash 显式 setUploadLimit 一次，
-        # 确保新推送的磁力种子立即生效（.torrent 字节走 add 的 upLimit 已生效，无需此步）。
-        if upload_limit_kbps and upload_limit_kbps > 0:
-            ih = _infohash_from_magnet(download_url) if download_url else ""
-            if ih:
-                for _ in range(3):
-                    if await _set_upload_limit(client, qb_url, ih, upload_limit_kbps):
-                        break
-                    await asyncio.sleep(0.5)
-        return {"success": True, "message": "已推送到 qBittorrent"}
+        # 拿到 qB 实际入库的真实 hash（add 前后差集，扛 v2/base32 磁力的 btih 不一致）。
+        # 限速回查、tracker 重新汇报、返回给上层都基于它。
+        magnet_ih = _infohash_from_magnet(download_url) if download_url else ""
+        real_ih = await _resolve_added_hash(client, qb_url, pre_hashes, magnet_ih)
+
+        # 单种上传限速：add 时 upLimit 对磁力常被忽略（彼时无元数据），且 qB 对未知 hash
+        # 也回 200——必须 add 后显式设置并【回查确认】真正落到种子句柄上才算数。
+        if upload_limit_kbps and upload_limit_kbps > 0 and real_ih:
+            ok_lim = await _ensure_upload_limit(client, qb_url, real_ih, upload_limit_kbps)
+            if not ok_lim:
+                print(f"[qB] 单种限速未能确认生效 hash={real_ih[:12]} "
+                      f"目标={upload_limit_kbps}KB/s", flush=True)
+
+        # 强制 tracker 立即汇报：先就地汇报一次，再后台延迟补汇报几次，
+        # 规避新加种子卡在「工作中却无 peer」、须手动强制汇报才回来的问题。
+        if reannounce and real_ih:
+            await _reannounce(client, qb_url, real_ih)
+            _spawn_reannounce(qb_url, username, password, real_ih)
+
+        return {"success": True, "message": "已推送到 qBittorrent", "hash": real_ih}
 
 
 async def delete_torrents(qb_url: str, username: str, password: str,

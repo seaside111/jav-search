@@ -25,6 +25,7 @@ from scrapers import javdb as javdb_scraper
 from scrapers import fc2 as fc2_scraper
 from translator import translate
 from config_manager import load as load_config, save as save_config, MAX_RESULTS_HARD_CAP
+import jackett
 from jackett import search_jackett
 from scrapers._sukebei import search_sukebei
 import qbittorrent
@@ -813,25 +814,14 @@ async def api_imagehost_test():
 
 @app.get("/api/jackett/status")
 async def api_jackett_status():
-    """检测 Jackett 是否可用"""
+    """检测 Jackett 是否可用（轻量探活，不触发真实搜索，详见 jackett.check_status）。"""
     config = load_config()
-    jackett_url = config.get("jackett_url", "").strip()
-    api_key = config.get("jackett_api_key", "").strip()
-
-    if not jackett_url or not api_key:
-        return {"configured": False, "online": False, "message": "未配置"}
-
-    import httpx
-    try:
-        url = jackett_url.rstrip("/") + f"/api/v2.0/indexers/all/results?apikey={api_key}&Query=test"
-        async with httpx.AsyncClient(timeout=8) as client:
-            resp = await client.get(url)
-        if resp.status_code == 200:
-            return {"configured": True, "online": True, "message": "连接正常"}
-        else:
-            return {"configured": True, "online": False, "message": f"HTTP {resp.status_code}"}
-    except Exception as e:
-        return {"configured": True, "online": False, "message": str(e)}
+    timeout = int(config.get("jackett_timeout", 15) or 15)
+    return await jackett.check_status(
+        config.get("jackett_url", "").strip(),
+        config.get("jackett_api_key", "").strip(),
+        timeout=timeout,
+    )
 
 
 @app.get("/api/jackett/download")

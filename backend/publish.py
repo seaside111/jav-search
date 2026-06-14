@@ -393,8 +393,12 @@ async def _step_download_start(t: dict, config: dict) -> bool:
     """推送磁力到下载器并记录 infohash。"""
     before = {x["hash"] for x in await downloader.list_torrents(config)}
     cat = (config.get("crossseed_category") or "mteam").strip()
+    # 这是「发布页下载源片用的磁力」——属非 PT 站种子，套用全局磁力限速；
+    # 真正按发布页限速跑的只有后面 _step_reseed 取回的官方做种种子。
+    magnet_limit = int(config.get("magnet_upload_limit_kbps", 0) or 0)
     res = await downloader.add_torrent(config, download_url=t["download_url"],
-                                       category=cat, paused=False)
+                                       category=cat, paused=False,
+                                       upload_limit_kbps=magnet_limit)
     if not res.get("success"):
         _set(t, state=FAILED, error=f"推送下载失败：{res.get('error', '')}")
         return False
@@ -963,15 +967,32 @@ async def _step_reseed(t: dict, config: dict):
                  or downloader.default_save_path(config))
     cat = (config.get("crossseed_category") or "mteam").strip()
     up_limit = int(config.get("publish_upload_limit_kbps", 0) or 0)
+    before = {x["hash"] for x in await downloader.list_torrents(config)}
     res = await downloader.add_torrent(config, torrent_bytes=tor["content"],
                                        save_path=save_host, category=cat,
                                        skip_checking=True, paused=False,
                                        upload_limit_kbps=up_limit)
-    if res.get("success"):
-        _set(t, state=SEEDING, seed_started=time.time(),
-             note="已加入下载器做种（已发布完成）")
-    else:
+    if not res.get("success"):
         _set(t, state=SEEDING, error=f"做种添加失败（已发布）：{res.get('error', '')}")
+        return
+    # 关键：把做种用的 infohash 改成【官方种子在下载器里实际入库的 hash】。
+    #   M-Team 取回的官方种子会改写 info（source/字段），其 infohash 与本地制种时记录的
+    #   infohash_new 往往不同；若不回写，监控/停种检查仍按旧 hash 找 → 误判「找不到做种种子」。
+    seed_ih = (res.get("hash") or "").lower()
+    if not seed_ih:
+        for _ in range(8):
+            await asyncio.sleep(2)
+            after = await downloader.list_torrents(config)
+            new = [x for x in after if x["hash"] not in before]
+            if new:
+                seed_ih = new[0]["hash"]
+                break
+    fields = {"state": SEEDING, "seed_started": time.time(),
+              "note": "已加入下载器做种（已发布完成）"}
+    if seed_ih:
+        fields["infohash_new"] = seed_ih
+        fields["note"] = f"已加入下载器做种 infohash={seed_ih[:12]}（已发布完成）"
+    _set(t, **fields)
 
 
 async def _step_seed_check(t: dict, config: dict):
