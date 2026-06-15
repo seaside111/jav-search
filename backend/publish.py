@@ -46,7 +46,7 @@ import torrentmaker
 import imagehost
 from scrapers import search as scraper_search, SEARCH_MODE_CODE
 from library import (
-    VIDEO_EXTS, _safe_name, _download_image, _cover_referer, _build_nfo,
+    VIDEO_EXTS, _safe_name, _download_image, _cover_referer, _fetch_cover, _build_nfo,
     _strip_code_prefix, _compose_title,
 )
 
@@ -743,7 +743,8 @@ async def _step_process(t: dict, config: dict):
     if scrape_on:
         cover_url = movie.get("cover", "") if movie else ""
         if cover_url:
-            img = await _download_image(cover_url, proxy, _cover_referer(cover_url))
+            # 优先复用首页/详情已缓存的封面（命中即零上游请求）；未命中再按正确 Referer 回源（含 FC2 防盗链兜底）
+            img = await _fetch_cover(cover_url, proxy)
             if img:
                 try:
                     (pub_folder / "poster.jpg").write_bytes(img)

@@ -1,6 +1,7 @@
 """
 JAV Search — FastAPI 后端主程序
 """
+import logging
 import os
 import re
 import sys
@@ -40,6 +41,23 @@ import logbus
 import library
 import intake
 import auth
+
+
+# ── 抑制 uvicorn「Invalid HTTP request received.」噪声日志 ──────────────────
+# 该警告来自 uvicorn 协议层（logger=uvicorn.error），当端口收到非 HTTP/1.x 字节时触发：
+# 典型是 HTTPS/TLS 握手打到明文端口、HTTP/2 preface、或公网扫描机器人乱发字节（VPS 0.0.0.0 暴露）。
+# 与本应用逻辑无关、纯噪声，且 --no-access-log 管不到它。这里加日志过滤器丢弃该条，保持日志干净。
+# 根治仍建议在网络层处理：别把明文端口直接暴露公网（防火墙/反代/绑 127.0.0.1）。
+class _DropInvalidHTTPNoise(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            return "Invalid HTTP request received" not in record.getMessage()
+        except Exception:
+            return True
+
+
+logging.getLogger("uvicorn.error").addFilter(_DropInvalidHTTPNoise())
+
 
 APP_VERSION = "1.5.0-beta"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
@@ -561,28 +579,23 @@ def _img_referer_candidates(url: str) -> list[str]:
     return cands
 
 
-@app.get("/api/img")
-async def api_img_proxy(url: str = Query(..., description="原始图片 URL")):
-    """
-    图片代理 — 带正确 Referer 抓取封面绕过防盗链，再转发给浏览器。
-    V1.3：多 Referer 候选 + 代理/直连兜底，兼容 JavBus 镜像、CDN、不同地区。
-    """
+async def fetch_image_cached(url: str) -> Optional[tuple[bytes, str]]:
+    """取图片：内存缓存 → 磁盘缓存 → 上游抓取（多 Referer + 代理/直连兜底），命中即回填两级缓存。
+    供 /api/img 与刮削/发种封面共用：刮削直接复用首页已缓存封面（命中即零上游请求），
+    缓存未命中需回源时也走同一套防盗链抓取逻辑（修复 FC2 等封面因 Referer 错误下载失败）。"""
     if not url or not url.startswith("http"):
-        raise HTTPException(status_code=400, detail="无效的图片地址")
+        return None
 
     # 一级：内存缓存命中（最快）
     if url in _img_cache:
-        content, ctype = _img_cache[url]
-        return Response(content=content, media_type=ctype,
-                        headers={"Cache-Control": "public, max-age=86400"})
+        return _img_cache[url]
 
     # 二级：磁盘持久缓存命中（容器重启不丢、多用户共享；命中即零上游请求）
     disk = await _asyncio.to_thread(_img_disk_get_sync, url)
     if disk:
         content, ctype = disk
         _img_mem_put(url, content, ctype)   # 回填内存，下次走一级
-        return Response(content=content, media_type=ctype,
-                        headers={"Cache-Control": "public, max-age=86400"})
+        return content, ctype
 
     config = load_config()
     proxy = config.get("proxy") or None
@@ -596,14 +609,11 @@ async def api_img_proxy(url: str = Query(..., description="原始图片 URL")):
     # 先用配置代理，再直连兜底（部分 CDN 直连可达、代理反而失败）
     proxy_opts = [proxy, None] if proxy else [None]
 
-    last_status = None
     # 并发上限 + 单次较短超时：失败快速放行让浏览器自然重试，避免请求堆积拖死整页
     async with _img_semaphore:
         # 再次检查缓存（排队期间可能已被其它请求填充）
         if url in _img_cache:
-            content, ctype = _img_cache[url]
-            return Response(content=content, media_type=ctype,
-                            headers={"Cache-Control": "public, max-age=86400"})
+            return _img_cache[url]
         for pxy in proxy_opts:
             try:
                 async with httpx.AsyncClient(proxy=pxy, timeout=12, follow_redirects=True) as client:
@@ -615,7 +625,6 @@ async def api_img_proxy(url: str = Query(..., description="原始图片 URL")):
                             resp = await client.get(url, headers=headers)
                         except Exception:
                             continue
-                        last_status = resp.status_code
                         ctype = resp.headers.get("content-type", "")
                         # 必须是 200 且确实是图片（防盗链常返回 HTML 验证页）
                         if resp.status_code == 200 and resp.content and \
@@ -624,12 +633,26 @@ async def api_img_proxy(url: str = Query(..., description="原始图片 URL")):
                             ctype = ctype or "image/jpeg"
                             _img_mem_put(url, content, ctype)     # 内存（热）
                             _img_disk_put_bg(url, content, ctype)  # 磁盘（持久，后台落盘）
-                            return Response(content=content, media_type=ctype,
-                                            headers={"Cache-Control": "public, max-age=86400"})
+                            return content, ctype
             except Exception:
                 continue
+    return None
 
-    raise HTTPException(status_code=404, detail=f"图片获取失败 (HTTP {last_status})")
+
+@app.get("/api/img")
+async def api_img_proxy(url: str = Query(..., description="原始图片 URL")):
+    """
+    图片代理 — 带正确 Referer 抓取封面绕过防盗链，再转发给浏览器。
+    V1.3：多 Referer 候选 + 代理/直连兜底，兼容 JavBus 镜像、CDN、不同地区。
+    """
+    if not url or not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="无效的图片地址")
+    got = await fetch_image_cached(url)
+    if got:
+        content, ctype = got
+        return Response(content=content, media_type=ctype,
+                        headers={"Cache-Control": "public, max-age=86400"})
+    raise HTTPException(status_code=404, detail="图片获取失败")
 
 
 @app.post("/api/search")
