@@ -13,6 +13,7 @@
   - 后台监控协程 start_monitor()/stop_monitor()，由主程序在启动事件中拉起
 """
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -73,11 +74,29 @@ def _clean_noise(stem: str) -> str:
     return s
 
 
+# 结尾分集标记：番号_1 / 番号-cd2 / 番号_part3 / 番号A（紧跟）。
+# 番号正则用 \b 收尾，而 `_` 是单词字符，故 `番号_N` 这类分集文件名整串识别不出（FC2/无码尤为常见）。
+# 识别失败时剥掉此尾巴再试（见 _code_from_name），并以「剥后仍能匹配出番号」为护栏，
+# 避免误伤把番号尾段当分集（如日期码 060226_01 剥成 060226 匹配不出 → 不采用、保持原样）。
+_TRAILING_PART = re.compile(
+    r'[._\s-]*'                                          # 番号与分集标记间的分隔符
+    r'(?:(?:cd|dvd|disc|disk|part|pt|vol)[._\s-]?)?'     # 可选 CD/DVD/DISC/PART/VOL 关键词
+    r'(?:\d{1,2}|[a-e])'                                 # 分集序号：1~2 位数字 或 单个字母 A~E
+    r'\s*$',
+    re.IGNORECASE,
+)
+
+
+def _strip_trailing_part(name: str) -> str:
+    """剥掉文件名结尾的一个分集标记（_1 / -cd2 / 末尾A 等）；无则原样返回。"""
+    return _TRAILING_PART.sub('', name, count=1)
+
+
 # 番号正则：匹配 ABP-123、SSIS001、FC2-PPV-1234567、390JAC-234，以及无码格式
 # （10musume/1pondo/Carib 060226_01、heydouga-4017-001）等。
 # 顺序很重要：更「专」「长」的格式排在前，避免被宽松规则截断（如 heydouga 不被截成 HEYDOUGA-4017）。
 _CODE_PATTERNS = [
-    re.compile(r'\b(FC2-?PPV-?\d{5,8})\b', re.IGNORECASE),               # FC2-PPV-1234567
+    re.compile(r'\b(FC2-?PPV-?\d{5,8})(?![0-9])', re.IGNORECASE),        # FC2-PPV-1234567（容许 _1/_2 分集尾巴）
     re.compile(r'\b([A-Z]{3,10}-\d{3,5}-\d{2,4})\b', re.IGNORECASE),     # heydouga-4017-001（厂牌-数字-数字）
     re.compile(r'\b(\d{3,4}[A-Z]{2,6}-\d{2,5})\b', re.IGNORECASE),       # 390JAC-234 / 259LUXU-1234
     re.compile(r'\b([A-Z]{2,8}-\d{2,6})\b', re.IGNORECASE),              # ABP-123
@@ -94,8 +113,64 @@ _scrape_jobs: dict[str, dict] = {}
 
 # 文件大小稳定性追踪： path -> [last_size, stable_count]
 _size_history: dict[str, list] = {}
-# 已处理（移动走或失败记录过）的文件路径，避免重复处理
+# 已处理（移动走或失败记录过）的文件路径，避免重复处理（进程内）
 _processed: set[str] = set()
+
+# ── 已归档状态持久化（修复 hardlink/copy 归档保留原文件 → 重启后被重复刮削/归档）──
+# move 模式原文件被移走，下次扫描自然找不到；但 hardlink/copy 故意保留原文件做种，
+# 仅靠内存 _processed 在容器重启后会清空，导致监控把早已归档的文件当新文件反复处理
+# （还会因归档路径用「当前年月」而落进新月份目录重复堆叠）。
+# 这里把「已归档」签名落盘到 CONFIG_DIR，键 = 解析后路径|文件大小，重启后仍能跳过。
+_PROCESSED_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "scrape_processed.json"
+_processed_sig: dict[str, float] = {}     # signature -> 处理时间戳
+_processed_loaded = False
+_PROCESSED_MAX = 20000                     # 上限：超出按时间裁掉最旧（极少触发；裁掉的最旧文件若仍在会被再处理一次）
+
+
+def _file_sig(video_path: Path, size: int) -> str:
+    """文件的去重签名：解析后绝对路径 + 字节大小（归档不改源文件大小，签名稳定）。"""
+    try:
+        rp = str(video_path.resolve())
+    except Exception:
+        rp = str(video_path)
+    return f"{rp}|{size}"
+
+
+def _load_processed() -> None:
+    """首次扫描前从磁盘载入已归档签名（幂等）。"""
+    global _processed_loaded
+    if _processed_loaded:
+        return
+    _processed_loaded = True
+    try:
+        data = json.loads(_PROCESSED_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            _processed_sig.update({str(k): float(v) for k, v in data.items()})
+            _log(f"载入已归档记录 {len(_processed_sig)} 条（重启后避免重复刮削/归档）")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        _log(f"载入已归档记录失败（忽略）：{e}")
+
+
+def _save_processed() -> None:
+    try:
+        if len(_processed_sig) > _PROCESSED_MAX:
+            for k in sorted(_processed_sig, key=lambda k: _processed_sig[k])[:len(_processed_sig) - _PROCESSED_MAX]:
+                _processed_sig.pop(k, None)
+        _PROCESSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _PROCESSED_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(_processed_sig, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_PROCESSED_FILE)
+    except Exception as e:
+        _log(f"保存已归档记录失败（忽略）：{e}")
+
+
+def _mark_processed(video_path: Path, size: int) -> None:
+    """把文件标记为已归档（内存 + 持久化）。"""
+    _processed.add(str(video_path))
+    _processed_sig[_file_sig(video_path, size)] = time.time()
+    _save_processed()
 
 _monitor_task: Optional[asyncio.Task] = None
 _monitor_state: dict = {
@@ -149,12 +224,21 @@ def _code_from_name(name: str) -> str:
     """从单个名字（文件名去扩展 / 目录名）识别番号：先剔除站点前缀等噪声再匹配。
     回退时**仍剥掉站点/广告域名**（只保留方括号内容），避免把 hhd800.com 这类广告域名
     误当成番号（如 hhd800.com@060226_01 被识别成 HHD-800）。"""
-    cleaned = _clean_noise(name)
-    c = _match_code(cleaned)
-    if c:
-        return c
-    # 回退：不去方括号（番号可能在 []内），但仍去广告域名
-    return _match_code(_SITE_NOISE.sub(' ', name))
+    def _best(n: str) -> str:
+        # 先去方括号+站点域名匹配；不中再保留方括号(番号可能在[]内)仅去广告域名匹配。
+        return _match_code(_clean_noise(n)) or _match_code(_SITE_NOISE.sub(' ', n))
+
+    full = _best(name)
+    # 整串若被结尾分集标记(_1 / _cd2 / 末尾A 等)的 `_` 等截断 \b，会导致：
+    #   ① 完全识别不出（如 ABP-123_2）；或 ② 被更宽松的规则截成更短的错号
+    #      （如 heydouga-4017-001_2 误成 HEYDOUGA-4017）。
+    # 故再用「剥掉结尾分集标记」的版本匹配一次，取更长(更具体)的番号。
+    # 护栏：剥后匹配不出就不采用（日期码 060226_01 剥成 060226 无匹配 → 保持原样）。
+    stripped = _strip_trailing_part(name)
+    strip = _best(stripped) if (stripped and stripped != name) else ""
+    if strip and len(_norm(strip)) > len(_norm(full)):
+        return strip
+    return full or strip
 
 
 def _candidate_names(video_path: Path, watch_dir: str = "") -> list:
@@ -229,6 +313,43 @@ def _has_cd_marker(stem: str) -> bool:
         return True
     t = s.lower()
     return bool(re.fullmatch(r'[a-e]', t) or re.fullmatch(r'\d{1,2}', t))
+
+
+def _part_index(stem: str, code: str = "") -> Optional[int]:
+    """从「该文件自身名字」解析它在分集中的位次（1 起）；无法判定返回 None。
+    依据**仅来自文件名自身**，与处理/完成顺序、当前可见兄弟无关 —— 同番号多分片
+    分批(staggered)完成时各分集后缀因此稳定不错位（修复 -cd 号缺失/堆叠错乱）。
+    识别：CD2/DVD3/DISC1/PART2/PT1/VOL.4；整名 A/B/C 或 1/2/3；
+         番号之后紧跟的「分隔符+数字/字母」残尾（FC2-PPV-xxxx_2、CODE-3、CODE_B …）。"""
+    s = (stem or "").strip()
+    # 1) 显式分集标记
+    m = re.search(
+        r'(?:^|[^a-z0-9])(?:cd|dvd|disc|disk|part|pt|vol)[\s._-]?(\d{1,2})(?=$|[^a-z0-9])',
+        s, re.IGNORECASE,
+    )
+    if m:
+        n = int(m.group(1))
+        return n if n >= 1 else None
+    # 2) 整名就是单个字母/数字（发布目录内常见的分卷文件 A.mp4 / 1.mp4）
+    t = s.lower()
+    if re.fullmatch(r'[a-e]', t):
+        return ord(t) - ord('a') + 1
+    if re.fullmatch(r'\d{1,2}', t):
+        n = int(t)
+        return n if n >= 1 else None
+    # 3) 番号之后紧跟的「分隔符 + 数字/字母」残尾（区别于番号本身的尾段，故要求番号在前）
+    if code:
+        parts = [p for p in re.split(r'[-_.\s]+', code) if p]
+        if parts:
+            flex = r'[-_.\s]*'.join(re.escape(p) for p in parts)
+            mm = re.search(flex + r'[-_.\s]+(\d{1,2})\s*$', s, re.IGNORECASE)
+            if mm:
+                n = int(mm.group(1))
+                return n if n >= 1 else None
+            mm = re.search(flex + r'[-_.\s]+([a-e])\s*$', s, re.IGNORECASE)
+            if mm:
+                return ord(mm.group(1).lower()) - ord('a') + 1
+    return None
 
 
 def _folder_code(video_path: Path, watch_dir: str = "") -> str:
@@ -315,13 +436,22 @@ def _same_code_main_videos(video_path: Path, code: str, watch_dir: str = "") -> 
     return mains
 
 
-def _part_suffix(video_path: Path, code: str, watch_dir: str = "") -> str:
-    """同番号在同目录有多个正片（分段）时，返回该视频的分段后缀「-cd{N}」
-    （Emby/Kodi 多文件堆叠为同一影片）；单文件返回 ""。
-    N 取该视频在「同番号正片按文件名排序」中的位次，与处理顺序无关、稳定不冲突。"""
-    mains = _same_code_main_videos(video_path, code, watch_dir)
-    if len(mains) <= 1:
+def _part_suffix(video_path: Path, code: str, watch_dir: str = "",
+                 archived_parts: int = 0) -> str:
+    """同番号有多个正片（分段）时，返回该视频的分段后缀「-cd{N}」
+    （Emby/Kodi 多文件堆叠为同一影片）；单片返回 ""。
+    N 优先取「文件名自带的分集序号」(_part_index：CD2/_3/-B/纯数字…)——与处理/完成
+    顺序无关，分批(staggered)完成也不错位；无自带序号时回退到同番号可见正片中的位次。
+    archived_parts：目标归档目录内已存在的同番号分集数（分批先到的分集已落地时据此判定多分段）。"""
+    own = _part_index(video_path.stem, code)
+    mains = _same_code_main_videos(video_path, code, watch_dir)   # 含自身（仍在源目录）
+    # 判定多分段：可见同番号正片 + 已归档分集 > 1，或自身序号 ≥2（必有更前分集）。
+    # own==1 且暂无其它证据时按单片处理（文件名干净）；后续分集到达会触发自愈补号。
+    multipart = (len(mains) + archived_parts > 1) or (own is not None and own >= 2)
+    if not multipart:
         return ""
+    if own is not None:
+        return f"-cd{own}"
     idx = next((i for i, p in enumerate(mains) if p.name == video_path.name), 0)
     return f"-cd{idx + 1}"
 
@@ -484,6 +614,22 @@ async def _download_image(url: str, proxy: Optional[str], referer: str) -> Optio
     return None
 
 
+async def _fetch_cover(url: str, proxy: Optional[str]) -> Optional[bytes]:
+    """获取封面字节。
+
+    首选复用首页/详情那套图片缓存（内存+磁盘，CONFIG_DIR/imgcache）：首页浏览时封面已抓并落盘，
+    刮削直接命中即零上游请求，不再按地址重下。缓存未命中时走与 /api/img 同一套防盗链抓取
+    （多 Referer + 代理/直连兜底），修复 FC2（MissAV/fourhoi 域名）等封面因 Referer 错误下载失败。
+    仅在拿不到 main.fetch_image_cached 时才退回旧的单 Referer 直连下载。"""
+    try:
+        import main
+        got = await main.fetch_image_cached(url)
+        return got[0] if (got and got[0]) else None
+    except Exception as e:
+        _log(f"复用图片缓存失败，回退直连下载：{e}")
+        return await _download_image(url, proxy, _cover_referer(url))
+
+
 def _get_file_status(video_path: Path, code: str = "") -> dict:
     """检查视频旁是否已有以 番号 命名的 NFO/封面。"""
     folder = video_path.parent
@@ -639,8 +785,9 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
 
     cover_url = movie.get("cover", "")
     if cover_url and (overwrite or not status["has_cover"]):
-        _log(f"下载封面：{code} ← {cover_url[:60]}")
-        img = await _download_image(cover_url, proxy, _cover_referer(cover_url))
+        # 优先复用首页/详情已缓存的封面（命中即零上游请求）；未命中再回源（含 FC2 防盗链兜底）
+        _log(f"获取封面（优先复用缓存）：{code} ← {cover_url[:60]}")
+        img = await _fetch_cover(cover_url, proxy)
         if img:
             try:
                 (folder / f"{code}-poster.jpg").write_bytes(img)
@@ -650,7 +797,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             except Exception as e:
                 _log(f"封面保存失败 {filepath}: {e}")
         else:
-            _log(f"封面下载失败：{code}")
+            _log(f"封面获取失败：{code}")
 
     _log(f"刮削结束：{code}（NFO={'有' if saved_nfo else '无'} 封面={'有' if saved_cover else '无'}）")
     return {"success": True, "skipped": False, "filepath": filepath, "code": code,
@@ -686,6 +833,103 @@ def _transfer(src: Path, dst: Path, mode: str) -> bool:
         return False
 
 
+def _build_archive_index(output_dir: str) -> dict:
+    """扫描归档目录，建立「已归档」索引，作为去重签名(scrape_processed.json)缺失时的兜底，
+    避免重启后把原目录里早已归档的文件重新识别/重刮/重复归档（含错误的 -cd 重编号）。
+    签名文件会在以下情况对老文件为空：旧版本归档（当时未落盘签名）、/config 卷被重置、
+    归档目录路径变更等。此索引直接以「归档目录现有内容」为准，不依赖签名文件：
+      - inodes：{(st_dev, st_ino)} —— hardlink 模式(默认)源文件与归档文件同 inode，精确命中；
+      - sizes ：{(归一化番号, 字节数)} —— copy 模式跨 inode，用 番号+字节数 命中。
+    （move 模式源文件已移走，本就不会被再次扫描，无需索引。）"""
+    idx = {"inodes": set(), "sizes": set()}
+    if not output_dir:
+        return idx
+    out = Path(output_dir)
+    try:
+        for code_dir in out.glob("*/*"):            # <归档目录>/<YYYYMM>/<番号>/
+            if not code_dir.is_dir():
+                continue
+            safe = _norm(code_dir.name)
+            for p in code_dir.iterdir():
+                if not (p.is_file() and p.suffix.lower() in VIDEO_EXTS):
+                    continue
+                try:
+                    stt = p.stat()
+                except Exception:
+                    continue
+                if stt.st_ino:
+                    idx["inodes"].add((stt.st_dev, stt.st_ino))
+                if safe:
+                    idx["sizes"].add((safe, stt.st_size))
+    except Exception as e:
+        _log(f"建立归档索引失败（忽略，回退仅靠签名去重）：{e}")
+    return idx
+
+
+def _is_already_archived(video_path: Path, size: int, code: str, idx: dict) -> bool:
+    """该文件是否已存在于归档目录（用 _build_archive_index 的索引判定）。"""
+    if not idx:
+        return False
+    try:
+        stt = video_path.stat()
+        if stt.st_ino and (stt.st_dev, stt.st_ino) in idx["inodes"]:
+            return True              # hardlink：与归档文件同 inode → 必是同一份
+    except Exception:
+        pass
+    if code:
+        return (_norm(_safe_name(code)), size) in idx["sizes"]   # copy：番号+字节数命中
+    return False
+
+
+def _archived_video_parts(target_dir: Path, safe_code: str) -> list:
+    """目标归档目录内、属于该番号的已归档视频文件（CODE.ext 或 CODE-cdN.ext）。
+    用于判定是否多分段、以及对先到分集做命名自愈。"""
+    out = []
+    low = (safe_code or "").lower()
+    if not low:
+        return out
+    pat = re.compile(re.escape(low) + r'(?:-cd\d{1,2})?$')
+    try:
+        for p in target_dir.iterdir():
+            if p.is_file() and p.suffix.lower() in VIDEO_EXTS and pat.fullmatch(p.stem.lower()):
+                out.append(p)
+    except Exception:
+        pass
+    return out
+
+
+def _heal_archived_parts(target_dir: Path, safe_code: str) -> None:
+    """分集命名自愈：分批完成时，先到的分集曾因「当时只看到 1 个正片」被归档成无后缀的
+    CODE.ext。后续分集落地后，本目录内若仍残留无后缀文件，则给它补上缺失的最小 -cdN 号，
+    消除「CODE.mp4 + CODE-cd2.mp4」这类堆叠错乱（缺 -cd1）。
+    仅重命名归档产物，不触碰源文件，也不写去重签名（签名按源路径计，与此无关）。"""
+    files = _archived_video_parts(target_dir, safe_code)
+    if len(files) <= 1:
+        return
+    low = safe_code.lower()
+    plain = [p for p in files if p.stem.lower() == low]
+    if not plain:
+        return                          # 都已带 -cdN，无需纠正
+    used = set()
+    for p in files:
+        m = re.search(r'-cd(\d{1,2})$', p.stem.lower())
+        if m:
+            used.add(int(m.group(1)))
+    for p in plain:
+        n = 1
+        while n in used:
+            n += 1
+        used.add(n)
+        dst = p.with_name(f"{safe_code}-cd{n}{p.suffix.lower()}")
+        if dst.exists():
+            continue
+        try:
+            p.rename(dst)
+            _log(f"分集命名自愈：{p.name} → {dst.name}（同番号已有分集，补齐缺失的 -cd 号）")
+        except Exception as e:
+            _log(f"分集命名自愈失败 {p.name}: {e}")
+
+
 def _archive_file(video_path: Path, output_dir: str, code: str,
                   mode: str = "hardlink", rename: bool = True,
                   watch_dir: str = "") -> dict:
@@ -712,13 +956,19 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
 
     # 1) 视频本体 → 番号[-cdN].后缀（刮削关则保留原文件名）
     #    多分段时加 -cd1/-cd2… 堆叠后缀，确保 A/B/C、1/2/3、CD1/CD2 等全部归档不互相覆盖。
-    part = _part_suffix(video_path, code, watch_dir) if (rename and code) else ""
+    #    -cdN 取自文件名自带的分集序号，与完成顺序无关；已归档分集计入多分段判定。
+    archived_before = _archived_video_parts(target_dir, safe_code) if (rename and code) else []
+    part = (_part_suffix(video_path, code, watch_dir, archived_parts=len(archived_before))
+            if (rename and code) else "")
     video_name = f"{safe_code}{part}{video_path.suffix.lower()}" if (rename and code) else video_path.name
     video_dst = target_dir / video_name
     if not _transfer(video_path, video_dst, mode):
         return {"archived": False, "moved_original": False,
                 "error": "视频归档失败", "target_dir": str(target_dir)}
     done.append(video_dst.name)
+    # 本次落地的是某个 -cdN 分集时，纠正同番号中先到、曾被命名成无后缀的分集（补齐缺失号）。
+    if rename and code and part:
+        _heal_archived_parts(target_dir, safe_code)
 
     # 2) 以番号命名的 NFO/封面（刮削时已按番号生成）
     for extra in (folder / f"{safe_code}.nfo",
@@ -893,13 +1143,17 @@ async def _scan_once(config: dict) -> int:
         _monitor_state["message"] = f"监控目录不存在: {watch}"
         return 0
 
+    _load_processed()   # 重启后从磁盘恢复「已归档」记录，避免 hardlink/copy 保留的原文件被反复处理
     stable_needed = int(config.get("scrape_stable_checks", 2))
     settle_seconds = int(config.get("scrape_settle_seconds", 60))
     min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
     out_dir = config.get("scrape_output_dir", "").strip()
+    # 以归档目录现有内容为准的兜底去重索引（签名文件缺失时仍能跳过早已归档的原文件）。
+    archive_idx = _build_archive_index(out_dir)
     now = time.time()
     processed = 0
     n_total = n_done_before = n_incomplete = n_small = n_waiting = n_extra = n_publish = 0
+    n_backfilled = 0   # 本轮以归档目录为准补登签名（兜底跳过）的文件数
 
     # 发种占用：这些文件正被发种流水线原地做种，监控绝不能移动/删除（否则做种丢文件）。
     # 两层保护互补，命中任一即跳过：
@@ -951,6 +1205,24 @@ async def _scan_once(config: dict) -> int:
         except Exception as e:
             _log(f"读取文件信息失败，跳过：{vf.name}（{e}）")
             continue
+        # 持久化「已归档」去重：hardlink/copy 模式原文件保留在监控目录，重启后内存 _processed 清空，
+        # 靠落盘签名（路径|大小）识别出早已归档的文件并跳过，不再重复刮削/重复归档到新月份目录。
+        if _file_sig(vf, size) in _processed_sig:
+            _processed.add(fp)        # 回填内存，后续轮次走最快路径
+            n_done_before += 1
+            _size_history.pop(fp, None)
+            continue
+        # 兜底去重：签名文件对该文件为空（旧版本归档 / /config 重置 / 归档路径变更）时，
+        # 若它已存在于归档目录则补登签名并跳过，避免重启后重新识别/重刮/重复归档（含 -cd 错号）。
+        if archive_idx:
+            _code_arc = _recognize_code(vf, watch)
+            if _is_already_archived(vf, size, _code_arc, archive_idx):
+                _processed.add(fp)                          # 内存去重
+                _processed_sig[_file_sig(vf, size)] = now   # 补登签名（本轮末统一落盘，避免逐条写）
+                n_backfilled += 1
+                n_done_before += 1
+                _size_history.pop(fp, None)
+                continue
         # 广告/赠片清理（一律清理）：该视频自身无番号、无分集标记，且同目录存在「正片兄弟」
         #   （带番号或分集标记的视频）→ 确认是发布目录里的广告/赠片，【直接删除】（含过小小广告）。
         #   主片/分段/其它番号正片绝不删。不论 hardlink/move 归档模式都执行；必须放在「过小忽略」
@@ -995,6 +1267,7 @@ async def _scan_once(config: dict) -> int:
         reason = f"静置 {int(age)}s" if settled_by_mtime else f"大小稳定 {stable_count}次"
         _log(f"判定下载完成（{reason}），准备处理：{vf.name}（{round(size/1024/1024,1)}MB）")
         _monitor_state["message"] = f"正在刮削 {vf.name}"
+        rec = None
         try:
             rec = await _process_completed_file(vf, config)
             _record_recent(rec)
@@ -1003,10 +1276,19 @@ async def _scan_once(config: dict) -> int:
             _record_recent({"file": vf.name, "scrape_ok": False,
                             "scrape_error": str(e), "moved": False,
                             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        # 进程内始终标记，避免本次运行内重复处理；
+        # 仅在「确实归档成功」时才持久化落盘（hardlink/copy 保留原文件→重启后据此跳过）。
+        # 归档失败/未开启归档时不落盘：留待重启后重试（避免站点临时不可达被永久跳过；
+        # 纯刮削场景由旁边已存在的 NFO/封面天然幂等跳过）。
         _processed.add(fp)
+        if rec and rec.get("moved"):
+            _mark_processed(vf, size)
         _size_history.pop(fp, None)
         processed += 1
 
+    if n_backfilled:
+        _save_processed()   # 本轮兜底补登的签名统一落盘一次（避免逐条全量写文件）
+        _log(f"按归档目录补登已归档签名 {n_backfilled} 条（重启/换版后跳过原目录已归档文件）")
     _log(f"扫描完成：共 {n_total} 个视频 → 本次处理 {processed}，"
          f"等待稳定 {n_waiting}，下载中 {n_incomplete}，过小 {n_small}，"
          f"广告/赠片 {n_extra}，发种占用 {n_publish}，先前已处理 {n_done_before}")
