@@ -461,13 +461,15 @@ async def _step_download_poll(t: dict, config: dict):
 
 def _pick_main_videos(container_path: Path, ratio: float = 0.3) -> list:
     """
-    挑出所有「主视频」——既要剔除小广告/样板视频，又要保留多个大视频
-    （分段 CD1/CD2、多场景等都是需要的）。
-    规则：以最大视频为基准，保留 大小 >= 最大*ratio 的全部视频；至少返回最大的一个。
-      - 单片：返回该片；
-      - CD1(4G)+CD2(4G)+广告(50M)：阈值=1.2G，两段都保留、广告剔除；
-      - 主片(4G)+广告(300M)：广告 < 1.2G，剔除。
-    ratio 默认 0.3：真正的分段/多场景通常彼此体量相近，广告则远小于主片。
+    挑出所有「主视频」——剔除广告/赠片，但保留全部正片（分段 CD1/CD2、多场景等都要）。
+
+    判定复用监控归档同源逻辑（library：番号识别 + 分集标记），**不靠体量比例**：
+      旧版以「大小 >= 最大*ratio」筛选，体量较小的合法分段/场景会被误当广告删掉
+      （用户反馈：磁力种子里有多个视频时只识别到一个、其余被当广告全删）。
+    现按 library._is_extra_video 逐个判定——仅当「自身无番号、无分集标记、且同目录
+    存在带正确番号/分集标记的正片兄弟」时才判为广告剔除；目录名识不出番号（证据不足）
+    时一律保留，宁可让广告进种子也绝不误删正片。
+    ratio 参数保留仅为签名兼容，已不再使用。
     """
     if container_path.is_file():
         return [container_path] if container_path.suffix.lower() in VIDEO_EXTS else []
@@ -477,17 +479,20 @@ def _pick_main_videos(container_path: Path, ratio: float = 0.3) -> list:
             if p.is_file() and p.suffix.lower() in VIDEO_EXTS]
     if not vids:
         return []
-    sizes = {}
-    for p in vids:
-        try:
-            sizes[p] = p.stat().st_size
-        except OSError:
-            sizes[p] = 0
-    largest = max(sizes.values()) if sizes else 0
-    threshold = largest * ratio
-    keep = [p for p in vids if sizes[p] > 0 and sizes[p] >= threshold]
-    keep.sort(key=lambda p: p.name.lower())   # 稳定顺序，便于 cd1/cd2 命名
-    return keep or [max(sizes, key=sizes.get)]
+    vids.sort(key=lambda p: p.name.lower())   # 稳定顺序，便于 cd1/cd2 命名
+    if len(vids) == 1:
+        return vids
+    # watch_dir 取「容器的父目录」，使容器目录名（磁力种子常以番号命名）被当作目录番号参与判定。
+    try:
+        from library import _is_extra_video
+        wd = str(container_path.parent)
+        keep = [p for p in vids if not _is_extra_video(p, wd)]
+        if keep:
+            return keep
+    except Exception:
+        pass
+    # 兜底（判定不可用 / 全被判为广告，理论上不会发生）：保留全部视频，绝不误删。
+    return vids
 
 
 def _find_videos_by_code(root: Path, code: str):
