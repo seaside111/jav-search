@@ -121,7 +121,7 @@ DEFAULT_CONFIG = {
     "publish_countries": "",             # 国家/地区 id（createOredit countries 字段，从 /system/countryList 取）
     # V1.5：DMM 链接自动填充（有码字母+数字番号 → 调 M-Team 自带 /dmm/dmmSeearch 取 dmmCode 填入 DMM 框）
     "dmm_lookup_enabled": True,          # 总开关：发种时自动查 DMM 并填 dmmCode
-    "publish_dmm_field": "code",         # DMM 框填什么：code=填 dmmCode（默认，站点规范值）| url=填完整链接
+    "publish_dmm_field": "url",          # DMM 框填什么：url=填完整 DMM 链接（默认，与网页选中行为一致）| code=填 cid
     "publish_poll_interval": 30,         # 发种 worker 轮询间隔（秒）
     "publish_upload_limit_kbps": 0,      # 单个发种种子的上传限速(KB/s)，0=不限。防超 PT 单种限速被封
     # V1.5：日志详略。True=详细(每步+每次API,beta排查用)；定型后设 False 只看主要动作

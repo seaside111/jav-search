@@ -252,10 +252,10 @@
       <div class="row">
         <label class="lbl">DMM 框填入</label>
         <select id="cfgDmmField">
-          <option value="code">dmmCode（站点规范值，默认）</option>
-          <option value="url">完整 DMM 链接 URL</option>
+          <option value="url">完整 DMM 链接 URL（默认，与网页选中行为一致）</option>
+          <option value="code">cid（如 smkd010）</option>
         </select>
-        <span class="hint">不确定填哪个时先用默认 code，发一帖看站点是否认；不认再切 url</span>
+        <span class="hint">网页上传页选中候选后填入的就是完整 DMM 链接，故默认 url；若站点更认 cid 再切 code</span>
       </div>
       <div class="row">
         <label class="lbl">联想测试</label>
@@ -411,7 +411,7 @@ async function loadConfig(){
     $('cfgPubAnonymous').checked = !!c.publish_anonymous;
     $('cfgPubAuto').checked = !!c.publish_auto;
     $('cfgDmmEnabled').checked = c.dmm_lookup_enabled !== false;
-    $('cfgDmmField').value = c.publish_dmm_field || 'code';
+    $('cfgDmmField').value = c.publish_dmm_field || 'url';
     updateStopGate();
     if (c.mteam_api_key) checkMteam();
   } catch(e){ /* ignore */ }

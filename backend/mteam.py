@@ -15,6 +15,7 @@ M-Team（馒头）PT 站 API 客户端（V1.5）
 响应统一包在 Result 里：{code, message, data:{...}}。规范未细化 data 字段，
 故以下解析全部走防御式（缺字段不报错），辅种最终以下载器重校验为准。
 """
+import re
 from typing import Optional
 from urllib.parse import quote
 import httpx
@@ -203,18 +204,38 @@ def _first(d: dict, *keys):
     return None
 
 
+def _dmm_cid(s: str) -> str:
+    """从 DMM 链接里抽出 cid（如 .../cid=smkd010/ → smkd010）。"""
+    m = re.search(r"cid=([a-z0-9_]+)", s or "", re.I)
+    return m.group(1) if m else ""
+
+
 def _norm_dmm_item(it) -> dict:
-    """把一条 DMM 候选规整成统一字段（站点字段名未知，多键兜底；raw 原样留作校准）。"""
+    """
+    把一条 DMM 候选规整成统一字段（站点字段名未知，多键兜底；raw 原样留作校准）。
+    实测站点候选可能直接是「DMM 链接字符串」→ 抽 cid 进 dmm_code、整条进 url。
+    """
     if isinstance(it, str):
-        return {"dmm_code": it, "url": "", "title": "", "cover": "", "raw": it}
+        s = it.strip()
+        if s.lower().startswith("http"):
+            return {"dmm_code": _dmm_cid(s), "url": s, "title": "", "cover": "", "raw": it}
+        return {"dmm_code": s, "url": "", "title": "", "cover": "", "raw": it}
     if not isinstance(it, dict):
         return {}
-    code = _first(it, "dmmCode", "dmm_code", "code", "cid", "cId", "contentId", "content_id", "value", "id")
-    url = _first(it, "url", "link", "href", "dmmUrl", "dmm_url", "detailUrl", "productUrl")
+    code = str(_first(it, "dmmCode", "dmm_code", "code", "cid", "cId",
+                      "contentId", "content_id", "value", "id") or "")
+    url = str(_first(it, "url", "link", "href", "dmmUrl", "dmm_url",
+                     "detailUrl", "productUrl") or "")
+    # 站点把链接塞进 code 字段时，拆出真正的 cid，URL 归到 url
+    if code.lower().startswith("http"):
+        url = url or code
+        code = _dmm_cid(code)
+    if not code and url:
+        code = _dmm_cid(url)
     title = _first(it, "title", "name", "label", "text", "productName", "movieTitle", "japaneseTitle")
     cover = _first(it, "cover", "image", "img", "thumb", "imageUrl", "imageURL", "picture", "cover_url", "poster")
     return {
-        "dmm_code": str(code or ""), "url": str(url or ""),
+        "dmm_code": code, "url": url,
         "title": str(title or ""), "cover": str(cover or ""), "raw": it,
     }
 
