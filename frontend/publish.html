@@ -532,11 +532,19 @@ async function testDmm(){
     out += `将填入 dmmCode：${rv.dmm_code||'(空)'}`
          + (rv.matched?'（精确匹配）':'（番号未精确匹配，取候选首条·请核对）') + '\n';
     if (rv.url) out += '链接：'+rv.url+'\n';
+    if (rv.encoding||d.encoding) out += `（命中编码：${rv.encoding||d.encoding}）\n`;
     out += `\n候选 ${items.length} 条：\n`
          + items.slice(0,8).map(x=>`· ${x.dmm_code||'?'} | ${x.title||''}`).join('\n');
     if (items.length && !items[0].dmm_code)
       out += '\n\n（候选 dmm_code 为空？字段名可能不同，看下面 raw 校准）\n'
            + JSON.stringify(items[0].raw||items[0]).slice(0,500);
+    if (!items.length && Array.isArray(d.diag) && d.diag.length){
+      out += '\n\n── 诊断（三种编码的原始返回）──\n'
+           + d.diag.map(g=>`[${g.encoding}] ok=${g.ok} msg=${g.message||g.error||''} `
+               + `data=${g.data_type} 候选=${g.item_count}\n  ${(g.data_preview||'').slice(0,300)}`).join('\n');
+      out += '\n\n提示：三种编码 data 都是 null/空 → 多半是测试站 DMM 库无数据（网页上传页 DMM 框也搜不出），正式站再验；'
+           + '若某编码有 data 但候选=0 → 把上面那段发我校准字段名。';
+    }
     box.textContent = out;
   } catch(e){ box.textContent='✗ 出错：'+e.message; }
 }

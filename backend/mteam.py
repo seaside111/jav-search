@@ -232,18 +232,61 @@ def _dmm_rows(data) -> list:
     return []
 
 
+async def _dmm_call(config: dict, keyword: str, enc: str) -> dict:
+    """按指定编码发一次 dmmSeearch。enc ∈ {query, json, form}。"""
+    if enc == "query":
+        return await _post(config, f"/dmm/dmmSeearch?keyword={quote(keyword)}", json_body={})
+    if enc == "json":
+        return await _post(config, "/dmm/dmmSeearch", json_body={"keyword": keyword})
+    return await _post(config, "/dmm/dmmSeearch", form={"keyword": keyword})
+
+
+def _dmm_items_of(payload) -> list:
+    """从一次响应里挖出非空候选（过滤掉单对象兜底产生的全空 item）。"""
+    data = (payload or {}).get("data") if isinstance(payload, dict) else None
+    items = [x for x in (_norm_dmm_item(r) for r in _dmm_rows(data)) if x]
+    return [it for it in items if it.get("dmm_code") or it.get("url") or it.get("title")]
+
+
 async def dmm_search(config: dict, keyword: str) -> dict:
-    """DMM 联想搜索。返回 {ok, items:[{dmm_code,url,title,cover,raw}], error}。"""
+    """
+    DMM 联想搜索。返回 {ok, items:[{dmm_code,url,title,cover,raw}], error, encoding}。
+    站点参数绑定方式未文档化（query/json/form 任一），依次尝试，取首个有候选的编码。
+    全为空（且无错误）→ ok=True items=[]（真·无结果，多见于测试站 DMM 库为空）。
+    """
     kw = (keyword or "").strip()
     if not kw:
         return {"ok": False, "items": [], "error": "关键词为空"}
-    # keyword 走 query+form 双保险（@RequestParam 两处都收，避免猜错位置）
-    res = await _post(config, f"/dmm/dmmSeearch?keyword={quote(kw)}", form={"keyword": kw})
-    if not res["ok"]:
-        return {"ok": False, "items": [], "error": res["error"]}
-    data = (res["payload"] or {}).get("data")
-    items = [x for x in (_norm_dmm_item(r) for r in _dmm_rows(data)) if x]
-    return {"ok": True, "items": items, "error": ""}
+    last_err = ""
+    for enc in ("query", "json", "form"):
+        res = await _dmm_call(config, kw, enc)
+        if not res["ok"]:
+            last_err = res["error"]
+            continue
+        items = _dmm_items_of(res.get("payload"))
+        if items:
+            return {"ok": True, "items": items, "error": "", "encoding": enc}
+    return {"ok": True, "items": [], "error": last_err or "DMM 无候选结果", "encoding": ""}
+
+
+async def dmm_search_diag(config: dict, keyword: str) -> list:
+    """诊断：三种编码各发一次，回原始 message/data 预览，用于校准站点真实返回结构。"""
+    kw = (keyword or "").strip()
+    out = []
+    for enc in ("query", "json", "form"):
+        res = await _dmm_call(config, kw, enc)
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        data = payload.get("data")
+        out.append({
+            "encoding": enc,
+            "ok": res["ok"],
+            "error": res.get("error", ""),
+            "message": payload.get("message", ""),
+            "data_type": type(data).__name__,
+            "item_count": len(_dmm_items_of(payload)),
+            "data_preview": str(data)[:800],
+        })
+    return out
 
 
 async def dmm_info(config: dict, dmm_code: str) -> dict:

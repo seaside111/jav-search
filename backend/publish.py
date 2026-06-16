@@ -1311,9 +1311,15 @@ async def api_dmm_search(keyword: str):
     config = load_config()
     raw = await mteam.dmm_search(config, keyword)
     resolved = await dmm_mod.resolve(config, keyword, "")
+    diag = []
+    if not raw.get("items"):
+        # 没候选时附三种编码的原始返回，定位是「参数没绑上」还是「站点确实无数据」
+        diag = await mteam.dmm_search_diag(config, keyword)
     return {
         "ok": raw["ok"],
         "error": raw.get("error", "") or resolved.get("error", ""),
+        "encoding": raw.get("encoding", ""),
         "items": raw.get("items", []),     # 含 raw 原字段，便于校准未知字段名
         "resolved": resolved,              # 实际会填入 dmmCode 的值 + 是否精确匹配
+        "diag": diag,                      # 仅无候选时返回：每种编码的 message/data 预览
     }
