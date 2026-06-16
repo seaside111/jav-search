@@ -130,7 +130,8 @@ DEFAULT_CONFIG = {
     "scrape_interval": 300,              # 监控轮询间隔（秒）
     "scrape_settle_seconds": 60,         # 文件 mtime 静置超过此秒数即判定下载完成（快速通道）
     "scrape_stable_checks": 2,           # 兜底：大小连续多少次不变视为完成（mtime 不可靠时）
-    "scrape_min_size_mb": 100,           # 小于此大小（MB）的视频忽略（样板/预告）
+    "scrape_min_size_mb": 100,           # 小于此大小（MB）的视频「基本判定为广告」可删（样板/预告）
+    "scrape_keep_size_mb": 300,          # 保底正片下限（MB）：≥此大小一律当正片绝不删；中间档(min~keep)需多重判定
     "scrape_translate_enabled": True,    # 刮削时是否翻译标题/简介；关闭则直接用日文原标题写入 NFO
     "scrape_translate_provider": "",     # 刮削翻译服务，留空用默认翻译服务
     "scrape_move_on_fail": True,         # 刮削失败也照常归档

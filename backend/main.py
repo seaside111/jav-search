@@ -320,6 +320,7 @@ class ConfigUpdateRequest(BaseModel):
     scrape_settle_seconds: Optional[int] = None
     scrape_stable_checks: Optional[int] = None
     scrape_min_size_mb: Optional[int] = None
+    scrape_keep_size_mb: Optional[int] = None
     scrape_translate_enabled: Optional[bool] = None
     scrape_translate_provider: Optional[str] = None
     scrape_move_on_fail: Optional[bool] = None

@@ -13,6 +13,7 @@
   - 后台监控协程 start_monitor()/stop_monitor()，由主程序在启动事件中拉起
 """
 import asyncio
+import difflib
 import json
 import os
 import re
@@ -419,6 +420,113 @@ def _is_extra_video(video_path: Path, watch_dir: str = "") -> bool:
         if (sc and _norm(sc) == fc) or _has_cd_marker(s.stem):
             return True      # 存在明确正片/分集兄弟 → 本文件是广告
     return False
+
+
+# ─────────────────────────────────────────
+# 统一「选主视频 / 清广告」规则（发布 & 监控共用，第一原则：绝不误删正片）
+# ─────────────────────────────────────────
+
+def _norm_stem(stem: str) -> str:
+    """文件名归一化（仅留小写字母数字），用于相似度比较，剔除站点/分隔符噪声。"""
+    return re.sub(r'[^a-z0-9]', '', (stem or '').lower())
+
+
+def _name_similarity(a: str, b: str) -> float:
+    """两个文件名（归一化后）的相似度 0~1。用于「以最大文件名为基准」判定关联正片。"""
+    sa, sb = _norm_stem(a), _norm_stem(b)
+    if not sa or not sb:
+        return 0.0
+    return difflib.SequenceMatcher(None, sa, sb).ratio()
+
+
+def _seq_order_key(stem: str, code: str = "") -> Optional[int]:
+    """推测该文件在多分段中的排序序号（1 起）：
+      1) 先用 _part_index（CD2/纯数字/字母/番号残尾），最可靠；
+      2) 再尝试文件名【结尾】1-2 位数字或单字母（…01 / …_b）；
+      3) 再尝试文件名【开头】1-2 位数字（01_… / 1.…）；
+      4) 都识别不出 → None（交由兜底「顺位排在已知序号之后」）。"""
+    idx = _part_index(stem, code)
+    if idx is not None:
+        return idx
+    s = (stem or '').strip().lower()
+    m = re.search(r'(\d{1,2})\s*$', s)            # 结尾数字
+    if m:
+        return int(m.group(1))
+    m = re.search(r'(?:^|[^a-z])([a-e])\s*$', s)  # 结尾单字母 a~e
+    if m:
+        return ord(m.group(1)) - ord('a') + 1
+    m = re.match(r'\s*(\d{1,2})(?:[^0-9]|$)', s)  # 开头数字
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def classify_videos(videos: list, watch_dir: str = "", min_bytes: int = 100 * 1024 * 1024,
+                    keep_bytes: int = 300 * 1024 * 1024, sim_threshold: float = 0.6):
+    """
+    发布 & 监控统一的「选主视频 + 清广告」分层规则（第一原则：绝不误删正片）。
+
+    输入：同一容器（直接父目录）下的视频文件 Path 列表。
+    输出：(keep_ordered, drop_set)
+      keep_ordered — 需保留的正片/分段，已按推测的分集顺序排序（供 -cdN 统一命名）；
+      drop_set     — 判定为广告/赠片、可安全删除的文件集合。
+
+    分层判定（size = 文件字节数；largest = 体量最大的文件，作为「基准主文件」）：
+      0) 仅 1 个视频               → 全保留（绝不删唯一视频）；
+      1) 自身就是 largest          → 必保留（基准主文件）；
+      2) size ≥ keep_bytes(默认300M)→ 一律保留（大文件绝不当广告，修复 2.5G 被删）；
+      3) 自身文件名带番号/分集标记   → 保留（独立正片或 01/02、cd1 这类分段）；
+      4) size < min_bytes(默认100M) → 广告，删除；
+      5) 中间档 min_bytes≤size<keep_bytes：
+           与基准主文件「文件名相似度 ≥ sim_threshold」 → 关联正片，保留；
+           否则兜底：< keep_bytes 视为广告删除（300M 以下保底当广告）。
+    最终安全网：若按上述会删光全部视频 → 改为全部保留，绝不删空。
+    """
+    vids = [p for p in (videos or []) if p and p.suffix.lower() in VIDEO_EXTS]
+    if len(vids) <= 1:
+        return list(vids), set()
+    sized = []
+    for p in vids:
+        try:
+            sz = p.stat().st_size
+        except Exception:
+            sz = 0
+        sized.append((p, sz))
+    largest = max(sized, key=lambda t: t[1])[0]
+
+    keep, drop = [], set()
+    for p, sz in sized:
+        if p == largest:
+            keep.append(p)                                  # 1) 基准主文件
+        elif sz >= keep_bytes:
+            keep.append(p)                                  # 2) 大文件保底
+        elif _code_from_name(p.stem) or _has_cd_marker(p.stem):
+            keep.append(p)                                  # 3) 自带番号/分集
+        elif sz < min_bytes:
+            drop.add(p)                                     # 4) 小广告
+        elif _name_similarity(p.stem, largest.stem) >= sim_threshold:
+            keep.append(p)                                  # 5) 与主文件名相似 → 关联正片
+        else:
+            drop.add(p)                                     # 5) 兜底：300M 以下当广告
+
+    if not keep:                                            # 安全网：绝不删空
+        return list(vids), set()
+
+    # 排序：能推出序号的按序号；推不出的「顺位接在已知序号之后」，按体量降序兜底。
+    folder_code = ""
+    for p in keep:
+        folder_code = _folder_code(p, watch_dir)
+        if folder_code:
+            break
+    keyed, unkeyed = [], []
+    sizemap = dict(sized)
+    for p in keep:
+        k = _seq_order_key(p.stem, folder_code)
+        (keyed if k is not None else unkeyed).append((p, k))
+    keyed.sort(key=lambda t: (t[1], t[0].name.lower()))
+    unkeyed.sort(key=lambda t: (-sizemap.get(t[0], 0), t[0].name.lower()))
+    keep_ordered = [p for p, _ in keyed] + [p for p, _ in unkeyed]
+    return keep_ordered, drop
 
 
 def _same_code_main_videos(video_path: Path, code: str, watch_dir: str = "") -> list:
@@ -986,13 +1094,17 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
             "target_dir": str(target_dir), "files": done}
 
 
-def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int):
+def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int,
+                    keep_bytes: int = 300 * 1024 * 1024):
     """
     移动走视频后清理原下载位置：
       - 若视频原本在 watch_dir 下的「子目录」里（典型 qB 单种子单目录），
         且该子目录已无其它达标视频待处理 → 整个子目录连同遗留广告/样板文件一并删除；
       - 若还有其它达标视频 → 保留子目录，待最后一个视频处理完再删；
       - 若视频直接位于 watch_dir 根目录 → 不删根目录（仅此前已移走视频本体）。
+    第一原则不误删：只要子目录里还有**任何未处理的 ≥keep_bytes 大文件**，一律不 rmtree
+    （大文件不论是否被 _looks_primary 认成正片都必须等它先被处理/归档，避免整目录删除时
+     把番号命名容器内、文件名不含番号的大主文件一起删掉）。
     """
     try:
         watch_dir = watch_dir.resolve()
@@ -1004,15 +1116,15 @@ def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int):
         return
     # 找出该子目录内（递归）剩余的、仍待处理的「正片」视频。
     # 广告/赠片（_looks_primary 为假）不计入，否则真片归档后会被它们长期挡住、
-    # 导致原目录连同广告一直残留。
+    # 导致原目录连同广告一直残留。但 ≥keep_bytes 的大文件**无条件**计入，绝不被整目录删除带走。
     watch_str = str(watch_dir)
     try:
         remaining = [p for p in parent.rglob("*")
                      if p.is_file() and p.suffix.lower() in VIDEO_EXTS
                      and not _is_incomplete(p)
-                     and p.stat().st_size >= min_bytes
                      and str(p) not in _processed
-                     and _looks_primary(p, watch_str)]
+                     and p.stat().st_size >= min_bytes
+                     and (p.stat().st_size >= keep_bytes or _looks_primary(p, watch_str))]
     except Exception:
         remaining = []
     if remaining:
@@ -1103,6 +1215,7 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
             _log(f"刮削未成功但按配置仍归档：{video_path.name}")
         watch_dir = Path(config.get("scrape_watch_dir", ""))
         min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
+        keep_bytes = int(config.get("scrape_keep_size_mb", 300)) * 1024 * 1024
         code = scrape_res.get("code", "") or await _resolve_code(video_path, config)
         src_parent = video_path.parent
         # V1.5 统一：归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
@@ -1115,7 +1228,7 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         if mv.get("moved_original"):
             # 仅 move 模式：原文件已移走，清理原下载目录（含遗留广告/样板文件，连同子目录删除）。
             # hardlink/copy 模式保留原文件（可继续做种/辅种），绝不删原目录。
-            _cleanup_source(src_parent, watch_dir, min_bytes)
+            _cleanup_source(src_parent, watch_dir, min_bytes, keep_bytes)
     elif not output_dir:
         _log(f"未配置归档目录，仅刮削未归档：{video_path.name}")
         record["note"] = "未配置归档目录，仅刮削未归档"
@@ -1147,6 +1260,7 @@ async def _scan_once(config: dict) -> int:
     stable_needed = int(config.get("scrape_stable_checks", 2))
     settle_seconds = int(config.get("scrape_settle_seconds", 60))
     min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
+    keep_bytes = int(config.get("scrape_keep_size_mb", 300)) * 1024 * 1024
     out_dir = config.get("scrape_output_dir", "").strip()
     # 以归档目录现有内容为准的兜底去重索引（签名文件缺失时仍能跳过早已归档的原文件）。
     archive_idx = _build_archive_index(out_dir)
@@ -1223,15 +1337,23 @@ async def _scan_once(config: dict) -> int:
                 n_done_before += 1
                 _size_history.pop(fp, None)
                 continue
-        # 广告/赠片清理（一律清理）：该视频自身无番号、无分集标记，且同目录存在「正片兄弟」
-        #   （带番号或分集标记的视频）→ 确认是发布目录里的广告/赠片，【直接删除】（含过小小广告）。
-        #   主片/分段/其它番号正片绝不删。不论 hardlink/move 归档模式都执行；必须放在「过小忽略」
-        #   之前，否则小广告会先被尺寸过滤跳过、永远清不掉（用户反馈的现象）。
+        # 广告/赠片清理（一律清理）：与「发布整理」完全同源——用统一的 classify_videos 分层规则
+        #   判定本文件是否为广告。第一原则：绝不误删正片——
+        #     · 体量最大的基准主文件、≥保底下限(scrape_keep_size_mb，默认300M)的大文件、
+        #       自带番号/分集标记、与最大文件名相似者 → 一律保留，绝不删；
+        #     · 仅「<广告阈值的小广告」或「中间档(min~keep)且与主文件名不相似」者才删。
+        #   外层再加「有正片兄弟」证据门槛，避免误删监控根目录里彼此无关的独立小视频。
+        #   不论 hardlink/move 归档模式都执行；必须放在「过小忽略」之前，否则小广告会先被
+        #   尺寸过滤跳过、永远清不掉（用户反馈的现象）。
         #   注意：若该种子整体仍在做种，删其中文件会让该种子校验缺文件（用户已知并选择一律清理）。
         #   发种占用的目录已在上方按番号/路径跳过，不会走到这里。
-        if (not _code_from_name(vf.stem) and not _has_cd_marker(vf.stem)
-                and _has_primary_sibling(vf)
-                and (_is_extra_video(vf, watch) or size < min_bytes)):
+        _drop = set()
+        if _has_primary_sibling(vf):
+            try:
+                _, _drop = classify_videos(_sibling_videos(vf), watch, min_bytes, keep_bytes)
+            except Exception:
+                _drop = set()
+        if vf in _drop:
             try:
                 vf.unlink()
                 n_extra += 1

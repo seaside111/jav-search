@@ -992,9 +992,14 @@
             <span class="setting-hint">文件超过这么久没再写入即判定下载完成（手动放入的文件也据此快速识别）</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label">最小文件大小（MB）</label>
+            <label class="setting-label">广告大小阈值（MB）</label>
             <input class="setting-input" id="cfgScrapeMinSize" type="number" value="100" min="0" step="50">
-            <span class="setting-hint">小于此大小的视频忽略，避免刮削样板/预告片</span>
+            <span class="setting-hint">小于此大小的视频基本判定为广告/样板/预告，可直接删除</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">保底正片下限（MB）</label>
+            <input class="setting-input" id="cfgScrapeKeepSize" type="number" value="300" min="0" step="50">
+            <span class="setting-hint">≥此大小的视频一律视为正片绝不删；中间档(广告阈值~此值)按文件名番号/分集/相似度多重判定</span>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
@@ -2245,6 +2250,7 @@ async function openSettings() {
     document.getElementById('cfgScrapeInterval').value    = cfg.scrape_interval || 300;
     document.getElementById('cfgScrapeSettle').value      = cfg.scrape_settle_seconds ?? 60;
     document.getElementById('cfgScrapeMinSize').value     = cfg.scrape_min_size_mb ?? 100;
+    document.getElementById('cfgScrapeKeepSize').value    = cfg.scrape_keep_size_mb ?? 300;
     document.getElementById('cfgScrapeTranslate').checked = cfg.scrape_translate_enabled !== false;
     document.getElementById('cfgScrapeMoveOnFail').checked = cfg.scrape_move_on_fail !== false;
     document.getElementById('cfgArchiveMode').value = ['hardlink','copy','move'].includes(cfg.archive_mode) ? cfg.archive_mode : 'hardlink';
@@ -2543,6 +2549,7 @@ async function saveSettings() {
     scrape_interval: Math.max(30, parseInt(document.getElementById('cfgScrapeInterval').value) || 300),
     scrape_settle_seconds: Math.max(5, parseInt(document.getElementById('cfgScrapeSettle').value) || 60),
     scrape_min_size_mb: Math.max(0, parseInt(document.getElementById('cfgScrapeMinSize').value) || 0),
+    scrape_keep_size_mb: Math.max(0, parseInt(document.getElementById('cfgScrapeKeepSize').value) || 300),
     scrape_translate_enabled: document.getElementById('cfgScrapeTranslate').checked,
     scrape_move_on_fail: document.getElementById('cfgScrapeMoveOnFail').checked,
     // V1.5 统一归档（监控 & 发种共用）

@@ -469,14 +469,13 @@ async def _step_download_poll(t: dict, config: dict):
 
 def _pick_main_videos(container_path: Path, ratio: float = 0.3) -> list:
     """
-    挑出所有「主视频」——剔除广告/赠片，但保留全部正片（分段 CD1/CD2、多场景等都要）。
+    挑出所有「主视频」——剔除广告/赠片，但保留全部正片（分段 CD1/CD2、多场景等都要），
+    并按推测的分集顺序返回（供后续 -cd1/-cd2 统一命名）。
 
-    判定复用监控归档同源逻辑（library：番号识别 + 分集标记），**不靠体量比例**：
-      旧版以「大小 >= 最大*ratio」筛选，体量较小的合法分段/场景会被误当广告删掉
-      （用户反馈：磁力种子里有多个视频时只识别到一个、其余被当广告全删）。
-    现按 library._is_extra_video 逐个判定——仅当「自身无番号、无分集标记、且同目录
-    存在带正确番号/分集标记的正片兄弟」时才判为广告剔除；目录名识不出番号（证据不足）
-    时一律保留，宁可让广告进种子也绝不误删正片。
+    判定复用监控同源的统一规则 library.classify_videos（与常规刮削整理完全一致）：
+      分层（按设置的广告大小阈值 scrape_min_size_mb / 保底正片下限 scrape_keep_size_mb）——
+      ≥保底下限或番号/分集标记或与最大文件名相似者一律保留；< 广告阈值或中间档不相似者删；
+      最大文件永远是基准主文件必留。第一原则：绝不误删正片（修复大主文件被当广告删）。
     ratio 参数保留仅为签名兼容，已不再使用。
     """
     if container_path.is_file():
@@ -487,19 +486,23 @@ def _pick_main_videos(container_path: Path, ratio: float = 0.3) -> list:
             if p.is_file() and p.suffix.lower() in VIDEO_EXTS]
     if not vids:
         return []
-    vids.sort(key=lambda p: p.name.lower())   # 稳定顺序，便于 cd1/cd2 命名
     if len(vids) == 1:
         return vids
     # watch_dir 取「容器的父目录」，使容器目录名（磁力种子常以番号命名）被当作目录番号参与判定。
     try:
-        from library import _is_extra_video
-        wd = str(container_path.parent)
-        keep = [p for p in vids if not _is_extra_video(p, wd)]
+        from library import classify_videos
+        cfg = load_config()
+        min_bytes = int(cfg.get("scrape_min_size_mb", 100)) * 1024 * 1024
+        keep_bytes = int(cfg.get("scrape_keep_size_mb", 300)) * 1024 * 1024
+        keep, drop = classify_videos(vids, str(container_path.parent), min_bytes, keep_bytes)
         if keep:
+            for d in sorted(drop, key=lambda p: p.name.lower()):
+                _log(f"判为广告/赠片（不进种子）：{d.name}")
             return keep
     except Exception:
         pass
     # 兜底（判定不可用 / 全被判为广告，理论上不会发生）：保留全部视频，绝不误删。
+    vids.sort(key=lambda p: p.name.lower())
     return vids
 
 
