@@ -302,6 +302,9 @@ class ConfigUpdateRequest(BaseModel):
     publish_anonymous: Optional[bool] = None
     publish_category: Optional[str] = None
     publish_countries: Optional[str] = None
+    # V1.5 DMM 链接自动填充
+    dmm_lookup_enabled: Optional[bool] = None
+    publish_dmm_field: Optional[str] = None
     publish_poll_interval: Optional[int] = None
     publish_upload_limit_kbps: Optional[int] = None
     publish_scrape_enabled: Optional[bool] = None
