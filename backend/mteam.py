@@ -16,6 +16,7 @@ M-Team（馒头）PT 站 API 客户端（V1.5）
 故以下解析全部走防御式（缺字段不报错），辅种最终以下载器重校验为准。
 """
 from typing import Optional
+from urllib.parse import quote
 import httpx
 
 import logbus
@@ -185,6 +186,76 @@ async def detail(config: dict, torrent_id: str) -> dict:
         return {"ok": False, "item": {}, "error": res["error"]}
     data = (res["payload"] or {}).get("data") or {}
     return {"ok": True, "item": _norm_item(data), "error": ""}
+
+
+# ──────────────────────────────────────────────
+# DMM 联想/详情（复刻网页上传页 DMM 框：输番号→出下拉候选→选中填入）
+#   M-Team 自带端点（无需 DMM 官方密钥、不受 FANZA 区域墙影响）：
+#     POST /dmm/dmmSeearch  {keyword}   联想搜索候选（注意官方拼写就是 Seearch）
+#     POST /dmm/dmmInfo     {dmmCode}   按选中的 code 取详情
+#   两者参数是 @RequestParam（query 或 form 都收），返回 data 站点未文档化，全部防御式解析。
+# ──────────────────────────────────────────────
+def _first(d: dict, *keys):
+    for k in keys:
+        v = d.get(k)
+        if v not in (None, "", [], {}):
+            return v
+    return None
+
+
+def _norm_dmm_item(it) -> dict:
+    """把一条 DMM 候选规整成统一字段（站点字段名未知，多键兜底；raw 原样留作校准）。"""
+    if isinstance(it, str):
+        return {"dmm_code": it, "url": "", "title": "", "cover": "", "raw": it}
+    if not isinstance(it, dict):
+        return {}
+    code = _first(it, "dmmCode", "dmm_code", "code", "cid", "cId", "contentId", "content_id", "value", "id")
+    url = _first(it, "url", "link", "href", "dmmUrl", "dmm_url", "detailUrl", "productUrl")
+    title = _first(it, "title", "name", "label", "text", "productName", "movieTitle", "japaneseTitle")
+    cover = _first(it, "cover", "image", "img", "thumb", "imageUrl", "imageURL", "picture", "cover_url", "poster")
+    return {
+        "dmm_code": str(code or ""), "url": str(url or ""),
+        "title": str(title or ""), "cover": str(cover or ""), "raw": it,
+    }
+
+
+def _dmm_rows(data) -> list:
+    """从无类型 data 里挖出候选数组（兼容 list / {data|list|items|records:[...]} / 单对象）。"""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for k in ("data", "list", "items", "records", "rows", "result"):
+            v = data.get(k)
+            if isinstance(v, list):
+                return v
+        return [data]  # 单对象兜底
+    return []
+
+
+async def dmm_search(config: dict, keyword: str) -> dict:
+    """DMM 联想搜索。返回 {ok, items:[{dmm_code,url,title,cover,raw}], error}。"""
+    kw = (keyword or "").strip()
+    if not kw:
+        return {"ok": False, "items": [], "error": "关键词为空"}
+    # keyword 走 query+form 双保险（@RequestParam 两处都收，避免猜错位置）
+    res = await _post(config, f"/dmm/dmmSeearch?keyword={quote(kw)}", form={"keyword": kw})
+    if not res["ok"]:
+        return {"ok": False, "items": [], "error": res["error"]}
+    data = (res["payload"] or {}).get("data")
+    items = [x for x in (_norm_dmm_item(r) for r in _dmm_rows(data)) if x]
+    return {"ok": True, "items": items, "error": ""}
+
+
+async def dmm_info(config: dict, dmm_code: str) -> dict:
+    """按 dmmCode 取 DMM 详情。返回 {ok, item, error}。"""
+    code = (dmm_code or "").strip()
+    if not code:
+        return {"ok": False, "item": {}, "error": "dmmCode 为空"}
+    res = await _post(config, f"/dmm/dmmInfo?dmmCode={quote(code)}", form={"dmmCode": code})
+    if not res["ok"]:
+        return {"ok": False, "item": {}, "error": res["error"]}
+    data = (res["payload"] or {}).get("data") or {}
+    return {"ok": True, "item": data if isinstance(data, dict) else {}, "error": ""}
 
 
 async def files(config: dict, torrent_id: str) -> dict:

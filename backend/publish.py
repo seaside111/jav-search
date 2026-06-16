@@ -278,7 +278,7 @@ def _public(t: dict) -> dict:
     return {**{k: t.get(k) for k in (
         "id", "code", "title", "title_jp", "state", "error", "mteam_id",
         "infohash", "infohash_new", "confirmed", "created", "updated", "log",
-        "check_result", "scrape_result", "media_summary", "archive_path")},
+        "check_result", "scrape_result", "media_summary", "archive_path", "dmm")},
         "state_label": _STATE_LABELS.get(t["state"], t["state"]),
         "group": _STATE_GROUP.get(t["state"], "active")}
 
@@ -718,6 +718,24 @@ async def _step_process(t: dict, config: dict):
     title_jp = t.get("title_jp", "")
     _set(t, note=f"命中影片：{title_jp[:40] or '(无标题)'}")
 
+    # DMM 链接查询：有码字母+数字番号 → 调 M-Team 自带 DMM 联想接口取 dmmCode/链接，
+    # 存到任务上，发布(_step_upload)时填入 DMM 框。失败/跳过都不阻断发种。
+    try:
+        import dmm as dmm_mod
+        dsrc = (movie.get("source") if movie else "") or t.get("source_site", "")
+        dres = await dmm_mod.resolve(config, t["code"], dsrc)
+        t["dmm"] = dres
+        if dres.get("skipped"):
+            _set(t, note=f"DMM 查询跳过：{dres.get('error', '')}")
+        elif dres.get("ok"):
+            _set(t, note=f"DMM 命中：{dres.get('dmm_code') or dres.get('url') or '(空)'}"
+                         + ("" if dres.get("matched")
+                            else f"（番号未精确匹配，取候选首条·共{dres.get('count')}条，请人工核对）"))
+        else:
+            _set(t, note=f"DMM 未取到（不阻断发布，可手动填）：{dres.get('error', '')}")
+    except Exception as e:
+        _set(t, note=f"DMM 查询异常（忽略）：{e}")
+
     # 3) 规整：在【下载目录原地】建「番号文件夹」，视频移入其中（制种/做种都以该文件夹为单位）
     #    刮削开=视频改名番号.ext + 写 NFO/封面入文件夹；刮削关=保留原文件名、不写 NFO/封面
     #    .meta（截图/种子产物，不进种子）放工作目录根下，作番号文件夹的兄弟，不污染番号文件夹
@@ -922,12 +940,19 @@ async def _step_upload(t: dict, config: dict):
     # 主标题与副标题都用「番号 + 片名」：先剥掉片名里可能已含的番号前缀再统一加，避免缺番号或重复。
     _disp = _strip_code_prefix((t.get("title") or t.get("title_jp", "")).strip(), t["code"])
     main_title = _compose_title(t["code"], _disp)
+    # DMM 框：用 _step_process 查到的 DMM 结果（复刻网页联想→选中填入）。
+    #   publish_dmm_field=url 填完整链接，否则填 dmmCode（站点规范值）；查不到则留空（不再塞原始番号）。
+    dmm = t.get("dmm") or {}
+    if (config.get("publish_dmm_field") or "code").lower() == "url":
+        dmm_value = dmm.get("url") or dmm.get("dmm_code") or ""
+    else:
+        dmm_value = dmm.get("dmm_code") or dmm.get("url") or ""
     fields = {
         "name": main_title.strip()[:255],
         "smallDescr": f"{t['code']} {t.get('title_jp', '')}".strip()[:255],
         "descr": descr,
         "category": int(str(category)) if str(category).isdigit() else category,
-        "dmmCode": (t.get("code") or "").strip().upper(),   # 番号填入 DMM 字段（M-Team 接受此格式）
+        "dmmCode": dmm_value,   # 由 DMM 联想查询得到（查不到留空，可在站点手动补）
         "mediainfo": t.get("mediainfo_text", ""),
         "anonymous": bool(config.get("publish_anonymous", False)),
     }
@@ -1277,3 +1302,18 @@ async def api_mteam_conf():
     if not data:
         raise HTTPException(status_code=502, detail="拉取枚举失败（检查密钥/地址）")
     return {"success": True, "data": data}
+
+
+@router.get("/dmm/search")
+async def api_dmm_search(keyword: str):
+    """DMM 联想测试（设置页用）：返回站点原始候选 + 解析后会填入的值，便于核对字段。"""
+    import dmm as dmm_mod
+    config = load_config()
+    raw = await mteam.dmm_search(config, keyword)
+    resolved = await dmm_mod.resolve(config, keyword, "")
+    return {
+        "ok": raw["ok"],
+        "error": raw.get("error", "") or resolved.get("error", ""),
+        "items": raw.get("items", []),     # 含 raw 原字段，便于校准未知字段名
+        "resolved": resolved,              # 实际会填入 dmmCode 的值 + 是否精确匹配
+    }

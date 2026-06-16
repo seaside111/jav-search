@@ -244,6 +244,31 @@
     </div>
 
     <div class="group">
+      <h3>DMM 链接</h3>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="cfgDmmEnabled" checked> 自动查询并填入 DMM 框</label>
+        <span class="hint">对【有码·字母+数字番号】（javbus/javdb 等来源）发种时，调 M-Team 自带 DMM 联想接口取 dmmCode 自动填入。FC2/无码/日期型番号自动跳过</span>
+      </div>
+      <div class="row">
+        <label class="lbl">DMM 框填入</label>
+        <select id="cfgDmmField">
+          <option value="code">dmmCode（站点规范值，默认）</option>
+          <option value="url">完整 DMM 链接 URL</option>
+        </select>
+        <span class="hint">不确定填哪个时先用默认 code，发一帖看站点是否认；不认再切 url</span>
+      </div>
+      <div class="row">
+        <label class="lbl">联想测试</label>
+        <div style="display:flex;gap:8px;flex:1">
+          <input type="text" id="cfgDmmTest" placeholder="输入番号如 ABP-123" style="flex:1">
+          <button class="btn-sm" onclick="testDmm()">测试</button>
+        </div>
+        <span class="hint">需先填 M-Team 密钥并保存。用于校准站点候选字段（返回里看 raw）</span>
+      </div>
+      <div class="msg" id="dmmTestOut"></div>
+    </div>
+
+    <div class="group">
       <h3>下载 / 截图 / 做种</h3>
       <div class="two-col">
         <div class="row">
@@ -385,6 +410,8 @@ async function loadConfig(){
     $('cfgPubDeleteFiles').checked = !!c.publish_delete_files;
     $('cfgPubAnonymous').checked = !!c.publish_anonymous;
     $('cfgPubAuto').checked = !!c.publish_auto;
+    $('cfgDmmEnabled').checked = c.dmm_lookup_enabled !== false;
+    $('cfgDmmField').value = c.publish_dmm_field || 'code';
     updateStopGate();
     if (c.mteam_api_key) checkMteam();
   } catch(e){ /* ignore */ }
@@ -428,6 +455,8 @@ async function saveSettings(){
     publish_delete_files: $('cfgPubDeleteFiles').checked,
     publish_anonymous: $('cfgPubAnonymous').checked,
     publish_auto: $('cfgPubAuto').checked,
+    dmm_lookup_enabled: $('cfgDmmEnabled').checked,
+    publish_dmm_field: $('cfgDmmField').value,
   };
   const msg = $('saveMsg'); msg.style.color='var(--text-dim)'; msg.textContent='保存中…';
   try {
@@ -486,6 +515,29 @@ async function fetchConf(){
     if (Array.isArray(data.category)) out += '【分类】(填上面「发布分类 id」)\n'+fmt(data.category)+'\n\n';
     if (Array.isArray(data.country)) out += '【国家/地区】(填「国家/地区 id」)\n'+fmt(data.country)+'\n';
     box.textContent = out || ('已拉取，但结构需人工查看：\n'+JSON.stringify(data).slice(0,800));
+  } catch(e){ box.textContent='✗ 出错：'+e.message; }
+}
+async function testDmm(){
+  const kw = $('cfgDmmTest').value.trim();
+  const box = $('dmmTestOut');
+  if (!kw){ box.textContent='请输入番号'; return; }
+  box.textContent='查询中…（需先填密钥并保存）';
+  try {
+    const r = await fetch(`${API}/api/publish/dmm/search?keyword=${encodeURIComponent(kw)}`);
+    const d = await safeJson(r);
+    if (!r.ok){ box.textContent='✗ '+(d.detail||'查询失败'); return; }
+    const rv = d.resolved||{}, items = d.items||[];
+    let out = '';
+    if (d.error) out += '⚠ '+d.error+'\n';
+    out += `将填入 dmmCode：${rv.dmm_code||'(空)'}`
+         + (rv.matched?'（精确匹配）':'（番号未精确匹配，取候选首条·请核对）') + '\n';
+    if (rv.url) out += '链接：'+rv.url+'\n';
+    out += `\n候选 ${items.length} 条：\n`
+         + items.slice(0,8).map(x=>`· ${x.dmm_code||'?'} | ${x.title||''}`).join('\n');
+    if (items.length && !items[0].dmm_code)
+      out += '\n\n（候选 dmm_code 为空？字段名可能不同，看下面 raw 校准）\n'
+           + JSON.stringify(items[0].raw||items[0]).slice(0,500);
+    box.textContent = out;
   } catch(e){ box.textContent='✗ 出错：'+e.message; }
 }
 
@@ -555,10 +607,19 @@ function renderTaskDetail(t){
     <dt>状态</dt><dd>${escHtml(t.state_label||'')}${t.error?' · ⚠ '+escHtml(t.error):''}</dd>
     <dt>站点 id</dt><dd>${t.mteam_id?escHtml(t.mteam_id):'—'}</dd>
   </dl>`;
+  const dm = t.dmm||{};
+  let dmmHtml;
+  if (dm.skipped) dmmHtml = '—（无码/非字母番号，跳过）';
+  else if (dm.dmm_code||dm.url){
+    dmmHtml = escHtml(dm.dmm_code||'')
+      + (dm.url?` · <a href="${escHtml(dm.url)}" target="_blank" rel="noreferrer">链接</a>`:'')
+      + (dm.matched?'':' <span style="color:var(--orange,#e90)">⚠候选首条·请核对</span>');
+  } else dmmHtml = dm.error?('（未取到：'+escHtml(dm.error)+'）'):'—';
   html += `<div class="sec-h">查询/刮削情况</div><dl class="dl">
     <dt>命中影片</dt><dd>${sr.found?'是':'否'}${sr.source?'（来源 '+escHtml(sr.source)+'）':''}</dd>
     <dt>演员</dt><dd>${(sr.actors&&sr.actors.length)?escHtml(sr.actors.join('、')):'—'}</dd>
     <dt>媒体规格</dt><dd>${ms.height?escHtml((ms.height+'p '+(ms.video_codec||'')+' '+(ms.audio_codec||'')).trim()):'—'}</dd>
+    <dt>DMM</dt><dd>${dmmHtml}</dd>
     <dt>归档</dt><dd>${t.archive_path?escHtml(t.archive_path):'—'}</dd>
   </dl>`;
   html += `<div class="sec-h">站点查重</div><dl class="dl">
