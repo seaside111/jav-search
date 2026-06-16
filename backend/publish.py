@@ -392,6 +392,14 @@ async def _step_check(t: dict, config: dict) -> bool:
 async def _step_download_start(t: dict, config: dict) -> bool:
     """推送磁力到下载器并记录 infohash。"""
     before = {x["hash"] for x in await downloader.list_torrents(config)}
+    # 幂等续跑：重启/重试场景下，原磁力可能仍在下载器里（甚至已下完做种）。
+    # 此时重复 add 既浪费、又可能因 hash 口径不一致导致后续轮询找不到种子、白白重下重校。
+    # 先按【已记录的 infohash 或磁力 btih】探测下载器，命中即直接复用、进入轮询，不重复推送。
+    probe_ih = (t.get("infohash") or _infohash_from_magnet(t["download_url"]) or "").lower()
+    if probe_ih and probe_ih in {h.lower() for h in before}:
+        _set(t, state=DOWNLOADING, infohash=probe_ih, settle_ticks=0,
+             note=f"下载器已存在该种子 {probe_ih[:12]}，复用续跑（不重复推送）")
+        return True
     cat = (config.get("crossseed_category") or "mteam").strip()
     # 这是「发布页下载源片用的磁力」——属非 PT 站种子，套用全局磁力限速；
     # 真正按发布页限速跑的只有后面 _step_reseed 取回的官方做种种子。
@@ -1068,6 +1076,13 @@ async def _advance(t: dict, config: dict):
                 await _step_download_start(t, config)
         elif st == DOWNLOADING:
             await _step_download_poll(t, config)
+        elif st == READY:
+            # 闸门在 _step_process 末尾只判一次 publish_auto；若当时开关尚未生效
+            # （设置保存稍晚 / 任务在开启前就到了 READY），任务会卡在待确认。
+            # 这里每 tick 复判：开关开着或已预授权 → 自动进入发布，使「自动发布」可靠且可追溯。
+            if config.get("publish_auto") or t.get("confirmed"):
+                _set(t, note="自动发布开关生效，自动进入发布")
+                await _step_upload(t, config)
         elif st == UPLOADING:
             pass  # 由确认触发，不在 tick 重入
         elif st == SEEDING:
@@ -1094,6 +1109,10 @@ async def _tick():
                 coros.append(_advance(t, config))
         elif st in (DOWNLOADING, SEEDING):
             if t["id"] not in _BUSY:
+                coros.append(_advance(t, config))
+        elif st == READY:
+            # 仅当「自动发布」开着或该任务已预授权时才推进；纯人工确认的任务静待用户点确认
+            if (config.get("publish_auto") or t.get("confirmed")) and t["id"] not in _BUSY:
                 coros.append(_advance(t, config))
     if coros:
         await asyncio.gather(*coros, return_exceptions=True)
