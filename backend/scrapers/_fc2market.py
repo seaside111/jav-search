@@ -164,8 +164,14 @@ async def fetch_fc2_latest(proxy: Optional[str] = None, limit: int = 60,
         proxy = _proxy()
     cookie = _market_cookie()
     cookies = {**_AGE_COOKIES, **(_parse_cookie_str(cookie) if cookie else {})}
-    # 自动按 limit 估算页数（每页约 18 个有效番号），封顶 8 页
-    pages = min(8, max(max_pages, math.ceil(max(1, limit) / 18)))
+    # 翻页策略按模式区分：
+    #  - 免登录首页(?sort=date)：是「新着+排行+推荐」混排，唯一番号实测饱和在 ~40，翻再多
+    #    页也是重复 → 封顶 3 页即可（够拿最新一批，且快，不空跑）。
+    #  - 登录搜索(/search)：真正的倒序分页，按 limit 深翻（每页约 18 个），封顶 10 页。
+    if cookie:
+        pages = min(10, max(max_pages, math.ceil(max(1, limit) / 18)))
+    else:
+        pages = max(max_pages, 3)
 
     def search_url(p):
         return f"{MARKET_BASE}/search/?sort=date&order=desc" + ("" if p == 1 else f"&page={p}")
@@ -191,3 +197,40 @@ async def fetch_fc2_latest(proxy: Optional[str] = None, limit: int = 60,
     # 按番号降序再截断：避免最新号因混排页序靠后被 limit 砍掉
     cards.sort(key=lambda c: int(re.sub(r"\D", "", c["code"]) or 0), reverse=True)
     return cards[: max(1, limit)]
+
+
+# 商品页主封面：<meta property="og:image"> 的卖家上传全图（storage*.contents.fc2.com）
+_OG_IMG_RE = re.compile(
+    r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)', re.I)
+
+
+async def fetch_cover(num: str, proxy: Optional[str] = None) -> str:
+    """抓单个 FC2 商品页 /article/<num>/ 的封面（og:image 全图）。直连、不过盾。
+    用于给「卖场最新列表够不到的老号」也补上卖场真封面，彻底不依赖 MissAV。
+    失败/番号不存在/取到的是站点 logo 等非商品图 → 返回 ''。"""
+    if not num:
+        return ""
+    if proxy is None:
+        proxy = _proxy()
+    cookie = _market_cookie()
+    cookies = {**_AGE_COOKIES, **(_parse_cookie_str(cookie) if cookie else {})}
+    url = f"{MARKET_BASE}/article/{num}/"
+    try:
+        async with httpx.AsyncClient(headers=_HEADERS, cookies=cookies,
+                                     proxy=proxy or None, timeout=12,
+                                     follow_redirects=True) as client:
+            r = await client.get(url)
+        if r.status_code != 200 or not r.text:
+            return ""
+        m = _OG_IMG_RE.search(r.text)
+        if not m:
+            return ""
+        u = m.group(1).strip()
+        if u.startswith("//"):
+            u = "https:" + u
+        # 真商品封面在 storage*.contents.fc2.com/file/...；排除站点 logo 等占位
+        if "contents.fc2.com" in u and "/file/" in u:
+            return u
+        return ""
+    except Exception:
+        return ""

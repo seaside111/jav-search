@@ -57,7 +57,7 @@ DEFAULT_CONFIG = {
         "javdb": 40,
         "avsox": 40,
         "avmoo": 40,
-        "fc2": 60,                       # FC2 最新条数；走 sukebei 按需翻页发现，硬上限 100（见 fc2.FC2_LATEST_MAX）
+        "fc2": 100,                      # FC2 最新条数；sukebei(深)+官方卖场(最新)双源发现，硬上限 200（见 fc2.FC2_LATEST_MAX）
     },
     # 资源搜索（磁力/种子）：默认用 sukebei.nyaa.si（直连、免配置）；
     # jackett_enabled=True 且配置了 Jackett 时，Jackett 优先、sukebei 兜底。

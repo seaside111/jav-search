@@ -26,10 +26,10 @@ from ._fsgate import (flaresolverr_request as _fs_request, discover_auto as _fs_
 FC2_BASE = "https://fc2ppvdb.com"
 SOURCE = "FC2"
 
-# FC2 首页最新「条数」硬上限。实测 sukebei 每页去重后约 64-70 个唯一番号，
-# fetch_fc2_latest 支持按需翻页，两页即可稳定覆盖 100。封顶 100 保证始终走 sukebei 快路，
-# 不会因数值过大被迫回退慢的 fc2ppvdb（过盾易超时→首页空）。前端输入也按此值收口。
-FC2_LATEST_MAX = 100
+# FC2 首页最新「条数」硬上限。实测 sukebei 单源就有 300+ 唯一番号（按需翻页、直连快），
+# 官方卖场再贡献最新的 ~40 顶在最前——两快源合并去重 300+，足够支撑较大数量。封顶 200，
+# 既能满足"更多最新"，又不至于让 sukebei 翻太多页拖慢首页。前端输入也按此值收口。
+FC2_LATEST_MAX = 200
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -406,6 +406,11 @@ async def _fetch_list_pages(url_builder, proxy, max_results, max_pages=10,
 _LIST_ENRICH_CACHE: dict = {}
 _LIST_ENRICH_CACHE_MAX = 2000
 
+# 卖场封面缓存（num → 商品页 og:image）。给「卖场最新列表够不到的老号」补卖场真封面用，
+# 由后台 _market_cover_prewarm_bg 渐进填充。纯内存、容量上限近似 LRU。
+_MARKET_COVER_CACHE: dict = {}
+_MARKET_COVER_CACHE_MAX = 4000
+
 
 def _cache_put(num: str, data: dict) -> None:
     """写入 MissAV 结果缓存（带容量上限 LRU 近似：满了丢最早的）。"""
@@ -417,6 +422,19 @@ def _cache_put(num: str, data: dict) -> None:
     if len(_LIST_ENRICH_CACHE) >= _LIST_ENRICH_CACHE_MAX:
         _LIST_ENRICH_CACHE.pop(next(iter(_LIST_ENRICH_CACHE)))
     _LIST_ENRICH_CACHE[num] = data
+
+
+def _market_cover_put(num: str, url: str) -> None:
+    if not num or not url:
+        return
+    if num not in _MARKET_COVER_CACHE and len(_MARKET_COVER_CACHE) >= _MARKET_COVER_CACHE_MAX:
+        _MARKET_COVER_CACHE.pop(next(iter(_MARKET_COVER_CACHE)))
+    _MARKET_COVER_CACHE[num] = url
+
+
+def _is_market_cover(u: str) -> bool:
+    """是否已是 FC2 卖场封面（contents.fc2.com 图床）。"""
+    return "contents.fc2.com" in (u or "") or "contents-thumbnail" in (u or "")
 
 
 def _missav_enabled() -> bool:
@@ -690,21 +708,69 @@ def _merge_latest(rich_items: list[dict], extra_items: list[dict]) -> list[dict]
 
 
 def _apply_market_covers(items: list[dict], market_items: list[dict]) -> None:
-    """用 FC2 卖场的真实封面/标题回填已合并条目。
-    合并时同番号优先保留先到的卡（sukebei/fc2ppvdb），但它们的封面多是 fourhoi 猜测、
-    对最新番号会 404 → 这里对「无封面或仅 fourhoi 猜测」的条目，用卖场自带缩略图升级，
-    顺带补上卖场真实标题。这样最新卡在列表就能稳定出真封面。"""
+    """**以 FC2 官方卖场封面为准**覆盖列表封面。
+    卖场图是卖家真截图、稳定可用；而 MissAV 补图缓存里可能存下旧的失败/失效封面
+    （fourhoi 对新号 404、或已失效的 missav 图床地址），这类封面非 fourhoi、不会被
+    「不降级」规则换掉，于是旧失败封面一直贴着。故凡卖场有该番号的真实封面，一律用它，
+    覆盖之前任何来源（含 MissAV 缓存）写入的封面。**须在 _apply_cached_missav 之后调用**，
+    确保卖场图最终生效。标题仅在缺失时补卖场标题（不覆盖 MissAV 的干净标题）。"""
     mp = {m.get("code"): m for m in market_items
           if m.get("cover") and not _is_guess_cover(m.get("cover"))}
     for it in items:
+        num = _extract_number(it.get("code") or it.get("url") or "")
         m = mp.get(it.get("code"))
-        if not m:
+        if m:
+            it["cover"] = m["cover"]                      # 卖场列表封面，最权威
+            if _needs_title(it) and m.get("title"):
+                it["title"] = m["title"]
+        elif num and _MARKET_COVER_CACHE.get(num):
+            it["cover"] = _MARKET_COVER_CACHE[num]        # 老号：用后台预抓的卖场商品页封面
+
+
+# ── 后台「卖场封面」预抓：给列表里仍非卖场封面的老号补 /article 商品页封面 ──
+_COVER_PREWARM_LOCK = asyncio.Lock()
+_COVER_PREWARM_TASKS: set = set()
+_COVER_PREWARM_THROTTLE = 0.3
+_COVER_PREWARM_MAX = 120          # 单轮最多补多少个老号封面
+
+
+def _schedule_market_cover_prewarm(items: list[dict], proxy: Optional[str]) -> None:
+    """后台给「卖场列表够不到、且当前不是卖场封面」的老号补 /article 商品页封面（fire-and-forget）。
+    以官方卖场为唯一封面权威，彻底不依赖 MissAV。"""
+    if not _market_enabled() or _COVER_PREWARM_LOCK.locked():
+        return
+    nums = []
+    for it in items:
+        if _is_market_cover(it.get("cover") or ""):       # 已是卖场封面，跳过
             continue
-        cur = it.get("cover") or ""
-        if (not cur) or _is_guess_cover(cur):
-            it["cover"] = m["cover"]
-        if _needs_title(it) and m.get("title"):
-            it["title"] = m["title"]
+        num = _extract_number(it.get("code") or it.get("url") or "")
+        if num and not _MARKET_COVER_CACHE.get(num):
+            nums.append(num)
+    nums = nums[:_COVER_PREWARM_MAX]
+    if not nums:
+        return
+    try:
+        task = asyncio.create_task(_market_cover_prewarm_bg(nums, proxy))
+        _COVER_PREWARM_TASKS.add(task)
+        task.add_done_callback(_COVER_PREWARM_TASKS.discard)
+    except RuntimeError:
+        pass
+
+
+async def _market_cover_prewarm_bg(nums: list[str], proxy: Optional[str]) -> None:
+    if _COVER_PREWARM_LOCK.locked():
+        return
+    async with _COVER_PREWARM_LOCK:
+        for num in nums:
+            if _MARKET_COVER_CACHE.get(num):
+                continue
+            try:
+                cover = await _fc2market.fetch_cover(num, proxy)
+            except Exception:
+                cover = ""
+            if cover:
+                _market_cover_put(num, cover)
+            await asyncio.sleep(_COVER_PREWARM_THROTTLE)
 
 
 async def _fetch_fc2ppvdb_latest(proxy: Optional[str], pool: int) -> list[dict]:
@@ -764,25 +830,24 @@ async def get_latest(proxy: Optional[str] = None, max_results: int = 40) -> list
                         lambda: _fc2market.fetch_fc2_latest(proxy, limit=pool), "官方卖场"),
     )
 
-    # sukebei 已够量 → 不再碰慢的 fc2ppvdb 首页（过盾易超时）；不够才抓 fc2ppvdb 补字段
-    if len(sukebei_items) >= max_results:
-        items = sukebei_items
+    # 两个快源（都直连）合并为快池：sukebei 量大且深(卡有种子标题)、官方卖场补最新的 ~40。
+    # 关键：用「合并池」判断够不够，而非只看 sukebei——否则数量调高(如 150)时 sukebei 单源
+    # 可能不足而误触发慢的 fc2ppvdb(过盾易超时→首页空)。合并池 300+，几乎不会再触发慢路径。
+    fast = _merge_latest(sukebei_items, market_items)  # sukebei 卡优先(有标题)，卖场补新号
+    if len(fast) >= max_results:
+        items = fast
     else:
-        # 不够（或未启用/失败）：抓 fc2ppvdb 首页补全，rich 为主、sukebei 补新号
+        # 两快源合计仍不够 → 才回退慢的 fc2ppvdb 首页补字段
         rich = await _fetch_fc2ppvdb_latest(proxy, pool)
-        items = _merge_latest(rich, sukebei_items)
-
-    # 并入官方卖场番号（按番号去重，同号优先保留已有的较丰富卡片；卖场独有的更新号
-    # 编号最高 → 下一步降序后自动顶到最前）
-    items = _merge_latest(items, market_items)
-    # 用卖场真封面/标题回填：同号卡若只有 fourhoi 猜测封面(新号会404)，换成卖场真缩略图
-    _apply_market_covers(items, market_items)
+        items = _merge_latest(rich, fast)
 
     # 编号降序后截取最新 max_results：让真正最新的番号排在最前（详见 _sort_by_number_desc）
     items = _sort_by_number_desc(items)[:max_results]
     items = await _enrich_list_missav(items, proxy)   # 缺标题的卡内联补全（sukebei 卡有标题→跳过，快）
-    _apply_cached_missav(items)                        # 已预热的卡升级成干净标题/封面（零网络）
-    _schedule_prewarm(items, proxy)                    # 后台慢慢抓 MissAV(含样品图)入缓存
+    _apply_cached_missav(items)                        # 已预热的卡升级干净标题（可能含旧失败封面）
+    _apply_market_covers(items, market_items)          # **以卖场封面为准**，放最后覆盖一切（含旧失败缓存封面）
+    _schedule_market_cover_prewarm(items, proxy)       # 后台给老号补卖场商品页封面（下次刷新即生效）
+    _schedule_prewarm(items, proxy)                    # 后台慢慢抓 MissAV(样品图)入缓存
     return items
 
 
