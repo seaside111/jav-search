@@ -21,7 +21,8 @@ DEFAULT_CONFIG = {
     "fc2_cookie": "",                    # 可选：手动填入 fc2ppvdb 的 Cookie（如 cf_clearance=xxx）
     # V1.4.3：用 MissAV 给 FC2 补全封面/标题/女优/标签（fc2ppvdb 对下架条目常缺这些）
     "fc2_missav_enabled": True,          # 是否启用 MissAV 补全
-    "fc2_missav_base": "",               # MissAV 镜像（逗号分隔，留空用内置默认 missav.ws）
+    "fc2_missav_base": "",               # MissAV 镜像（逗号分隔，留空＝自动发现最新域名）
+    "fc2_missav_auto_discover": True,    # 后台定时自动发现最新 MissAV 域名（fc2_missav_base 留空时生效）
     # V1.4.4：FC2 最新片源抓取页数。实测 fc2ppvdb 首页 `/` 不支持翻页（page=2=page=1）、
     # 也忽略 per_page/limit，且一次就返回约 100 条（最新+人気混排）。故默认 1：取这一页后
     # 全量按编号降序、截取最新 N 条即可。此项仅对需登录的 /articles 兜底列表可能有效，

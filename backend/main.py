@@ -102,6 +102,12 @@ async def _on_startup():
         _asyncio.create_task(_qb.ensure_trackers_fresh(load_config()))
     except Exception as e:
         print(f"[启动] tracker 列表预热失败: {e}", flush=True)
+    # 后台定时自动发现最新 MissAV 域名（域名常变，保持 FC2 封面/信息补全不断链）
+    try:
+        from scrapers import _missav
+        _missav.start_discover_loop(load_config)
+    except Exception as e:
+        print(f"[启动] MissAV 域名发现启动失败: {e}", flush=True)
     # 按配置拉起后台刮削监控
     print(f"[启动] JAV Search {APP_VERSION} 启动完成，初始化刮削监控…", flush=True)
     try:
@@ -245,6 +251,7 @@ class ConfigUpdateRequest(BaseModel):
     fc2_cookie: Optional[str] = None
     fc2_missav_enabled: Optional[bool] = None
     fc2_missav_base: Optional[str] = None
+    fc2_missav_auto_discover: Optional[bool] = None
     # V1.4.4 FC2 最新片源抓取页数（前 N 页跨页去重 + 编号降序汇总）
     fc2_latest_pages: Optional[int] = None
     # V1.4.4 FC2 最新优先用 sukebei 发现（更新更快、直连不过盾）
@@ -976,6 +983,24 @@ async def api_refresh_trackers():
     """强制刷新公共 tracker 列表（抓在线 best 列表）。返回最新列表 + 来源。"""
     import qbittorrent as _qb
     return await _qb.refresh_trackers(load_config())
+
+
+@app.get("/api/missav/bases")
+async def api_get_missav_bases():
+    """返回当前生效的 MissAV 镜像域名 + 来源（TTL 内不重抓）。"""
+    from scrapers import _missav
+    st = await _missav.discover_bases(load_config())
+    src_label = {"discovered": "自动发现", "file": "本地缓存",
+                 "user": "用户自填", "fallback": "内置兜底"}.get(st["source"], st["source"])
+    return {"ok": True, "count": len(st["list"]), "source": st["source"],
+            "source_label": src_label, "bases": st["list"]}
+
+
+@app.post("/api/missav/bases/refresh")
+async def api_refresh_missav_bases():
+    """强制重新发现最新 MissAV 域名（抓当前可达镜像的自荐域名→探活排序）。"""
+    from scrapers import _missav
+    return await _missav.refresh_bases(load_config())
 
 
 # ──────────────────────────────────────────────
