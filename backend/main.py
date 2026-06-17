@@ -256,6 +256,8 @@ class ConfigUpdateRequest(BaseModel):
     fc2_latest_pages: Optional[int] = None
     # V1.4.4 FC2 最新优先用 sukebei 发现（更新更快、直连不过盾）
     fc2_latest_use_sukebei: Optional[bool] = None
+    # V1.5.0-beta23 FC2 官方卖场最新发现源（源头、最新最全、直连不过盾）
+    fc2_latest_use_market: Optional[bool] = None
     # V1.4.4 后台预抓 FC2 最新的 MissAV（标题/封面/样品图，低负担）
     fc2_prefetch_missav: Optional[bool] = None
     fc2_prefetch_count: Optional[int] = None

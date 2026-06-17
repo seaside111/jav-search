@@ -31,6 +31,9 @@ DEFAULT_CONFIG = {
     # V1.4.4：FC2 最新优先用 sukebei 发现（种子站按 id 倒序＝最新、直连不过盾、最快），
     # 能拿到 fc2ppvdb 新着列表够不到的最新号；sukebei 够量就跳过慢的 fc2ppvdb 首页。默认开。
     "fc2_latest_use_sukebei": True,
+    # V1.5.0-beta23：FC2 官方卖场(adult.contents.fc2.com)做最新发现源——源头、最新最全、
+    # 直连不过盾，专补 sukebei「已上架未发种」的更新空窗。默认开，与 sukebei 并列合并。
+    "fc2_latest_use_market": True,
     # V1.4.4：后台预抓 FC2 最新的 MissAV（标题/封面/样品图，直连不过盾、低负担），
     # 串行+节流慢慢灌缓存：列表卡升级干净标题/封面、点开详情样品图秒出。女优/标签不预抓。
     "fc2_prefetch_missav": True,

@@ -19,6 +19,7 @@ from bs4 import BeautifulSoup
 
 from . import _missav
 from . import _sukebei
+from . import _fc2market
 from ._fsgate import (flaresolverr_request as _fs_request, discover_auto as _fs_discover,
                       PRIO_DETAIL, PRIO_SEARCH, PRIO_LATEST)
 
@@ -473,10 +474,14 @@ async def _enrich_list_missav(items: list[dict], proxy: Optional[str],
 
 # ──────────────────────────────────────────────
 # 后台 MissAV 预抓（V1.4.4，用户选「只预抓便宜部分」）
-# sukebei 最新卡只有种子标题 + fourhoi 封面；MissAV 详情(直连、不过盾、便宜)能补
-# 干净标题 + 真封面 + 样品图。这里后台**串行 + 节流 + 直连**慢慢把最新 N 条的 MissAV
-# 结果灌进 _LIST_ENRICH_CACHE：① 后续刷新时列表卡升级成干净标题/封面；② 点开详情时
-# 样品图秒出（女优/标签仍点开走 fc2ppvdb，按用户选择不预抓）。全程不碰 FlareSolverr。
+# sukebei 最新卡只有种子标题 + fourhoi 封面；MissAV 能补干净标题 + 真封面 + 样品图。
+# 这里后台**串行 + 节流**慢慢把最新 N 条的 MissAV 结果灌进 _LIST_ENRICH_CACHE：
+# ① 后续刷新时列表卡升级成干净标题/封面 + 追加 MissAV 来源标签；② 点开详情时样品图
+# 秒出（女优/标签仍点开走 fc2ppvdb，按用户选择不预抓）。
+# V1.5.0-beta23：MissAV 把所有镜像都套了 Cloudflare（旧的可直连镜像 .ws 也上盾了），
+# 直连已拿不到任何数据 → 预抓改为**允许走 FlareSolverr 过盾**。这里是后台**串行**的
+# （_PREWARM_LOCK 保证同时只一个 runner）、每条间隔节流、且经 _fsgate 全局串行 + 过载
+# 熔断保护，负担可控；区别于同步触发的列表补全（并发 8，仍坚持直连以免压垮 FlareSolverr）。
 # ──────────────────────────────────────────────
 _PREWARM_LOCK = asyncio.Lock()       # 同一时刻只跑一个预抓 runner，避免并发请求重复预抓
 _PREWARM_TASKS: set = set()          # 持有后台任务引用，防止被 GC 提前回收
@@ -525,7 +530,9 @@ async def _prewarm_missav_bg(nums: list[str], proxy: Optional[str]) -> None:
             if _LIST_ENRICH_CACHE.get(num):     # 已有正向缓存，跳过
                 continue
             try:
-                data = await _missav.fetch_fc2(num, proxy, allow_flaresolverr=False)
+                # 允许过盾：当前 MissAV 所有镜像均需 Cloudflare 绕过，直连拿不到数据。
+                # 后台串行 + 经 _fsgate 全局串行/熔断，负担可控。
+                data = await _missav.fetch_fc2(num, proxy, allow_flaresolverr=True)
             except Exception:
                 data = None
             if data:                            # 只缓存正向结果；空的留给详情走 FS 兜底
@@ -644,6 +651,16 @@ def _sukebei_enabled() -> bool:
         return True
 
 
+def _market_enabled() -> bool:
+    """是否启用 FC2 官方卖场最新发现源（V1.5.0-beta23，配置 fc2_latest_use_market，默认 True）。
+    卖场是源头（最新最全），直连不过盾，专补 sukebei「已上架未发种」的空窗。"""
+    try:
+        from config_manager import load as load_config
+        return bool(load_config().get("fc2_latest_use_market", True))
+    except Exception:
+        return True
+
+
 def _merge_latest(rich_items: list[dict], extra_items: list[dict]) -> list[dict]:
     """合并两路最新：以 rich_items（fc2ppvdb，字段全）为主，按番号去重，
     extra_items（sukebei，字段少但更新）只补充 rich 里没有的番号。"""
@@ -693,22 +710,37 @@ async def get_latest(proxy: Optional[str] = None, max_results: int = 40) -> list
     # 不再放大 pool，保证小数量(如默认 60)仍是单页、最快。
     pool = max_results
 
-    sukebei_items = []
-    if _sukebei_enabled():
+    # sukebei（种子站，按 id 倒序）与 FC2 官方卖场（源头，最新最全）并列做发现源：
+    # 二者均**直连不过盾、互不依赖**，并发抓取省时。卖场专补 sukebei「卖家已上架、
+    # 尚无人发种」的更新空窗（实测卖场领先 sukebei 数部）。任一失败只返回 []，绝不
+    # 让 FC2 最新整体消失。
+    async def _fetch_or_empty(enabled, coro_factory, label):
+        if not enabled:
+            return []
         try:
-            sukebei_items = await _sukebei.fetch_fc2_latest(proxy, limit=pool)
+            return await coro_factory()
         except Exception as e:
-            # sukebei 出任何问题都只降级到 fc2ppvdb，绝不让 FC2 最新整个消失
-            print(f"[FC2] sukebei 最新失败，降级 fc2ppvdb: {type(e).__name__}: {e}")
-            sukebei_items = []
+            print(f"[FC2] {label} 最新失败: {type(e).__name__}: {e}")
+            return []
 
-    # sukebei 已够量 → 不再碰慢的 fc2ppvdb 首页，直接排序返回（最新且最快）
+    sukebei_items, market_items = await asyncio.gather(
+        _fetch_or_empty(_sukebei_enabled(),
+                        lambda: _sukebei.fetch_fc2_latest(proxy, limit=pool), "sukebei"),
+        _fetch_or_empty(_market_enabled(),
+                        lambda: _fc2market.fetch_fc2_latest(proxy, limit=pool), "官方卖场"),
+    )
+
+    # sukebei 已够量 → 不再碰慢的 fc2ppvdb 首页（过盾易超时）；不够才抓 fc2ppvdb 补字段
     if len(sukebei_items) >= max_results:
         items = sukebei_items
     else:
         # 不够（或未启用/失败）：抓 fc2ppvdb 首页补全，rich 为主、sukebei 补新号
         rich = await _fetch_fc2ppvdb_latest(proxy, pool)
         items = _merge_latest(rich, sukebei_items)
+
+    # 并入官方卖场番号（按番号去重，同号优先保留已有的较丰富卡片；卖场独有的更新号
+    # 编号最高 → 下一步降序后自动顶到最前）
+    items = _merge_latest(items, market_items)
 
     # 编号降序后截取最新 max_results：让真正最新的番号排在最前（详见 _sort_by_number_desc）
     items = _sort_by_number_desc(items)[:max_results]
