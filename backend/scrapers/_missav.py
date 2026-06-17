@@ -39,9 +39,30 @@ _HEADERS = {
 }
 
 
+# MissAV 总开关缓存：cover_url 会在卡片循环里被逐条调用，不能每次读盘 → 缓存 3s。
+_enabled_cache = {"ts": 0.0, "val": True}
+
+
+def is_enabled() -> bool:
+    """MissAV 总开关（配置 fc2_missav_enabled）。关闭后停止一切 MissAV 关联行为：
+    补全/样品图、后台域名发现、以及 fourhoi 确定性封面（fourhoi 是 MissAV 的图床）。
+    带 ~3s 缓存，避免 cover_url 在卡片循环中每条都读 settings.json。"""
+    now = time.time()
+    if now - _enabled_cache["ts"] > 3:
+        try:
+            from config_manager import load as load_config
+            _enabled_cache["val"] = bool(load_config().get("fc2_missav_enabled", True))
+        except Exception:
+            _enabled_cache["val"] = True
+        _enabled_cache["ts"] = now
+    return _enabled_cache["val"]
+
+
 def cover_url(num: str) -> str:
-    """FC2 封面的确定性 URL（无需抓页面即可得到）。"""
-    return f"{FOURHOI_CDN}/fc2-ppv-{num}/cover-n.jpg" if num else ""
+    """FC2 封面的确定性 URL（无需抓页面即可得到）。总开关关闭时返回空（不再用 fourhoi）。"""
+    if not num or not is_enabled():
+        return ""
+    return f"{FOURHOI_CDN}/fc2-ppv-{num}/cover-n.jpg"
 
 
 def _runtime():
@@ -281,6 +302,9 @@ async def discover_bases(config: Optional[dict] = None, force: bool = False) -> 
     TTL 内零成本直接返回；失败永远回落旧缓存/兜底，绝不清空。
     """
     config = config or {}
+    # 0) 总开关关闭 → 不探测任何 missav 域名（MissAV 关站期间停掉一切关联）
+    if not config.get("fc2_missav_enabled", True):
+        return _bases_state
     # 1) 用户自填覆盖 → 直接用，不发现
     custom = (config.get("fc2_missav_base") or "").strip()
     if custom:
@@ -360,9 +384,12 @@ async def _discover_loop(load_config):
     while True:
         try:
             cfg = load_config() if callable(load_config) else (load_config or {})
-            st = await discover_bases(cfg, force=True)
-            print(f"[missav] 域名发现完成：source={st['source']} "
-                  f"bases={st['list']}", flush=True)
+            if not cfg.get("fc2_missav_enabled", True):
+                print("[missav] 总开关关闭，跳过域名发现", flush=True)
+            else:
+                st = await discover_bases(cfg, force=True)
+                print(f"[missav] 域名发现完成：source={st['source']} "
+                      f"bases={st['list']}", flush=True)
         except Exception as e:
             print(f"[missav] 域名发现失败: {e}", flush=True)
         await asyncio.sleep(_BASES_TTL)

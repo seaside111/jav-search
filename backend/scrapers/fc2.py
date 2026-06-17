@@ -432,6 +432,22 @@ def _needs_title(it: dict) -> bool:
     return (not t) or t == (it.get("code") or "")
 
 
+def _is_guess_cover(u: str) -> bool:
+    """fourhoi 确定性「猜测」封面：对 MissAV 尚未收录的新番号会 404。
+    它只是兜底猜测，不应覆盖已经拿到的真实封面（如 FC2 卖场缩略图、MissAV og:image）。"""
+    return "fourhoi.com" in (u or "")
+
+
+def _set_cover(it: dict, new: str) -> None:
+    """安全设封面：有真实封面时，绝不用 fourhoi 猜测封面降级覆盖（否则新番号变 404 空图）。"""
+    if not new:
+        return
+    cur = it.get("cover") or ""
+    if cur and not _is_guess_cover(cur) and _is_guess_cover(new):
+        return
+    it["cover"] = new
+
+
 async def _enrich_one(it: dict, proxy: Optional[str], sem: asyncio.Semaphore) -> None:
     num = _extract_number(it.get("code") or it.get("url") or "")
     if not num:
@@ -452,8 +468,7 @@ async def _enrich_one(it: dict, proxy: Optional[str], sem: asyncio.Semaphore) ->
         return
     if data.get("title") and _needs_title(it):
         it["title"] = data["title"]
-    if data.get("cover"):
-        it["cover"] = data["cover"]           # 升级为 MissAV 真实封面（og:image）
+    _set_cover(it, data.get("cover"))         # 升级为 MissAV 真实封面（og:image），不降级
     srcs = it.get("sources") or [it.get("source", SOURCE)]
     if "MissAV" not in srcs:
         it["sources"] = list(srcs) + ["MissAV"]
@@ -508,6 +523,8 @@ def _prefetch_count() -> int:
 def _apply_cached_missav(items: list[dict]) -> None:
     """用**已预热**的 MissAV 缓存就地升级列表卡（仅命中缓存，零网络）。
     FC2 最新卡的临时标题来自种子文件名、质量低 → 有 MissAV 干净标题就替换。"""
+    if not _missav_enabled():        # 总开关关闭：连旧缓存也不应用
+        return
     for it in items:
         num = _extract_number(it.get("code") or it.get("url") or "")
         data = _LIST_ENRICH_CACHE.get(num) if num else None
@@ -515,8 +532,7 @@ def _apply_cached_missav(items: list[dict]) -> None:
             continue
         if data.get("title"):
             it["title"] = data["title"]
-        if data.get("cover"):
-            it["cover"] = data["cover"]
+        _set_cover(it, data.get("cover"))        # 不用 fourhoi 猜测封面降级覆盖真实封面
         srcs = it.get("sources") or [it.get("source", SOURCE)]
         if "MissAV" not in srcs:
             it["sources"] = list(srcs) + ["MissAV"]
@@ -673,6 +689,24 @@ def _merge_latest(rich_items: list[dict], extra_items: list[dict]) -> list[dict]
     return out
 
 
+def _apply_market_covers(items: list[dict], market_items: list[dict]) -> None:
+    """用 FC2 卖场的真实封面/标题回填已合并条目。
+    合并时同番号优先保留先到的卡（sukebei/fc2ppvdb），但它们的封面多是 fourhoi 猜测、
+    对最新番号会 404 → 这里对「无封面或仅 fourhoi 猜测」的条目，用卖场自带缩略图升级，
+    顺带补上卖场真实标题。这样最新卡在列表就能稳定出真封面。"""
+    mp = {m.get("code"): m for m in market_items
+          if m.get("cover") and not _is_guess_cover(m.get("cover"))}
+    for it in items:
+        m = mp.get(it.get("code"))
+        if not m:
+            continue
+        cur = it.get("cover") or ""
+        if (not cur) or _is_guess_cover(cur):
+            it["cover"] = m["cover"]
+        if _needs_title(it) and m.get("title"):
+            it["title"] = m["title"]
+
+
 async def _fetch_fc2ppvdb_latest(proxy: Optional[str], pool: int) -> list[dict]:
     """fc2ppvdb 首页最新（经 FlareSolverr，较慢）。一次约 100 条「最新+人気」混排、不分页。
     先全量收集（不在文档顺序上提前截断），交由上层统一编号降序。"""
@@ -741,6 +775,8 @@ async def get_latest(proxy: Optional[str] = None, max_results: int = 40) -> list
     # 并入官方卖场番号（按番号去重，同号优先保留已有的较丰富卡片；卖场独有的更新号
     # 编号最高 → 下一步降序后自动顶到最前）
     items = _merge_latest(items, market_items)
+    # 用卖场真封面/标题回填：同号卡若只有 fourhoi 猜测封面(新号会404)，换成卖场真缩略图
+    _apply_market_covers(items, market_items)
 
     # 编号降序后截取最新 max_results：让真正最新的番号排在最前（详见 _sort_by_number_desc）
     items = _sort_by_number_desc(items)[:max_results]
