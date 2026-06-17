@@ -710,6 +710,16 @@
             <span class="setting-hint">默认开，<strong>强烈建议保持</strong>。fc2ppvdb 的最新列表封顶、够不到市面最新号；sukebei 种子站按 id 倒序＝最新、<strong>直连不过盾、最快</strong>，能拿到更新的番号。开启后首页最新优先走 sukebei，够量就跳过较慢的 fc2ppvdb 首页；卡片标题/封面较朴素（种子标题 + fourhoi 封面），点开详情时再由 fc2ppvdb/MissAV 补全完整信息。下载仍按番号走 Jackett/sukebei</span>
           </div>
           <div class="setting-row">
+            <label class="setting-label">官方卖场最新源（1.5）</label>
+            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgFc2Market" checked> 用 FC2 官方卖场发现最新番号</label>
+            <span class="setting-hint">默认开。卖场（adult.contents.fc2.com）是<strong>源头</strong>，每部一上架即在，比 sukebei（需有人发种）<strong>更新、更全</strong>、直连不过盾。与 sukebei 并列合并去重，专补「已上架、尚无人发种」的更新空窗；卡片用卖场自带缩略图作封面，标题/样品图仍由 MissAV 补全</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">官方卖场 Cookie</label>
+            <input class="setting-input" id="cfgFc2MarketCookie" type="text" placeholder="留空＝免登录首页模式；填登录 Cookie 走干净倒序、更全">
+            <span class="setting-hint">可选。填入 FC2 登录后的 Cookie（浏览器导出，形如 <code>FCSID=...; fcu=...; secure_check_fc2=1</code>），即改走 <code>/search</code> 干净倒序深翻页拉最新，比免登录首页<strong>更全更准</strong>；留空或 Cookie 失效则自动回退免登录首页模式</span>
+          </div>
+          <div class="setting-row">
             <label class="setting-label">后台预抓样品图（1.4.4）</label>
             <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgFc2Prefetch" checked> 后台慢慢补全 FC2 最新的标题/封面/样品图</label>
             <span class="setting-hint">默认开、<strong>低负担</strong>。开启后程序在后台<strong>串行+节流+直连 MissAV</strong>（不过盾）慢慢抓最新片的真标题/封面/样品图灌进缓存：刷新后列表卡标题/封面变干净、点开详情<strong>样品图秒出</strong>。女优/标签仍点开才走 fc2ppvdb（按你的选择不预抓，避免 FlareSolverr 负担）</span>
@@ -2218,6 +2228,8 @@ async function openSettings() {
     document.getElementById('cfgFc2Missav').checked = cfg.fc2_missav_enabled !== false;
     document.getElementById('cfgFc2MissavBase').value = cfg.fc2_missav_base || '';
     document.getElementById('cfgFc2Sukebei').checked = cfg.fc2_latest_use_sukebei !== false;
+    document.getElementById('cfgFc2Market').checked = cfg.fc2_latest_use_market !== false;
+    document.getElementById('cfgFc2MarketCookie').value = cfg.fc2_market_cookie || '';
     document.getElementById('cfgFc2Prefetch').checked = cfg.fc2_prefetch_missav !== false;
     document.getElementById('cfgFc2PrefetchCount').value = (cfg.fc2_prefetch_count != null ? cfg.fc2_prefetch_count : 20);
     document.getElementById('cfgFc2LatestPages').value = cfg.fc2_latest_pages || 1;
@@ -2536,6 +2548,8 @@ async function saveSettings() {
     fc2_missav_enabled: document.getElementById('cfgFc2Missav').checked,
     fc2_missav_base: document.getElementById('cfgFc2MissavBase').value.trim(),
     fc2_latest_use_sukebei: document.getElementById('cfgFc2Sukebei').checked,
+    fc2_latest_use_market: document.getElementById('cfgFc2Market').checked,
+    fc2_market_cookie: document.getElementById('cfgFc2MarketCookie').value.trim(),
     fc2_prefetch_missav: document.getElementById('cfgFc2Prefetch').checked,
     fc2_prefetch_count: fc2PrefetchCount,
     fc2_latest_pages: fc2Pages,

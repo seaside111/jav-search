@@ -34,6 +34,9 @@ DEFAULT_CONFIG = {
     # V1.5.0-beta23：FC2 官方卖场(adult.contents.fc2.com)做最新发现源——源头、最新最全、
     # 直连不过盾，专补 sukebei「已上架未发种」的更新空窗。默认开，与 sukebei 并列合并。
     "fc2_latest_use_market": True,
+    # V1.5.0-beta24：官方卖场登录 Cookie（可选）。留空＝免登录首页(?sort=date)模式；
+    # 填入登录 Cookie 则走 /search?sort=date 干净倒序深翻页，更全更准；失效自动回退首页。
+    "fc2_market_cookie": "",
     # V1.4.4：后台预抓 FC2 最新的 MissAV（标题/封面/样品图，直连不过盾、低负担），
     # 串行+节流慢慢灌缓存：列表卡升级干净标题/封面、点开详情样品图秒出。女优/标签不预抓。
     "fc2_prefetch_missav": True,
