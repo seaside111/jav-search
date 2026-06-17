@@ -368,10 +368,18 @@ def _infohash_from_magnet(url: str) -> str:
 
 
 # ── 流水线各步 ──
+def _dedup_keyword(code: str) -> str:
+    """查重/复查用的搜索关键词：把番号里的破折号替换成空格（并折叠多余空白）。
+    M-Team 搜索现已容错，空格分词比连写破折号更易命中——尤其 FC2-PPV-4854900
+    这类多段番号，用「FC2 PPV 4854900」能搜到，原样带破折号常漏判。
+    仅用于站点搜索关键词，不改任务自身的 code（命名/做种/制种仍用原番号）。"""
+    return re.sub(r"\s+", " ", (code or "").replace("-", " ")).strip()
+
+
 async def _step_check(t: dict, config: dict) -> bool:
     """查重：站点已有该番号则终止。返回是否继续。"""
     _set(t, state=CHECKING, note="查重中")
-    res = await mteam.search(config, keyword=t["code"], page_size=20)
+    res = await mteam.search(config, keyword=_dedup_keyword(t["code"]), page_size=20)
     if not res["ok"]:
         _set(t, state=FAILED, error=f"查重失败：{res['error']}")
         return False
@@ -858,7 +866,7 @@ async def _step_process(t: dict, config: dict):
         _set(t, note=f"删除原磁力种子未确认：{derr}（hash={ih[:12]}，可到下载器手动清理）")
 
     # 8) 发布前复查
-    re_res = await mteam.search(config, keyword=t["code"], page_size=20)
+    re_res = await mteam.search(config, keyword=_dedup_keyword(t["code"]), page_size=20)
     if re_res["ok"] and re_res["items"]:
         _set(t, state=ABORTED_TAKEN, note="复查发现已被抢发，终止")
         return
