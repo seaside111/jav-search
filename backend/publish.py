@@ -1195,12 +1195,21 @@ async def api_enqueue(req: EnqueueRequest):
         "source": (req.source or "").strip(),
         "detail_url": (req.detail_url or "").strip(),
     }
+    cfg = load_config()
     t = _new_task(req.code.strip(), req.download_url.strip(),
                   (req.title or "").strip(), item_meta=item_meta)
-    _log(f"入队：{t['code']} ({t['id']})")
+    # 全局「自动发布」开启 → 入队即【预授权】本任务：全流程跑到发布闸门不再等待，
+    # 前端也不再显示「确认」按钮（canConfirm 看 !t.confirmed）。这样用户在首页点一次
+    # 「发种」后，查重→下载→刮削→制种→发布→取回做种全部按预设条件自动执行，无需任何确认。
+    # （未开自动发布则保持人工确认。）此举使「自动发布」与时序无关、与 UI 状态一致，
+    # 杜绝「开了自动发布却仍显示需确认/预授权」的困惑。
+    if cfg.get("publish_auto"):
+        t["confirmed"] = True
+        _set(t, note="已开启全局自动发布：本任务已预授权，全流程自动执行（无需确认）")
+    _log(f"入队：{t['code']} ({t['id']})" + ("（自动发布·已预授权）" if t.get("confirmed") else ""))
     # 入队即后台预抓元数据（日文原名/演员/封面），详情页可尽早展示，不阻塞入队响应
     try:
-        asyncio.create_task(_scrape_meta(t, load_config()))
+        asyncio.create_task(_scrape_meta(t, cfg))
     except Exception:
         pass
     return {"success": True, "id": t["id"], "task": _public(t)}
