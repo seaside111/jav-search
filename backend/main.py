@@ -95,6 +95,13 @@ async def _on_startup():
             _asyncio.create_task(mteam_enums.refresh_conf(_cfg))
     except Exception as e:
         print(f"[启动] M-Team 枚举预取失败: {e}", flush=True)
+    # 启动时后台预热公共 tracker 列表（抓 ngosang best，失败回退兜底，不阻塞启动）
+    try:
+        import asyncio as _asyncio
+        import qbittorrent as _qb
+        _asyncio.create_task(_qb.ensure_trackers_fresh(load_config()))
+    except Exception as e:
+        print(f"[启动] tracker 列表预热失败: {e}", flush=True)
     # 按配置拉起后台刮削监控
     print(f"[启动] JAV Search {APP_VERSION} 启动完成，初始化刮削监控…", flush=True)
     try:
@@ -265,6 +272,8 @@ class ConfigUpdateRequest(BaseModel):
     downloader_type: Optional[str] = None
     magnet_upload_limit_kbps: Optional[int] = None   # 磁力推送单种上传限速(KB/s)
     magnet_delete_completed: Optional[bool] = None    # 磁力下载完成后自动删种(保留文件)
+    public_trackers: Optional[str] = None             # 公共 tracker 用户自填覆盖（留空=自动）
+    public_trackers_auto_update: Optional[bool] = None # 是否自动抓在线 best tracker 列表
     # V1.4 qBittorrent
     qb_url: Optional[str] = None
     qb_username: Optional[str] = None
@@ -951,6 +960,24 @@ async def api_set_config(req: ConfigUpdateRequest):
     return {"success": ok}
 
 
+@app.get("/api/trackers")
+async def api_get_trackers():
+    """返回当前生效的公共 tracker 列表 + 来源（TTL 内不重抓）。"""
+    import qbittorrent as _qb
+    st = await _qb.ensure_trackers_fresh(load_config())
+    src_label = {"remote": "在线 best 列表", "file": "本地缓存",
+                 "user": "用户自填", "fallback": "内置兜底"}.get(st["source"], st["source"])
+    return {"ok": True, "count": len(st["list"]), "source": st["source"],
+            "source_label": src_label, "trackers": st["list"]}
+
+
+@app.post("/api/trackers/refresh")
+async def api_refresh_trackers():
+    """强制刷新公共 tracker 列表（抓在线 best 列表）。返回最新列表 + 来源。"""
+    import qbittorrent as _qb
+    return await _qb.refresh_trackers(load_config())
+
+
 # ──────────────────────────────────────────────
 # 下载器（V1.4 qBittorrent / V1.5 + Transmission，经 downloader 抽象层调度）
 # ──────────────────────────────────────────────
@@ -991,8 +1018,7 @@ async def api_qb_add(req: QbAddRequest):
     print("[推送] 成功", flush=True)
 
     # 记下「列表里已呈现的元数据」，供下载完成后刮削直接使用（不再从文件名重识别番号+重刮削，
-    #   修纯数字番号识别出错）；磁力链且开了「下完即删」则标记，由后台轮询下完后删种(保留文件)。
-    is_magnet = (req.download_url or "").lower().startswith("magnet:")
+    #   修纯数字番号识别出错）；开了「下完即删」则标记（磁力/普通种子统一），由后台轮询下完后删种(保留文件)。
     meta = dict(req.meta) if isinstance(req.meta, dict) else {}
     if req.code and not meta.get("code"):
         meta["code"] = req.code
@@ -1000,7 +1026,7 @@ async def api_qb_add(req: QbAddRequest):
         meta["title"] = req.title
     ih = (result.get("hash") or "").lower()
     if ih:
-        autodel = is_magnet and bool(config.get("magnet_delete_completed", False))
+        autodel = bool(config.get("magnet_delete_completed", False))
         try:
             intake.register(ih, meta, autodelete=autodel)
             if autodel:

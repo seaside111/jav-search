@@ -9,29 +9,155 @@ qB 会校验 Referer/Origin，需与 WebUI 地址同源，否则返回 403。
 """
 from typing import Optional
 from urllib.parse import quote
+from pathlib import Path
 import asyncio
 import base64
+import json
+import os
 import re
+import time
 import httpx
 
 
 # 公共 BT tracker：JavDB 等站点的磁力链常是「只有 hash 无 tracker」的裸磁力，
 # qB 仅靠 DHT 在群晖 NAT 下常找不到节点 → 一直卡在「下载元数据」。
-# 推送前补上这批稳定的公共 tracker，显著提升找到 peer/取到元数据的成功率。
-_PUBLIC_TRACKERS = [
+# 推送前补上一批【当前可用】的公共 tracker，显著提升找到 peer/取到元数据的成功率。
+#
+# tracker 会随时间失效（用户实测有大半「未工作」）。故不再写死一份会腐烂的列表，而是：
+#   优先抓取 ngosang/trackerslist 的「best」列表（按在线率自动维护、每日更新），
+#   缓存到 /config/trackers_cache.json（TTL 1 天），抓取失败回退本地兜底列表，
+#   用户也可在设置里自填覆盖。逻辑在 ensure_trackers_fresh / _current_trackers。
+_FALLBACK_TRACKERS = [
     "udp://tracker.opentrackr.org:1337/announce",
-    "udp://open.tracker.cl:1337/announce",
     "udp://open.demonii.com:1337/announce",
-    "udp://tracker.openbittorrent.com:6969/announce",
-    "udp://exodus.desync.com:6969/announce",
-    "udp://tracker.torrent.eu.org:451/announce",
     "udp://open.stealth.si:80/announce",
-    "udp://explodie.org:6969/announce",
-    "udp://tracker.tiny-vps.com:6969/announce",
-    "udp://opentracker.i2p.rocks:6969/announce",
-    "http://tracker.openbittorrent.com:80/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
     "udp://tracker-udp.gbitt.info:80/announce",
+    "udp://explodie.org:6969/announce",
+    "udp://opentracker.io:6969/announce",
+    "udp://tracker.dler.org:6969/announce",
+    "https://tracker.tamersunion.org:443/announce",
 ]
+
+# best 列表的多个镜像，依次尝试（GitHub Pages / jsDelivr CDN / raw）
+_REMOTE_TRACKER_SOURCES = [
+    "https://ngosang.github.io/trackerslist/trackers_best.txt",
+    "https://cdn.jsdelivr.net/gh/ngosang/trackerslist@master/trackers_best.txt",
+    "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt",
+]
+_TRACKERS_TTL = 604800  # 缓存 7 天（tracker 大多稳定、无需频繁更新）
+# 运行期内存态：source ∈ {fallback, file, remote, user}
+_trackers_state = {"ts": 0.0, "list": list(_FALLBACK_TRACKERS), "source": "fallback"}
+
+
+def _trackers_file() -> Path:
+    return Path(os.getenv("CONFIG_DIR", "/config")) / "trackers_cache.json"
+
+
+def _read_trackers_file():
+    """读取上次成功抓取的缓存（ts, list）；无则 (0, [])。不判 TTL。"""
+    try:
+        p = _trackers_file()
+        if p.exists():
+            d = json.loads(p.read_text(encoding="utf-8"))
+            lst = d.get("list") or []
+            if lst:
+                return float(d.get("ts", 0)), list(lst)
+    except Exception:
+        pass
+    return 0.0, []
+
+
+def _parse_trackers(text: str) -> list:
+    """从文本/多行/逗号分隔里挑出 tracker URL，去重保序。"""
+    out = []
+    for line in re.split(r"[\r\n,]+", text or ""):
+        s = line.strip()
+        if s and "://" in s and s not in out:
+            out.append(s)
+    return out
+
+
+def _current_trackers() -> list:
+    return _trackers_state["list"] or list(_FALLBACK_TRACKERS)
+
+
+async def _fetch_remote_trackers(proxy: Optional[str]):
+    for url in _REMOTE_TRACKER_SOURCES:
+        try:
+            async with httpx.AsyncClient(proxy=proxy, timeout=15,
+                                         follow_redirects=True) as c:
+                r = await c.get(url)
+            if r.status_code == 200:
+                lst = _parse_trackers(r.text)
+                if lst:
+                    return lst, url
+        except Exception:
+            continue
+    return [], ""
+
+
+async def ensure_trackers_fresh(config: dict, force: bool = False) -> dict:
+    """
+    确保内存里的公共 tracker 列表是新的（_augment_magnet 用 _current_trackers 读它）。
+    优先级：用户自填覆盖 > 远程 best 列表（缓存 TTL 内复用文件/内存）> 本地兜底。
+    每次加种前调用，TTL 内零成本直接返回，不会每次都抓网络。
+    """
+    config = config or {}
+    # 1) 用户自填覆盖（最高优先；清空则回到自动逻辑）
+    override = _parse_trackers(config.get("public_trackers", ""))
+    if override:
+        _trackers_state.update(ts=time.time(), list=override, source="user")
+        return _trackers_state
+
+    now = time.time()
+    # 2) TTL 内且已是远程/文件来源 → 直接复用
+    if (not force and _trackers_state["source"] in ("remote", "file")
+            and now - _trackers_state["ts"] < _TRACKERS_TTL):
+        return _trackers_state
+
+    # 关闭自动更新 → 用兜底
+    if not config.get("public_trackers_auto_update", True):
+        _trackers_state.update(list=list(_FALLBACK_TRACKERS), source="fallback")
+        return _trackers_state
+
+    # 3) 文件缓存仍在 TTL 内 → 直接用，免抓
+    if not force:
+        fts, flst = _read_trackers_file()
+        if flst and now - fts < _TRACKERS_TTL:
+            _trackers_state.update(ts=fts, list=flst, source="file")
+            return _trackers_state
+
+    # 4) 远程抓取 best 列表
+    lst, src = await _fetch_remote_trackers(config.get("proxy") or None)
+    if lst:
+        _trackers_state.update(ts=now, list=lst, source="remote")
+        try:
+            p = _trackers_file()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"ts": now, "list": lst, "src": src},
+                                    ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+        return _trackers_state
+
+    # 5) 远程全失败（抓取服务都不通）：用任何留存的旧缓存（过期也一直可用），
+    #    再不行才用内置兜底——保证「有几个能用的就能跑」，绝不因更新失败而无 tracker。
+    fts, flst = _read_trackers_file()
+    if flst:
+        _trackers_state.update(ts=fts, list=flst, source="file")
+    elif not _trackers_state["list"] or _trackers_state["source"] == "remote":
+        _trackers_state.update(list=list(_FALLBACK_TRACKERS), source="fallback")
+    return _trackers_state
+
+
+async def refresh_trackers(config: dict) -> dict:
+    """手动刷新（设置页按钮用）。返回 {ok, count, source, trackers}。"""
+    st = await ensure_trackers_fresh(config, force=True)
+    src_label = {"remote": "在线 best 列表", "file": "本地缓存",
+                 "user": "用户自填", "fallback": "内置兜底"}.get(st["source"], st["source"])
+    return {"ok": True, "count": len(st["list"]), "source": st["source"],
+            "source_label": src_label, "trackers": st["list"]}
 
 
 def _augment_magnet(magnet: str) -> str:
@@ -40,7 +166,7 @@ def _augment_magnet(magnet: str) -> str:
         return magnet
     low = magnet.lower()
     parts = []
-    for tr in _PUBLIC_TRACKERS:
+    for tr in _current_trackers():
         enc = quote(tr, safe="")
         if enc.lower() in low or tr.lower() in low:
             continue
@@ -150,6 +276,18 @@ async def _resolve_added_hash(client, qb_url: str, pre_hashes: set,
             return new[0]
         await asyncio.sleep(delay)
     return magnet_ih
+
+
+async def _add_trackers(client, qb_url: str, infohash: str, trackers: list) -> None:
+    """给已入库的种子补一批公共 tracker（addTrackers，urls 用换行分隔）。失败静默。"""
+    if not infohash or not trackers:
+        return
+    try:
+        await client.post(f"{_base(qb_url)}/api/v2/torrents/addTrackers",
+                          data={"hash": infohash.lower(), "urls": "\n".join(trackers)},
+                          headers=_headers(qb_url))
+    except Exception:
+        pass
 
 
 async def _reannounce(client, qb_url: str, infohash: str) -> None:
@@ -326,6 +464,7 @@ async def add_torrent(
     skip_checking: bool = False,
     upload_limit_kbps: int = 0,
     reannounce: bool = True,
+    public_trackers: bool = True,
     timeout: int = 20,
 ) -> dict:
     """
@@ -337,6 +476,8 @@ async def add_torrent(
     :param category:      任务分类
     :param paused:        是否暂停加入（true 则加入后不自动开始）
     :param skip_checking: 是否跳过哈希校验（辅种通常需 false 以触发校验确认数据吻合）
+    :param public_trackers: 是否补公共 tracker（磁力补进 URL、种子加种后补）。
+                            发种取回的官方 PT 种子须传 False，绝不混入公共 tracker。
     """
     if not qb_url:
         return {"success": False, "error": "未配置 qBittorrent 地址"}
@@ -375,8 +516,8 @@ async def add_torrent(
             files = {"torrents": ("download.torrent", torrent_bytes,
                                   "application/x-bittorrent")}
         elif download_url.lower().startswith("magnet:"):
-            # 裸磁力补 tracker，避免 qB 卡在「下载元数据」
-            data["urls"] = _augment_magnet(download_url)
+            # 裸磁力补 tracker，避免 qB 卡在「下载元数据」（官方 PT 种子 public_trackers=False 不补）
+            data["urls"] = _augment_magnet(download_url) if public_trackers else download_url
         else:
             content = await _fetch_torrent_bytes(download_url, timeout)
             if content:
@@ -407,6 +548,12 @@ async def add_torrent(
         # 限速回查、tracker 重新汇报、返回给上层都基于它。
         magnet_ih = _infohash_from_magnet(download_url) if download_url else ""
         real_ih = await _resolve_added_hash(client, qb_url, pre_hashes, magnet_ih)
+
+        # 常规 .torrent（非磁力）下载也补公共 tracker：磁力已在 URL 里补过，
+        # 种子则加种后用 addTrackers 接口补上，与磁力统一。官方 PT 种子 public_trackers=False 跳过。
+        was_magnet = bool(download_url and download_url.lower().startswith("magnet:"))
+        if public_trackers and real_ih and not was_magnet:
+            await _add_trackers(client, qb_url, real_ih, _current_trackers())
 
         # 单种上传限速：add 时 upLimit 对磁力常被忽略（彼时无元数据），且 qB 对未知 hash
         # 也回 200——必须 add 后显式设置并【回查确认】真正落到种子句柄上才算数。

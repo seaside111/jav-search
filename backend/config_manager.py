@@ -68,6 +68,10 @@ DEFAULT_CONFIG = {
     # 经「推送」入口加入的磁力链下载完成后是否自动删除种子（保留文件）：磁力只用于下载、不做种。
     #   仅作用于此处首推的磁力种子，由 intake 后台轮询执行；不影响发种/做种与你手动添加的种子。
     "magnet_delete_completed": False,
+    # 公共 tracker（裸磁力补全用）：自动抓 ngosang best 列表（每日更新、按在线率维护），
+    # 失败回退内置兜底；public_trackers 非空则用户自填覆盖（每行/逗号一个）。
+    "public_trackers": "",               # 用户自填覆盖（留空＝自动）
+    "public_trackers_auto_update": True, # 是否自动抓取在线 best 列表
     # V1.4：qBittorrent 下载器（群晖中部署）
     "qb_url": "",                        # qBittorrent WebUI 地址，如 http://192.168.1.100:8080
     "qb_username": "",                   # WebUI 用户名

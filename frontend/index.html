@@ -861,14 +861,28 @@
             <span class="setting-hint">首次经「推送」把搜索结果的磁力/种子加入下载器时，给该种子设单种上传限速(KB/s)，0=不限。仅作用于此处首推，不影响 PT 发种（发种限速在发布页设置）</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label">完成后删除磁力</label>
-            <label class="source-chk"><input type="checkbox" id="cfgMagnetDeleteCompleted"> 磁力链下载完成后删除种子（保留文件）</label>
-            <span class="setting-hint">仅作用于经「推送」加入的磁力链：下完即删种、保留文件（磁力只用于下载、不做种）。由后台轮询执行，不影响 PT 发种/做种与你手动添加的种子</span>
+            <label class="setting-label">完成后删除</label>
+            <label class="source-chk"><input type="checkbox" id="cfgMagnetDeleteCompleted"> 推送下载完成后删除种子（保留文件）</label>
+            <span class="setting-hint">作用于经「推送」加入的<b>磁力链与普通 BT 种子</b>（搜索/最新/Jackett 均同）：下完即删种、保留文件（只用于下载、不做种）。由后台轮询执行，不影响 PT 发种/做种与你手动添加的种子</span>
           </div>
           <div class="jackett-status-row">
             <div class="jackett-status-dot" id="qbDot"></div>
             <span class="jackett-status-text" id="qbStatusText">未检测</span>
             <button class="jackett-test-btn" onclick="testQb()">测试当前下载器</button>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">公共 Tracker</label>
+            <label class="source-chk"><input type="checkbox" id="cfgTrackersAuto" checked> 自动抓取在线 best 列表（约 7 天更新一次·按在线率维护）</label>
+            <span class="setting-hint">经「推送」加入的<b>磁力链与普通 BT 种子</b>都会自动补这批公共 tracker（裸磁力如 JavDB 尤其需要）。默认抓 ngosang best 列表，缓存约 7 天、无需频繁更新；抓取服务都不通时一直沿用上次缓存／内置兜底，保证总有几个能用</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">自定义 Tracker</label>
+            <textarea class="setting-input" id="cfgTrackers" rows="3" placeholder="留空＝自动。每行一个，如 udp://tracker.opentrackr.org:1337/announce" style="resize:vertical;font-family:monospace"></textarea>
+            <span class="setting-hint">填了则<b>覆盖</b>自动列表，只用你这批；留空走上面的自动抓取</span>
+          </div>
+          <div class="jackett-status-row">
+            <span class="jackett-status-text" id="trackersStatus">—</span>
+            <button class="jackett-test-btn" onclick="refreshTrackers()">刷新并查看当前列表</button>
           </div>
         </div>
         <div class="setting-group">
@@ -2227,6 +2241,8 @@ async function openSettings() {
     document.getElementById('cfgDownloaderType').value = cfg.downloader_type || 'qb';
     document.getElementById('cfgMagnetUpLimit').value = cfg.magnet_upload_limit_kbps || 0;
     document.getElementById('cfgMagnetDeleteCompleted').checked = !!cfg.magnet_delete_completed;
+    document.getElementById('cfgTrackersAuto').checked = cfg.public_trackers_auto_update !== false;
+    document.getElementById('cfgTrackers').value = cfg.public_trackers || '';
     // V1.4 qBittorrent
     document.getElementById('cfgQbUrl').value      = cfg.qb_url || '';
     document.getElementById('cfgQbUser').value     = cfg.qb_username || '';
@@ -2280,6 +2296,19 @@ async function testQb() {
   const url = document.getElementById('cfgQbUrl').value.trim();
   if (!url) { showToast('请先填写 qBittorrent 地址'); return; }
   await checkQbStatus();
+}
+
+async function refreshTrackers() {
+  const el = document.getElementById('trackersStatus');
+  el.textContent = '刷新中…（先保存设置再刷新可应用自定义/开关）';
+  try {
+    const resp = await fetch(`${API}/api/trackers/refresh`, { method: 'POST' });
+    const d = await safeJson(resp);
+    if (!d.ok) { el.textContent = '✗ 刷新失败'; return; }
+    el.innerHTML = `当前 <b>${d.count}</b> 个（来源：${d.source_label||d.source}）` +
+      `<div style="margin-top:6px;max-height:140px;overflow:auto;font-family:monospace;font-size:12px;opacity:.85;white-space:pre-wrap">` +
+      d.trackers.map(escHtml).join('\n') + `</div>`;
+  } catch (e) { el.textContent = '✗ 出错：' + e.message; }
 }
 
 async function checkQbStatus() {
@@ -2528,6 +2557,8 @@ async function saveSettings() {
     downloader_type: document.getElementById('cfgDownloaderType').value,
     magnet_upload_limit_kbps: parseInt(document.getElementById('cfgMagnetUpLimit').value, 10) || 0,
     magnet_delete_completed: document.getElementById('cfgMagnetDeleteCompleted').checked,
+    public_trackers_auto_update: document.getElementById('cfgTrackersAuto').checked,
+    public_trackers: document.getElementById('cfgTrackers').value.trim(),
     // V1.4 qBittorrent
     qb_url: document.getElementById('cfgQbUrl').value.trim(),
     qb_username: document.getElementById('cfgQbUser').value.trim(),

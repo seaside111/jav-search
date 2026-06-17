@@ -1013,7 +1013,8 @@ async def _step_reseed(t: dict, config: dict):
     res = await downloader.add_torrent(config, torrent_bytes=tor["content"],
                                        save_path=save_host, category=cat,
                                        skip_checking=True, paused=False,
-                                       upload_limit_kbps=up_limit)
+                                       upload_limit_kbps=up_limit,
+                                       public_trackers=False)  # 官方 PT 种子绝不混入公共 tracker
     if not res.get("success"):
         _set(t, state=SEEDING, error=f"做种添加失败（已发布）：{res.get('error', '')}")
         return
