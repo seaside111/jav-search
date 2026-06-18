@@ -1305,11 +1305,48 @@ function showPage(p) {
   const totalPages = viewTotalPages();
   currentPage = Math.min(Math.max(p, 1), totalPages);
   renderPage();
+  ensurePageCovers(currentPage);   // 翻页按需补 FC2 封面（后台慢抓的列表页，翻到即补）
   // 只补全「当前页」详情（演员/标签等），完成后就地升级卡片。不再向前预取多页详情。
   ensurePageDetails(currentPage).then(() => {
     if (currentPage === p) upgradePageCards(currentPage);
     if (prefetchJavdbExtras) prefetchJavdbExtrasForPage(currentPage);
   });
+}
+
+// 翻页按需补 FC2 封面：列表页的封面由后台「多渠道解析」渐进填进服务端缓存，但前端翻页
+// 是客户端分页、不会自动重拉 → 翻到某页时，对该页「缺真封面的 FC2 卡」请求后端按需解析
+//（命中缓存秒回、未命中现场并发抓卖场商品页），拿到就地更新封面并重渲染当前页。
+const _coverPageInflight = new Set();
+function _isFc2Item(m) {
+  const ss = (m.sources && m.sources.length) ? m.sources : [m.source];
+  return ss.some(s => (s || '').toUpperCase() === 'FC2') || /fc2-?ppv/i.test(m.code || m.url || '');
+}
+async function ensurePageCovers(p) {
+  if (_coverPageInflight.has(p)) return;
+  const need = [];
+  for (const i of pageIndices(p)) {
+    const m = currentResults[i];
+    if (!m || !_isFc2Item(m)) continue;
+    if (m.cover && !isGuessCover(m.cover)) continue;   // 已有真封面，跳过
+    if (m.code) need.push({ i, code: m.code });
+  }
+  if (!need.length) return;
+  _coverPageInflight.add(p);
+  try {
+    const resp = await fetch(`${API}/api/fc2/covers`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nums: need.map(n => n.code) }),
+    });
+    const data = await safeJson(resp);
+    const covers = (data && data.covers) || {};
+    let any = false;
+    for (const { i, code } of need) {
+      const url = covers[code];
+      if (url && currentResults[i]) { currentResults[i].cover = url; any = true; }
+    }
+    if (any && currentPage === p) renderPage(false);   // 就地重渲染当前页（不滚动）
+  } catch (e) { /* 补封面失败不影响展示 */ }
+  finally { _coverPageInflight.delete(p); }
 }
 
 // 开启「预取补抓」时：后台串行把本页合并卡的 JavDB 样品图/磁力提前抓好

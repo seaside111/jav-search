@@ -903,6 +903,43 @@ async def _cover_prewarm_bg(jobs: list, proxy: Optional[str]) -> None:
             _save_cover_cache()
 
 
+async def resolve_covers(codes_or_nums: list, proxy: Optional[str] = None) -> dict:
+    """按需解析一组番号的封面（前端翻页即时补图用）：命中缓存秒回，未命中并发现解析并缓存。
+    入参可为番号或 code（如 FC2-PPV-xxxxxxx）。返回 {输入原值: url}，只含解析成功的。"""
+    _load_cover_cache()
+    out, todo = {}, []
+    for raw in (codes_or_nums or [])[:60]:
+        num = _extract_number(str(raw)) or str(raw)
+        if not num:
+            continue
+        u = _cover_ok_url(num)
+        if u:
+            out[raw] = u
+        else:
+            todo.append((raw, num))
+    if todo:
+        sem = asyncio.Semaphore(_COVER_PREWARM_CONCURRENCY)
+        changed = {"v": False}
+
+        async def _one(raw, num):
+            async with sem:
+                try:
+                    url = await _resolve_cover(num, "", proxy)
+                except Exception:
+                    url = ""
+            if url:
+                _cover_mark_ok(num, url)
+                out[raw] = url
+            else:
+                _cover_mark_failed(num)
+            changed["v"] = True
+
+        await asyncio.gather(*[_one(r, n) for r, n in todo], return_exceptions=True)
+        if changed["v"]:
+            _save_cover_cache()
+    return out
+
+
 async def _fetch_fc2ppvdb_latest(proxy: Optional[str], pool: int) -> list[dict]:
     """fc2ppvdb 首页最新（经 FlareSolverr，较慢）。一次约 100 条「最新+人気」混排、不分页。
     先全量收集（不在文档顺序上提前截断），交由上层统一编号降序。"""

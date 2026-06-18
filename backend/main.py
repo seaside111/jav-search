@@ -221,6 +221,10 @@ class DetailsRequest(BaseModel):
     items: list[DetailItem]        # 需补全详情的条目（前台当前页 + 预取下一页）
 
 
+class Fc2CoversRequest(BaseModel):
+    nums: list[str]                # FC2 番号或 code 列表（前台翻页按需补封面）
+
+
 class TranslateRequest(BaseModel):
     text: str
     provider: str = "baidu"        # baidu | aliyun
@@ -734,6 +738,20 @@ async def api_details(req: DetailsRequest):
         return {"success": True, "results": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"详情抓取失败: {str(e)}")
+
+
+@app.post("/api/fc2/covers")
+async def api_fc2_covers(req: Fc2CoversRequest):
+    """FC2 翻页按需补封面：前台对「当前页缺真封面的 FC2 卡」调用，服务端命中缓存秒回、
+    未命中并发解析（卖场商品页直连）并缓存。返回 {num/code: 封面URL}，只含成功的。"""
+    if not req.nums:
+        return {"ok": True, "covers": {}}
+    proxy = load_config().get("proxy") or None
+    try:
+        covers = await fc2_scraper.resolve_covers(req.nums, proxy=proxy)
+        return {"ok": True, "covers": covers}
+    except Exception as e:
+        return {"ok": False, "covers": {}, "error": str(e)}
 
 
 @app.get("/api/latest")
