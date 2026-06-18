@@ -599,6 +599,9 @@ def _img_referer_candidates(url: str) -> list[str]:
     # 需带 missav 域名作 Referer 才能取（封面 fourhoi 多数无需，但带上无害）。
     elif any(k in host for k in ("fourhoi", "nineyu", "surrit", "sixyik", "missav")):
         site = "https://missav.ws/"
+    # FC2 卖场封面 CDN（contents.fc2.com / contents-thumbnail*.fc2.com）防盗链兜底
+    elif "fc2.com" in host:
+        site = "https://adult.contents.fc2.com/"
 
     cands = []
     for r in (site, origin, ""):

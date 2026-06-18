@@ -203,6 +203,21 @@ async def fetch_fc2_latest(proxy: Optional[str] = None, limit: int = 60,
 _OG_IMG_RE = re.compile(
     r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)', re.I)
 
+# 缩略图 CDN 前缀（卖场列表卡同款）：把 storage 原图包成它，无防盗链、有尺寸、易取
+_THUMB_CDN = "https://contents-thumbnail2.fc2.com/w480/"
+
+
+def thumbify(url: str) -> str:
+    """把 storage*.contents.fc2.com 原图 URL 转成缩略图 CDN 格式（已是缩略图则原样返回）。
+    原图常有防盗链/体量大，缩略图 CDN 与列表卡封面同源、实测无防盗链、项目机易抓。"""
+    if not url:
+        return url
+    if "contents-thumbnail" in url:
+        return url
+    if "contents.fc2.com" in url and "/file/" in url:
+        return _THUMB_CDN + re.sub(r"^https?://", "", url)
+    return url
+
 
 async def fetch_cover(num: str, proxy: Optional[str] = None) -> str:
     """抓单个 FC2 商品页 /article/<num>/ 的封面（og:image 全图）。直连、不过盾。
@@ -230,7 +245,7 @@ async def fetch_cover(num: str, proxy: Optional[str] = None) -> str:
             u = "https:" + u
         # 真商品封面在 storage*.contents.fc2.com/file/...；排除站点 logo 等占位
         if "contents.fc2.com" in u and "/file/" in u:
-            return u
+            return thumbify(u)        # 转缩略图 CDN：无防盗链、易取、与列表卡同源
         return ""
     except Exception:
         return ""

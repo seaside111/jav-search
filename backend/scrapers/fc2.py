@@ -456,6 +456,10 @@ def _load_cover_cache() -> None:
         if p.exists():
             d = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(d, dict):
+                # 迁移旧缓存：把 beta27~29 存的 storage 原图 URL 转成缩略图 CDN（防盗链/难取 → 易取）
+                for v in d.values():
+                    if isinstance(v, dict) and v.get("url"):
+                        v["url"] = _fc2market.thumbify(v["url"])
                 _COVER_CACHE.update(d)
     except Exception:
         pass

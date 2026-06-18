@@ -1551,15 +1551,31 @@ function cardBodyInner(m, idx) {
     ${desc}`;
 }
 
+// 封面候选地址（按优先级）：项目机代理(带缓存) 优先，浏览器直连原址作最后保险
+function _coverCands(m) {
+  const c = [];
+  if (m.cover)       c.push(`${API}/api/img?url=${encodeURIComponent(m.cover)}`);       // ① 项目机代理大图
+  if (m.cover_thumb) c.push(`${API}/api/img?url=${encodeURIComponent(m.cover_thumb)}`);  // ② 项目机代理缩略图
+  if (m.cover)       c.push(m.cover);        // ③ 浏览器直连原址（访问机自身网络/代理）
+  if (m.cover_thumb) c.push(m.cover_thumb);
+  return c;
+}
+// 封面加载失败 → 走下一个候选；全失败显示占位
+function coverErr(img, idx) {
+  const m = currentResults[idx];
+  const cands = m ? _coverCands(m) : [];
+  const step = parseInt(img.dataset.step || '0', 10) + 1;
+  img.dataset.fb = '1';   // 已离开「项目机代理大图」→ 标记，避免详情升级反复覆盖回失败地址
+  if (step < cands.length) { img.dataset.step = String(step); img.src = cands[step]; }
+  else if (img.parentElement) { img.parentElement.innerHTML = '<div class="no-cover">🎬</div>'; }
+}
+
 function renderCard(m, idx) {
-  const coverSrc = m.cover ? `${API}/api/img?url=${encodeURIComponent(m.cover)}` : '';
-  // 大封面偶发 404 时先回退到列表缩略图（cover_thumb），再失败才显示占位图标
-  const thumbSrc = m.cover_thumb ? `${API}/api/img?url=${encodeURIComponent(m.cover_thumb)}` : '';
-  const onErr = thumbSrc
-    ? `if(this.dataset.fb!=='1'){this.dataset.fb='1';this.src='${escAttr(thumbSrc)}';}else{this.parentElement.innerHTML='<div class=no-cover>🎬</div>';}`
-    : `this.parentElement.innerHTML='<div class=no-cover>🎬</div>'`;
-  const cover = coverSrc
-    ? `<img src="${escAttr(coverSrc)}" alt="" loading="lazy" onerror="${escAttr(onErr)}">`
+  // 封面分步兜底：① 项目机代理大图(/api/img，带缓存) → ② 项目机代理缩略图 →
+  // ③ 浏览器直连原址(访问机自身网络/代理，项目机抓不到时的最后保险) → 占位图标。
+  const cands = _coverCands(m);
+  const cover = cands.length
+    ? `<img src="${escAttr(cands[0])}" data-step="0" alt="" loading="lazy" onerror="coverErr(this, ${idx})">`
     : `<div class="no-cover">🎬</div>`;
 
   const scoreBadge = m.score ? `<div class="score-badge">★ ${escHtml(m.score)}</div>` : '';
