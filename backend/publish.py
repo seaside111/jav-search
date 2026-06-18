@@ -887,6 +887,10 @@ async def _step_process(t: dict, config: dict):
 
 def _build_descr(t: dict, bbcodes: list, config: dict) -> str:
     parts = []
+    # 凡正文里没有 DMM 链接（无码跳过 / 有码但没查到 / 查询异常）→ 首行统一标注，便于人工补
+    dmm = t.get("dmm") or {}
+    if not (dmm.get("dmm_code") or dmm.get("url")):
+        parts.append("该种无DMM链接")
     if t.get("cover_bb"):
         parts.append(t["cover_bb"])
     if t.get("title_jp"):

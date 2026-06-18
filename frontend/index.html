@@ -1779,7 +1779,7 @@ function renderResourceItem(r, i, idx) {
     : '';
 
   const magnetBtn = hasMagnet
-    ? `<button class="btn-magnet" id="mcopy-${i}" onclick="copyMagnet('${escAttr(r.magnet)}', 'mcopy-${i}')">
+    ? `<button class="btn-magnet" id="mcopy-${idx}-${i}" onclick="copyMagnet('${escAttr(r.magnet)}', this)">
         <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
           <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
@@ -1801,7 +1801,7 @@ function renderResourceItem(r, i, idx) {
   // 推送到 qBittorrent（优先磁力，其次种子直链；种子由后端代取上传）
   const qbUrl = r.magnet || r.link || '';
   const qbBtn = qbUrl
-    ? `<button class="btn-qb" id="qb-${i}" onclick="pushToQb('${escAttr(qbUrl)}', 'qb-${i}', ${typeof idx === 'number' ? idx : -1})" title="推送到 qBittorrent 下载器">
+    ? `<button class="btn-qb" id="qb-${idx}-${i}" onclick="pushToQb(this, '${escAttr(qbUrl)}', ${typeof idx === 'number' ? idx : -1})" title="推送到 qBittorrent 下载器">
         <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/>
           <path d="M5 21h14"/>
@@ -1813,7 +1813,7 @@ function renderResourceItem(r, i, idx) {
   // 发种到 M-Team（用这条磁力/种子走查重→下载→刮削→制种→发布流水线）
   const pubUrl = r.magnet || r.link || '';
   const pubBtn = pubUrl
-    ? `<button class="btn-publish" id="pub-${i}" onclick="publishResource('${escAttr(pubUrl)}', 'pub-${i}', ${typeof idx === 'number' ? idx : -1})" title="发种到 M-Team">
+    ? `<button class="btn-publish" id="pub-${idx}-${i}" onclick="publishResource(this, '${escAttr(pubUrl)}', ${typeof idx === 'number' ? idx : -1})" title="发种到 M-Team">
         <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/>
         </svg>
@@ -1838,8 +1838,10 @@ function renderResourceItem(r, i, idx) {
 }
 
 // 发种：把这条资源加入发种队列
-async function publishResource(downloadUrl, btnId, idx) {
-  const btn = document.getElementById(btnId);
+async function publishResource(btn, downloadUrl, idx) {
+  // btn 直接传入被点击的按钮元素（不再按 id 查找）：多张卡片的资源抽屉同时展开时，
+  // 旧的 pub-${i} 形式 id 会跨抽屉重复，getElementById 命中第一个 → 点第二/三个种子时
+  // 更新错按钮、被点的那个不变（但后台已入队）。直接用 this 杜绝该串台。
   const m = (typeof idx === 'number' && idx >= 0 && currentResults[idx]) ? currentResults[idx] : null;
   const code = m ? (m.code || '') : '';
   if (!code) { showToast('该影片缺少番号，无法发种'); return; }
@@ -1873,8 +1875,8 @@ async function publishResource(downloadUrl, btnId, idx) {
 }
 
 // 推送磁力/种子到 qBittorrent
-async function pushToQb(downloadUrl, btnId, idx) {
-  const btn = document.getElementById(btnId);
+async function pushToQb(btn, downloadUrl, idx) {
+  // btn 直接传入被点击的按钮（不再按 id 查找）：多抽屉同开时 qb-${i} 形式 id 会重复串台
   if (btn) { btn.disabled = true; btn.classList.remove('failed','pushed'); }
   const orig = btn ? btn.innerHTML : '';
   if (btn) btn.innerHTML = '<span class="drawer-spinner" style="width:11px;height:11px;margin:0 4px 0 0"></span>推送中';
@@ -1922,10 +1924,10 @@ function buildThunderUrl(url) {
   }
 }
 
-async function copyMagnet(magnet, btnId) {
+async function copyMagnet(magnet, btn) {
   try {
     await navigator.clipboard.writeText(magnet);
-    const btn = document.getElementById(btnId);
+    // btn 直接传入被点击的按钮（不再按 id 查找）：多抽屉同开时 mcopy-${i} 形式 id 会重复串台
     if (btn) {
       btn.classList.add('copied');
       btn.innerHTML = `<svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> 已复制`;
@@ -2056,7 +2058,7 @@ function renderDetailExtra(m, idx) {
     if (g.subtitle) badges.push('<span class="mag-badge sub">字幕</span>');
     // 每条磁力的操作按钮：推送下载(qB) / 迅雷 / 复制磁链（复用资源条目同款函数）
     const thunderUrl = buildThunderUrl(g.link);
-    const qbBtn = `<button class="btn-qb" id="jdmag-qb-${di}-${j}" onclick="pushToQb('${escAttr(g.link)}', 'jdmag-qb-${di}-${j}', ${di})" title="推送到 qBittorrent 下载器">
+    const qbBtn = `<button class="btn-qb" id="jdmag-qb-${di}-${j}" onclick="pushToQb(this, '${escAttr(g.link)}', ${di})" title="推送到 qBittorrent 下载器">
         <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M5 21h14"/></svg>
         推送下载</button>`;
     const thunderBtn = thunderUrl
@@ -2064,7 +2066,7 @@ function renderDetailExtra(m, idx) {
           <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2L4.5 13.5H11L10 22L19.5 10.5H13L13 2Z"/></svg>
           迅雷</a>`
       : '';
-    const copyBtn = `<button class="btn-magnet" id="jdmag-copy-${di}-${j}" onclick="copyMagnet('${escAttr(g.link)}', 'jdmag-copy-${di}-${j}')">
+    const copyBtn = `<button class="btn-magnet" id="jdmag-copy-${di}-${j}" onclick="copyMagnet('${escAttr(g.link)}', this)">
         <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
         磁链</button>`;
     return `<div class="detail-magnet">
