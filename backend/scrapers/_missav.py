@@ -130,8 +130,11 @@ async def _get_html(num: str, proxy: Optional[str], opts: dict,
     #（beta31 churn 根因）。带前缀的 /en/、/ja/（用户实测）对未收录号是干净 404、对已收录号直连 200，
     # 源头上不触发盾，故彻底去掉无前缀兜底。/en/（德国可达）首位、/ja/ 次之。
     paths = [f"/en/FC2-PPV-{num}", f"/ja/FC2-PPV-{num}"]
-    saw_404 = False     # 见过明确 404（未收录信号）
-    saw_block = False   # 见过 CF/网络/其它失败（可重试信号）
+    # 分两轮，杜绝「一个镜像 404、另一个镜像撞盾」时把未收录号误判成 blocked、令负缓存失效（残留 churn 根因）。
+    # 第一轮：所有镜像 × 语言路径，**仅直连**（绝不过盾）。任一镜像直连给出干净 404 → 立即判未收录
+    #   （missav 各镜像同源，.ws 说没有就是没有），既不再试其它镜像、也不过盾。
+    saw_empty = False   # 200 但页面无番号（通用站名页）——较弱的未收录信号
+    cf_urls = []        # 直连撞盾的 URL，留待第二轮过盾
     for base in opts["bases"]:
         for path in paths:
             url = base.rstrip("/") + path
@@ -140,28 +143,30 @@ async def _get_html(num: str, proxy: Optional[str], opts: dict,
                                              timeout=12, follow_redirects=True) as client:
                     resp = await client.get(url)
             except Exception:
-                saw_block = True
-                continue
+                continue                            # 网络错误：可重试，不记未收录
             if resp.status_code == 200 and not _looks_like_cf(resp.text, 200):
                 if str(num) in resp.text:
                     return resp.text, "ok"
-                saw_404 = True                      # 200 但页面不含番号（通用站名页）→ 未收录信号
+                saw_empty = True                    # 200 但无番号 → 弱未收录信号
             elif resp.status_code == 404:
-                saw_404 = True                      # 明确 404 → 未收录/不存在
+                return "", "notfound"               # 干净 404 → 未收录，立即收手（不过盾、不试其它镜像）
             elif _looks_like_cf(resp.text, resp.status_code):
-                saw_block = True
-                if allow_flaresolverr:
-                    fs_url = opts.get("flaresolverr_url") or await _fs_discover()  # 留空则自动探测
-                    if not fs_url:
-                        continue
-                    fs_proxy = proxy if opts.get("flaresolverr_use_proxy", True) else None
-                    html = await _fetch_via_flaresolverr(url, fs_url, fs_proxy, priority)
-                    if html and str(num) in html:
-                        return html, "ok"
-            else:
-                saw_block = True                    # 其它非 200/404 状态 → 可重试
-    # 只有「见过 404 且全程没被挡/没出错」才判 notfound，避免把地区拦截/CF 误判成未收录
-    return "", ("notfound" if (saw_404 and not saw_block) else "blocked")
+                cf_urls.append(url)                 # 撞盾，第二轮再过
+            # 其它状态：忽略（可重试）
+    # 第一轮直连里出现过「200 无番号」→ 也判未收录（真镜像返回通用页≈没这个号），不必再过盾
+    if saw_empty:
+        return "", "notfound"
+    # 第二轮：仅对直连撞盾的 URL 过 FlareSolverr（且允许时）。未收录号在第一轮已 return，不会走到这。
+    if allow_flaresolverr and cf_urls:
+        fs_url = opts.get("flaresolverr_url") or await _fs_discover()  # 留空则自动探测
+        if fs_url:
+            fs_proxy = proxy if opts.get("flaresolverr_use_proxy", True) else None
+            for url in cf_urls:
+                html = await _fetch_via_flaresolverr(url, fs_url, fs_proxy, priority)
+                if html and str(num) in html:
+                    return html, "ok"
+    # 全程撞盾/网络失败、未见 404 → 可重试
+    return "", "blocked"
 
 
 def _clean_title(title: str, num: str) -> str:

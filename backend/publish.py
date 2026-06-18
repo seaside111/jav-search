@@ -745,7 +745,9 @@ async def _step_process(t: dict, config: dict):
         _set(t, note=f"DMM 查询异常（忽略）：{e}")
 
     # 3) 规整：在【下载目录原地】建「番号文件夹」，视频移入其中（制种/做种都以该文件夹为单位）
-    #    刮削开=视频改名番号.ext + 写 NFO/封面入文件夹；刮削关=保留原文件名、不写 NFO/封面
+    #    番号文件夹始终建立（torrent 根/做种单位，结构必需）；其内的「整理动作」分两个独立开关：
+    #      · 规整(scrape_organize_enabled)：视频改名为 番号.ext + 删广告/赠片；
+    #      · 刮削(scrape_meta_enabled)    ：写 NFO/封面（抓元数据），与改名/删广告互不绑定。
     #    .meta（截图/种子产物，不进种子）放工作目录根下，作番号文件夹的兄弟，不污染番号文件夹
     meta_root = Path(_work_root(config) or "") or seed_dir_c
     meta_dir = meta_root / ".meta" / t["code"]
@@ -753,14 +755,17 @@ async def _step_process(t: dict, config: dict):
     meta_dir.mkdir(parents=True, exist_ok=True)
     pub_folder = seed_dir_c / _safe_name(t["code"])   # 番号文件夹（torrent 根目录，原地）
     pub_folder.mkdir(parents=True, exist_ok=True)
-    # 刮削总开关（全局，监控 & 发种共用）；兼容旧 publish_scrape_enabled
+    # 刮削/规整总开关（全局，监控 & 发种共用）；兼容旧 publish_scrape_enabled
     scrape_on = config.get("scrape_meta_enabled", config.get("publish_scrape_enabled", True))
+    organize_on = config.get("scrape_organize_enabled",
+                             config.get("scrape_meta_enabled",
+                                        config.get("publish_scrape_enabled", True)))
     safe_code = _safe_name(t["code"])
     multi = len(videos) > 1
     moved_videos = []
     try:
         for idx, v in enumerate(videos, start=1):
-            if scrape_on:
+            if organize_on:
                 # 多段：番号-cd1/-cd2…（EMBY 可识别多段）；单片：番号.后缀
                 vid_name = (f"{safe_code}-cd{idx}{v.suffix.lower()}" if multi
                             else f"{safe_code}{v.suffix.lower()}")
@@ -800,10 +805,11 @@ async def _step_process(t: dict, config: dict):
             pass
 
     # 4.5) 清理番号文件夹内的无用文件（广告/样板/采样图）。
-    #   仅刮削开启时清——此时我们已确定保留集（主视频 + NFO + 封面）。
+    #   仅【规整】开启时清——此时我们已确定保留集（主视频 + NFO + 封面）。
     #   关键场景：磁力下载的文件夹名本就是番号 → 番号文件夹 == 原下载文件夹，广告与主视频同处，
     #   不清就会被打进种子、且无法靠删原种清掉（删原种会连做种数据一起删，见第 7 步）。
-    if scrape_on:
+    #   注意：规整关＝不删广告，磁力夹内的广告会一并进种子（用户选择）。
+    if organize_on:
         keep = {p.name for p in moved_videos}      # 保留全部主视频（含多段 CD1/CD2）
         keep.add(f"{t['code']}.nfo")
         if cover_path:

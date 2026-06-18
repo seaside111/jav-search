@@ -224,6 +224,10 @@ def thumbify(url: str) -> str:
 _GONE_MARKERS = ("販売を終了", "存在しないか", "見つかりません", "削除された",
                  "商品が見つかりません", "ページが見つかりません")
 
+# 需登录才能查看的商品（付费/限定，ref=payarticle）：页面是 meta-refresh 跳 fc2.com/login.php 的空壳，
+# 匿名取不到 og:image。填了卖场登录 Cookie(fc2_market_cookie) 后 FC2 会直接出商品页、即可取官图。
+_LOGIN_REDIRECT_RE = re.compile(r'http-equiv=["\']?refresh["\']?[^>]*login\.php', re.I)
+
 
 async def fetch_cover_ex(num: str, proxy: Optional[str] = None) -> tuple:
     """抓单个 FC2 商品页封面，并**精准区分「下架/不存在」与「临时失败」**。
@@ -254,6 +258,11 @@ async def fetch_cover_ex(num: str, proxy: Optional[str] = None) -> tuple:
         return "", True                       # 明确 404 → 下架/不存在
     if r.status_code != 200 or not r.text:
         return "", False                      # 403/5xx 等 → 临时失败
+    # 需登录商品（meta-refresh 跳 login.php）：匿名取不到封面。
+    #   无登录 Cookie → 匿名永远取不到 → 当"取不到"收手(gone)，不再每轮白抓；
+    #   有 Cookie 仍被弹 → Cookie 失效 → 临时失败可重试（修好 Cookie 即自愈）。
+    if _LOGIN_REDIRECT_RE.search(r.text):
+        return "", (not cookie)
     m = _OG_IMG_RE.search(r.text)
     if m:
         u = m.group(1).strip()

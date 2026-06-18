@@ -156,8 +156,9 @@ DEFAULT_CONFIG = {
                                          #   hardlink/copy 保留原文件；move 移动并清理原下载目录。
                                          #   发种文件因需原地做种，恒按 hardlink/copy（选 move 自动降级为 hardlink）
     "archive_by_month": True,            # 归档是否按年月建子目录（归档目录/YYYYMM/番号/），监控 & 发种共用
-    # 刮削/归档总开关（监控 & 发种共用，全局唯一）：
-    "scrape_meta_enabled": True,         # 刮削：视频改名番号 + 写 NFO/封面；关=保留原文件名、不写 NFO/封面
+    # 刮削/规整/归档总开关（监控 & 发种共用，全局唯一）：
+    "scrape_meta_enabled": True,         # 刮削：只写 NFO/封面（抓元数据）；关=不写 NFO/封面
+    "scrape_organize_enabled": True,     # 规整：视频改名为番号 + 删广告/赠片；关=保留原文件名、不删多余视频
     "archive_enabled": True,             # 归档：刮削/发种成品放进归档目录(供 EMBY)；关=不归档(发种仍原地做种)
 }
 
@@ -201,6 +202,12 @@ def _migrate_unify_archive(config: dict, saved: dict) -> dict:
     # 刮削/归档总开关：从旧的发种专属开关迁移
     if "scrape_meta_enabled" not in saved and "publish_scrape_enabled" in saved:
         config["scrape_meta_enabled"] = saved["publish_scrape_enabled"]
+    # 规整开关（新拆分）：老用户从未设过 → 沿用其原「刮削」开关值（旧刮削=改名+NFO/封面捆绑），
+    # 保持升级前行为不变（原刮削开 → 规整开=继续改名删广告；原刮削关 → 规整也关）。
+    if "scrape_organize_enabled" not in saved:
+        legacy = saved.get("scrape_meta_enabled",
+                           saved.get("publish_scrape_enabled", True))
+        config["scrape_organize_enabled"] = legacy
     if "archive_enabled" not in saved and "publish_archive_enabled" in saved:
         config["archive_enabled"] = saved["publish_archive_enabled"]
     return config

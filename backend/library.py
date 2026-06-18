@@ -1043,8 +1043,8 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
                   watch_dir: str = "") -> dict:
     """
     把视频归档到 归档目录/年月/番号/ 子目录下（Emby 单片单目录布局）。
-    rename：开（刮削开）= 视频改名「番号.后缀」、随带番号命名的 NFO/封面；
-            关（刮削关）= 保留原文件名、不带 NFO/封面。
+    rename：开（规整开）= 视频改名「番号.后缀」、随带番号命名的 NFO/封面；
+            关（规整关）= 保留原文件名（NFO/封面是否带由刮削开关决定）。
     mode：hardlink/copy 保留原下载文件（原文件留存供做种/辅种）；move 移动（原文件离开下载目录）。
     多分段（同番号多个正片）：视频名加 -cd1/-cd2… 堆叠后缀，避免同名互相覆盖、确保全部归档。
     返回 {archived, moved_original, target_dir, files}。
@@ -1175,8 +1175,11 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
     fp = str(video_path)
     output_dir = config.get("scrape_output_dir", "").strip()
     move_on_fail = config.get("scrape_move_on_fail", True)
-    # 全局刮削/归档总开关（监控 & 发种共用）；兼容旧 publish_* 键
+    # 全局刮削/规整/归档总开关（监控 & 发种共用）；兼容旧 publish_* 键
     scrape_meta = config.get("scrape_meta_enabled", config.get("publish_scrape_enabled", True))
+    organize_on = config.get("scrape_organize_enabled",
+                             config.get("scrape_meta_enabled",
+                                        config.get("publish_scrape_enabled", True)))
     archive_on = config.get("archive_enabled", config.get("publish_archive_enabled", True))
 
     if scrape_meta:
@@ -1188,8 +1191,8 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
             scrape_res = {"success": False, "filepath": fp, "code": await _resolve_code(video_path, config),
                           "error": f"刮削异常: {e}"}
     else:
-        # 刮削关：不抓元数据/不写 NFO/封面，仅识别番号用于归档分目录（保留原文件名）
-        _log(f"刮削已关闭，仅识别番号后归档（保留原文件名）：{video_path.name}")
+        # 刮削关：不抓元数据/不写 NFO/封面，仅识别番号用于归档分目录 + 规整改名（改名归规整开关）
+        _log(f"刮削已关闭（不写 NFO/封面），仅识别番号后归档：{video_path.name}")
         scrape_res = {"success": True, "filepath": fp,
                       "code": await _resolve_code(video_path, config),
                       "title_zh": "", "error": "", "skipped": True}
@@ -1220,7 +1223,8 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         src_parent = video_path.parent
         # V1.5 统一：归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
         mode = (config.get("archive_mode") or "hardlink").lower()
-        mv = _archive_file(video_path, output_dir, code, mode=mode, rename=scrape_meta,
+        # 改名归属【规整】开关（不再绑定刮削）：规整开=归档时按番号改名；关=保留原文件名
+        mv = _archive_file(video_path, output_dir, code, mode=mode, rename=organize_on,
                            watch_dir=str(watch_dir))
         record["moved"] = mv.get("archived", False)
         record["archive_mode"] = mode
@@ -1262,6 +1266,10 @@ async def _scan_once(config: dict) -> int:
     min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
     keep_bytes = int(config.get("scrape_keep_size_mb", 300)) * 1024 * 1024
     out_dir = config.get("scrape_output_dir", "").strip()
+    # 删广告/赠片归属【规整】开关：规整关＝不删任何多余视频（保留原样）
+    organize_on = config.get("scrape_organize_enabled",
+                             config.get("scrape_meta_enabled",
+                                        config.get("publish_scrape_enabled", True)))
     # 以归档目录现有内容为准的兜底去重索引（签名文件缺失时仍能跳过早已归档的原文件）。
     archive_idx = _build_archive_index(out_dir)
     now = time.time()
@@ -1348,7 +1356,7 @@ async def _scan_once(config: dict) -> int:
         #   注意：若该种子整体仍在做种，删其中文件会让该种子校验缺文件（用户已知并选择一律清理）。
         #   发种占用的目录已在上方按番号/路径跳过，不会走到这里。
         _drop = set()
-        if _has_primary_sibling(vf):
+        if organize_on and _has_primary_sibling(vf):   # 删广告/赠片仅在【规整】开启时执行
             try:
                 _, _drop = classify_videos(_sibling_videos(vf), watch, min_bytes, keep_bytes)
             except Exception:
@@ -1419,12 +1427,15 @@ async def _scan_once(config: dict) -> int:
 
 
 def _monitor_should_run(config: dict) -> bool:
-    """监控是否该运行：刮削、归档任一开启即运行（无单独的监控开关）。
-    两者都关＝无事可做＝不监控。监控只负责非发种的下载/手动放入文件，按这两个全局
+    """监控是否该运行：刮削、规整、归档任一开启即运行（无单独的监控开关）。
+    三者都关＝无事可做＝不监控。监控只负责非发种的下载/手动放入文件，按这些全局
     开关统一处理（发种任务占用的文件由 active_codes/active_paths 自动跳过）。"""
     scrape_meta = config.get("scrape_meta_enabled", config.get("publish_scrape_enabled", True))
+    organize_on = config.get("scrape_organize_enabled",
+                             config.get("scrape_meta_enabled",
+                                        config.get("publish_scrape_enabled", True)))
     archive_on = config.get("archive_enabled", config.get("publish_archive_enabled", True))
-    return bool(scrape_meta or archive_on)
+    return bool(scrape_meta or organize_on or archive_on)
 
 
 async def _monitor_loop():
@@ -1434,9 +1445,9 @@ async def _monitor_loop():
         config = load_config()
         if not _monitor_should_run(config):
             _monitor_state["enabled"] = False
-            _monitor_state["message"] = "未启用（刮削、归档都关闭）"
+            _monitor_state["message"] = "未启用（刮削、规整、归档都关闭）"
             _monitor_state["running"] = False
-            _log("检测到刮削与归档均关闭，监控协程退出")
+            _log("检测到刮削、规整、归档均关闭，监控协程退出")
             return
         _monitor_state["enabled"] = True
         _monitor_state["watch_dir"] = config.get("scrape_watch_dir", "")
