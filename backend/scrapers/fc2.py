@@ -432,7 +432,9 @@ def _cache_put(num: str, data: dict) -> None:
 # ──────────────────────────────────────────────
 _COVER_CACHE: dict = {}
 _COVER_CACHE_LOADED = False
-_COVER_FAIL_RETRY = 21600          # 失败后重试冷却：6 小时（避免对死号每次刷新都重抓）
+# 失败重试改指数退避：首次只等 1 分钟（一次网络抖动很快自愈），持续取不到才逐步退到 6 小时
+# （避免对真·下架/不存在的号每次刷新都重抓）。下标＝累计失败次数-1。
+_COVER_FAIL_BACKOFF = [60, 300, 1800, 7200, 21600]   # 1m, 5m, 30m, 2h, 6h
 
 
 def _is_market_cover(u: str) -> bool:
@@ -485,17 +487,20 @@ def _cover_mark_failed(num: str) -> None:
     e = _COVER_CACHE.get(num)
     if e and e.get("ok"):                       # 已成功的不回退
         return
-    _COVER_CACHE[num] = {"url": "", "ok": False, "ts": time.time()}
+    fails = (int(e.get("fails", 0)) if e else 0) + 1
+    _COVER_CACHE[num] = {"url": "", "ok": False, "ts": time.time(), "fails": fails}
 
 
 def _cover_needs_fetch(num: str) -> bool:
-    """该号是否需要（再）解析封面：未确认成功；失败的过了冷却期才重试。"""
+    """该号是否需要（再）解析封面：未确认成功；失败的过了（指数退避）冷却期才重试。"""
     e = _COVER_CACHE.get(num)
     if not e:
         return True
     if e.get("ok"):
         return False
-    return (time.time() - float(e.get("ts", 0))) > _COVER_FAIL_RETRY
+    fails = max(1, int(e.get("fails", 1)))
+    cd = _COVER_FAIL_BACKOFF[min(fails - 1, len(_COVER_FAIL_BACKOFF) - 1)]
+    return (time.time() - float(e.get("ts", 0))) > cd
 
 
 def _missav_enabled() -> bool:
@@ -806,8 +811,8 @@ def _apply_market_covers(items: list[dict], market_items: list[dict]) -> None:
 # ── 多渠道封面解析 + 后台预抓（成功即锁定、失败带冷却重试） ──
 _COVER_PREWARM_LOCK = asyncio.Lock()
 _COVER_PREWARM_TASKS: set = set()
-_COVER_PREWARM_THROTTLE = 0.3
-_COVER_PREWARM_MAX = 120          # 单轮最多解析多少个封面
+_COVER_PREWARM_CONCURRENCY = 10   # 后台解析并发数（卖场商品页直连，适度并发安全且快）
+_COVER_PREWARM_MAX = 200          # 单轮最多解析多少个封面（够覆盖最大列表 200）
 
 _IMG_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -874,18 +879,27 @@ async def _cover_prewarm_bg(jobs: list, proxy: Optional[str]) -> None:
     if _COVER_PREWARM_LOCK.locked():
         return
     async with _COVER_PREWARM_LOCK:
-        changed = False
-        for num, listing in jobs:
+        # 并发解析（卖场商品页直连、不过盾，并发安全）→ 秒级填满，不再串行慢爬。
+        # 按列表顺序提交：最新号在前先解析，首屏最快出图。
+        sem = asyncio.Semaphore(_COVER_PREWARM_CONCURRENCY)
+        changed = {"v": False}
+
+        async def _one(num: str, listing: str):
             if not _cover_needs_fetch(num):
-                continue
-            url = await _resolve_cover(num, listing, proxy)
+                return
+            async with sem:
+                try:
+                    url = await _resolve_cover(num, listing, proxy)
+                except Exception:
+                    url = ""
             if url:
                 _cover_mark_ok(num, url)
             else:
                 _cover_mark_failed(num)
-            changed = True
-            await asyncio.sleep(_COVER_PREWARM_THROTTLE)
-        if changed:
+            changed["v"] = True
+
+        await asyncio.gather(*[_one(n, l) for n, l in jobs], return_exceptions=True)
+        if changed["v"]:
             _save_cover_cache()
 
 
