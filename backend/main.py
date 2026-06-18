@@ -637,8 +637,11 @@ async def fetch_image_cached(url: str) -> Optional[tuple[bytes, str]]:
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     }
     referers = _img_referer_candidates(url)
-    # 先用配置代理，再直连兜底（部分 CDN 直连可达、代理反而失败）
-    proxy_opts = [proxy, None] if proxy else [None]
+    # 通道顺序（V1.5.0-beta30 改）：直连优先、代理兜底。
+    # 封面浏览首先吃服务端缓存（上方内存/磁盘两级命中即零上游请求）；缓存未命中需回源时，
+    # 本机（如德国 VPS）多数 CDN 直连即可达，故直连为主；仅直连取不到才用配置代理兜底，
+    # 把代理流量留给真正需要它的抓取，避免每张封面都绕代理拖慢首屏。
+    proxy_opts = [None, proxy] if proxy else [None]
 
     # 并发上限 + 单次较短超时：失败快速放行让浏览器自然重试，避免请求堆积拖死整页
     async with _img_semaphore:

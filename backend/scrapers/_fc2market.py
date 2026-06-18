@@ -219,12 +219,22 @@ def thumbify(url: str) -> str:
     return url
 
 
-async def fetch_cover(num: str, proxy: Optional[str] = None) -> str:
-    """抓单个 FC2 商品页 /article/<num>/ 的封面（og:image 全图）。直连、不过盾。
-    用于给「卖场最新列表够不到的老号」也补上卖场真封面，彻底不依赖 MissAV。
-    失败/番号不存在/取到的是站点 logo 等非商品图 → 返回 ''。"""
+# 商品已下架/不存在时卖场页的日文提示文案（用于「精准识别下架」，区别于地区拦截/网络抖动）。
+# 命中其一 + HTTP 200 即判定该号确已下架，停止后续重抓官图。
+_GONE_MARKERS = ("販売を終了", "存在しないか", "見つかりません", "削除された",
+                 "商品が見つかりません", "ページが見つかりません")
+
+
+async def fetch_cover_ex(num: str, proxy: Optional[str] = None) -> tuple:
+    """抓单个 FC2 商品页封面，并**精准区分「下架/不存在」与「临时失败」**。
+    返回 (cover_url, gone)：
+      - (url, False) ：取到官图（contents.fc2.com 缩略图 CDN）。
+      - ("",  True)  ：服务器可达且明确指向「下架/不存在」（HTTP 404，或 200 + 下架提示文案）
+                       → 上层据此锁定、不再重抓官图。
+      - ("",  False) ：临时失败（被弹登录/年龄门、403/5xx、超时、网络错误、改版无提示）
+                       → 仍按退避重试，避免地区拦截被误判成下架。"""
     if not num:
-        return ""
+        return "", False
     if proxy is None:
         proxy = _proxy()
     cookie = _market_cookie()
@@ -235,17 +245,31 @@ async def fetch_cover(num: str, proxy: Optional[str] = None) -> str:
                                      proxy=proxy or None, timeout=12,
                                      follow_redirects=True) as client:
             r = await client.get(url)
-        if r.status_code != 200 or not r.text:
-            return ""
-        m = _OG_IMG_RE.search(r.text)
-        if not m:
-            return ""
+    except Exception:
+        return "", False                      # 网络错误/超时 → 临时失败
+    # 被弹登录/年龄确认页 → 访问受限（地区/Cookie），不是下架
+    if "id.fc2.com" in str(r.url):
+        return "", False
+    if r.status_code == 404:
+        return "", True                       # 明确 404 → 下架/不存在
+    if r.status_code != 200 or not r.text:
+        return "", False                      # 403/5xx 等 → 临时失败
+    m = _OG_IMG_RE.search(r.text)
+    if m:
         u = m.group(1).strip()
         if u.startswith("//"):
             u = "https:" + u
         # 真商品封面在 storage*.contents.fc2.com/file/...；排除站点 logo 等占位
         if "contents.fc2.com" in u and "/file/" in u:
-            return thumbify(u)        # 转缩略图 CDN：无防盗链、易取、与列表卡同源
-        return ""
-    except Exception:
-        return ""
+            return thumbify(u), False         # 官图：转缩略图 CDN（无防盗链、与列表卡同源）
+        return "", False                      # 有 og:image 但非商品图 → 当临时失败，别误判下架
+    # 200 且无商品 og:image：命中下架提示文案才判下架，否则临时失败（防地区/改版误杀）
+    if any(k in r.text for k in _GONE_MARKERS):
+        return "", True
+    return "", False
+
+
+async def fetch_cover(num: str, proxy: Optional[str] = None) -> str:
+    """兼容旧接口：只取封面 URL（不关心下架信号）。失败/下架/非商品图均返回 ''。"""
+    cover, _gone = await fetch_cover_ex(num, proxy)
+    return cover

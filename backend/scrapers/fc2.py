@@ -410,6 +410,39 @@ async def _fetch_list_pages(url_builder, proxy, max_results, max_pages=10,
 _LIST_ENRICH_CACHE: dict = {}
 _LIST_ENRICH_CACHE_MAX = 2000
 
+# MissAV「尚未收录」负缓存（V1.5.0-beta30）：最新 FC2 号常领先 MissAV 收录数小时——
+# 直连 MissAV 会干净 404。若不记账，后台预抓会**每轮刷新都重抓这些号**（甚至白打 FlareSolverr），
+# 就是「后台一直在重试刷新」的根因。这里按番号记 notfound 退避：收录有延迟但终会出现，故用
+# 递增退避（1h→24h）周期性复查，一旦 MissAV 收录即转正缓存。只对「确认未收录(notfound)」记账，
+# CF/网络失败(blocked)不记（避免地区拦截被误当未收录而长期不抓）。内存态，重启即清（重启后
+# 多半已过收录窗，正好重试）。
+_MISSAV_MISS: dict = {}
+_MISSAV_MISS_BACKOFF = [3600, 10800, 43200, 86400]   # 1h, 3h, 12h, 24h
+
+
+def _missav_miss_skip(num: str) -> bool:
+    """该号是否处于「未收录」退避期内（跳过本轮 MissAV 抓取）。"""
+    e = _MISSAV_MISS.get(num)
+    if not e:
+        return False
+    fails = max(1, int(e.get("fails", 1)))
+    cd = _MISSAV_MISS_BACKOFF[min(fails - 1, len(_MISSAV_MISS_BACKOFF) - 1)]
+    return (time.time() - float(e.get("ts", 0))) < cd
+
+
+def _missav_miss_mark(num: str) -> None:
+    """记一次「确认未收录」，递增退避。"""
+    if not num:
+        return
+    e = _MISSAV_MISS.get(num) or {}
+    _MISSAV_MISS[num] = {"ts": time.time(), "fails": int(e.get("fails", 0)) + 1}
+
+
+def _missav_miss_clear(num: str) -> None:
+    """MissAV 已收录/已取到 → 清除负缓存。"""
+    _MISSAV_MISS.pop(num, None)
+
+
 def _cache_put(num: str, data: dict) -> None:
     """写入 MissAV 结果缓存（带容量上限 LRU 近似：满了丢最早的）。"""
     if not num:
@@ -456,10 +489,22 @@ def _load_cover_cache() -> None:
         if p.exists():
             d = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(d, dict):
-                # 迁移旧缓存：把 beta27~29 存的 storage 原图 URL 转成缩略图 CDN（防盗链/难取 → 易取）
+                # 迁移旧缓存：
+                #  ① beta27~29 存的 storage 原图 URL → 缩略图 CDN（防盗链/难取 → 易取）；
+                #  ② beta30 起改「官图为唯一锁定来源」：把旧的 ok 字段换算成 official——
+                #     url 是 FC2 官图(contents.fc2.com) → official=True 锁定；
+                #     否则（旧 MissAV/fourhoi 锁定）→ official=False 降级软兜底，
+                #     后台据此重抓、力图升级为官图（用户确认：存量也要重新校验升级）。
                 for v in d.values():
-                    if isinstance(v, dict) and v.get("url"):
+                    if not isinstance(v, dict):
+                        continue
+                    if v.get("url"):
                         v["url"] = _fc2market.thumbify(v["url"])
+                    if "official" not in v:
+                        v["official"] = _is_market_cover(v.get("url") or "")
+                        if not v["official"]:
+                            v.setdefault("fails", 0)
+                    v.pop("ok", None)
                 _COVER_CACHE.update(d)
     except Exception:
         pass
@@ -474,33 +519,66 @@ def _save_cover_cache() -> None:
         pass
 
 
-def _cover_ok_url(num: str) -> str:
-    """已确认成功并锁定的封面 URL；无则 ''。"""
+# ── 封面缓存语义（V1.5.0-beta30 重构：FC2 官图为唯一「锁定」来源）──
+#   缓存项字段：{"url": 当前可显示封面, "official": 是否已取到 FC2 官图, "ts", "fails"}
+#     official=True ：已拿到 FC2 卖场官图（contents.fc2.com）→ 永久锁定，不再抓。
+#     official=False：尚未取到官图。url 可能是 MissAV/fourhoi 软兜底（继续显示，不留白），
+#                     但仍按指数退避在后台反复重抓，力图升级为官图；url="" 则是真·无图。
+#   即「只有官图才算成功+打官图标志，否则一直用兜底图并继续抓官图更新」。
+def _cover_official_url(num: str) -> str:
+    """已锁定的 FC2 官图 URL；无则 ''。"""
     e = _COVER_CACHE.get(num)
-    return e["url"] if (e and e.get("ok") and e.get("url")) else ""
+    return e["url"] if (e and e.get("official") and e.get("url")) else ""
 
 
-def _cover_mark_ok(num: str, url: str) -> None:
-    if num and url:
-        _COVER_CACHE[num] = {"url": url, "ok": True, "ts": time.time()}
+def _cover_display_url(num: str) -> str:
+    """当前可显示的封面 URL（官图优先，其次 MissAV/fourhoi 软兜底）；无则 ''。"""
+    e = _COVER_CACHE.get(num)
+    return (e.get("url") or "") if e else ""
+
+
+def _cover_mark(num: str, url: str, gone: bool = False) -> None:
+    """记录解析到的封面：
+      · 官图 → 锁定（official=True，永不再抓）；
+      · gone=True（FC2 卖场已确认下架/不存在）→ 锁定软兜底、不再重抓官图（保留已有兜底图显示）；
+      · 否则非官图 → 软兜底显示，但计入退避（视作「官图尚未取到」），后台继续抓官图升级。"""
+    if not num:
+        return
+    if url and _is_market_cover(url):            # FC2 官图 → 锁定
+        _COVER_CACHE[num] = {"url": url, "official": True, "ts": time.time()}
+        return
+    e = _COVER_CACHE.get(num) or {}
+    if e.get("official"):                         # 已有官图，别被非官图降级
+        return
+    if gone:                                      # 确认下架 → 锁定（停止重抓官图），保留软兜底图
+        _COVER_CACHE[num] = {"url": url or (e.get("url") or ""),
+                             "official": False, "gone": True, "ts": time.time()}
+        return
+    if not url:
+        return
+    fails = int(e.get("fails", 0)) + 1
+    _COVER_CACHE[num] = {"url": url, "official": False, "ts": time.time(), "fails": fails}
 
 
 def _cover_mark_failed(num: str) -> None:
+    """本轮未取到任何封面（临时失败）：官图/下架已锁定的不动；否则累计失败、保留已有软兜底图。"""
     if not num:
         return
     e = _COVER_CACHE.get(num)
-    if e and e.get("ok"):                       # 已成功的不回退
+    if e and (e.get("official") or e.get("gone")):   # 已锁定（官图/下架）→ 不回退
         return
     fails = (int(e.get("fails", 0)) if e else 0) + 1
-    _COVER_CACHE[num] = {"url": "", "ok": False, "ts": time.time(), "fails": fails}
+    url = (e.get("url") if e else "") or ""        # 保留已有软兜底图，取不到官图也别变空图
+    _COVER_CACHE[num] = {"url": url, "official": False, "ts": time.time(), "fails": fails}
 
 
 def _cover_needs_fetch(num: str) -> bool:
-    """该号是否需要（再）解析封面：未确认成功；失败的过了（指数退避）冷却期才重试。"""
+    """该号是否需要（再）解析封面：官图已锁定 / 已确认下架 → 否；
+    否则按指数退避到期即重试（持续升级官图）。"""
     e = _COVER_CACHE.get(num)
     if not e:
         return True
-    if e.get("ok"):
+    if e.get("official") or e.get("gone"):
         return False
     fails = max(1, int(e.get("fails", 1)))
     cd = _COVER_FAIL_BACKOFF[min(fails - 1, len(_COVER_FAIL_BACKOFF) - 1)]
@@ -550,16 +628,23 @@ async def _enrich_one(it: dict, proxy: Optional[str], sem: asyncio.Semaphore) ->
         return
     data = _LIST_ENRICH_CACHE.get(num)
     if data is None:
+        if _missav_miss_skip(num):               # MissAV 尚未收录、退避期内 → 不浪费直连请求
+            return
         async with sem:
             data = _LIST_ENRICH_CACHE.get(num)   # 排队期间可能已被其它请求填充
             if data is None:
                 try:
                     # 列表补全严格直连 MissAV，禁用 FlareSolverr 回退，避免压垮 FlareSolverr
-                    data = await _missav.fetch_fc2(num, proxy,
-                                                   allow_flaresolverr=False) or {}
+                    data, status = await _missav.fetch_fc2_ex(num, proxy,
+                                                              allow_flaresolverr=False)
                 except Exception:
-                    data = {}
-                _cache_put(num, data)
+                    data, status = None, "blocked"
+                if data:
+                    _missav_miss_clear(num)
+                elif status == "notfound":       # 确认未收录 → 记负缓存退避
+                    _missav_miss_mark(num)
+                data = data or {}
+                _cache_put(num, data)            # 仍缓存空 {}，避免同批次重复直连
     if not data:
         return
     if data.get("title") and _needs_title(it):
@@ -641,14 +726,20 @@ async def _prewarm_missav_bg(nums: list[str], proxy: Optional[str]) -> None:
         for num in nums:
             if _LIST_ENRICH_CACHE.get(num):     # 已有正向缓存，跳过
                 continue
+            if _missav_miss_skip(num):          # MissAV 尚未收录、退避期内 → 跳过，别再抓/打 FS
+                continue
             try:
                 # 允许过盾：当前 MissAV 所有镜像均需 Cloudflare 绕过，直连拿不到数据。
                 # 后台串行 + 经 _fsgate 全局串行/熔断，负担可控。
-                data = await _missav.fetch_fc2(num, proxy, allow_flaresolverr=True)
+                data, status = await _missav.fetch_fc2_ex(num, proxy, allow_flaresolverr=True)
             except Exception:
-                data = None
-            if data:                            # 只缓存正向结果；空的留给详情走 FS 兜底
+                data, status = None, "blocked"
+            if data:                            # 正向结果：缓存 + 清未收录账
                 _cache_put(num, data)
+                _missav_miss_clear(num)
+            elif status == "notfound":          # 确认 MissAV 还没这个号 → 记负缓存退避（根因修复）
+                _missav_miss_mark(num)
+            # blocked/disabled：不记负缓存，下轮可重试；空的正向结果也不缓存（留给详情走 FS 兜底）
             await asyncio.sleep(_PREWARM_THROTTLE)
 
 
@@ -786,10 +877,10 @@ def _merge_latest(rich_items: list[dict], extra_items: list[dict]) -> list[dict]
 
 
 def _apply_market_covers(items: list[dict], market_items: list[dict]) -> None:
-    """即时套用封面：① 已锁定成功的封面（_COVER_CACHE，任意渠道取到的）最权威；
-    ② 否则用本轮卖场列表缩略图（新号，顺带锁进缓存）；③ 失败标记的号 → 置空（不显示
-    死掉的 MissAV 旧封面，留白比破图好）。**须在 _apply_cached_missav 之后调用**。
-    标题仅在缺失时补卖场标题（不覆盖 MissAV 的干净标题）。"""
+    """即时套用封面（V1.5.0-beta30 官图优先）：① 已锁定的 FC2 官图最权威；
+    ② 否则用本轮卖场列表缩略图（官图，顺带锁定）；③ 再否则用缓存里的软兜底图（MissAV/fourhoi，
+    继续显示不留白，后台仍在抓官图升级）；④ 已判定为真·无图的号 → 置空（不贴死封面）。
+    **须在 _apply_cached_missav 之后调用**。标题仅在缺失时补卖场标题（不覆盖 MissAV 干净标题）。"""
     _load_cover_cache()
     mp = {m.get("code"): m for m in market_items
           if m.get("cover") and not _is_guess_cover(m.get("cover"))}
@@ -800,16 +891,20 @@ def _apply_market_covers(items: list[dict], market_items: list[dict]) -> None:
         m = mp.get(it.get("code"))
         if m and _needs_title(it) and m.get("title"):
             it["title"] = m["title"]
-        locked = _cover_ok_url(num)
-        if locked:                                   # ① 已锁定的真封面
-            it["cover"] = locked
-        elif m:                                       # ② 本轮卖场列表缩略图 → 同时锁定
+        official = _cover_official_url(num)
+        if official:                                  # ① 已锁定的 FC2 官图
+            it["cover"] = official
+        elif m:                                       # ② 本轮卖场列表缩略图(官图) → 同时锁定
             it["cover"] = m["cover"]
-            _cover_mark_ok(num, m["cover"])
+            _cover_mark(num, m["cover"])
         else:
-            e = _COVER_CACHE.get(num)
-            if e and not e.get("ok"):                 # ③ 已判定失败 → 留白，别贴死封面
-                it["cover"] = ""
+            soft = _cover_display_url(num)            # ③ 缓存里的软兜底图（MissAV/fourhoi）
+            if soft:
+                it["cover"] = soft
+            else:
+                e = _COVER_CACHE.get(num)
+                if e and not e.get("official"):       # ④ 判定过、确无任何封面 → 留白
+                    it["cover"] = ""
 
 
 # ── 多渠道封面解析 + 后台预抓（成功即锁定、失败带冷却重试） ──
@@ -837,25 +932,32 @@ async def _img_is_real(url: str, proxy: Optional[str]) -> bool:
         return False
 
 
-async def _resolve_cover(num: str, listing_cover: str, proxy: Optional[str]) -> str:
-    """多渠道解析单个番号的真实封面，取到即返回；全失败返回 ''。
-    渠道：① 卖场列表缩略图(已是真图) ② 卖场商品页 og:image ③ fourhoi 验证图(MissAV 复活时)。"""
-    # ① 本轮列表已给的卖场缩略图
+async def _resolve_cover(num: str, listing_cover: str, proxy: Optional[str]) -> tuple:
+    """多渠道解析单个番号封面（V1.5.0-beta30 官图优先）。返回 (url, gone)：
+      · url 若是 FC2 官图(contents.fc2.com)→上层锁定；否则为软兜底（继续显示、仍重抓官图）。
+      · gone=True 表示卖场已**确认该号下架/不存在**→上层停止重抓官图（仍保留软兜底图显示）。
+    渠道：① 卖场列表缩略图(官图) ② 卖场商品页 og:image(官图，带下架精准识别)
+    ③ fourhoi 验证图(软兜底) ④ 传入的非官图列表封面(软兜底，保住已显示的 MissAV 图)。"""
+    # ① 本轮列表已给的卖场缩略图（官图）
     if listing_cover and _is_market_cover(listing_cover):
-        return listing_cover
-    # ② 卖场商品页（对仍上架的号有效；下架的会 404 → 空）
+        return listing_cover, False
+    gone = False
+    # ② 卖场商品页（官图；精准区分「下架」与「临时失败」）
     try:
-        c = await _fc2market.fetch_cover(num, proxy)
+        c, gone = await _fc2market.fetch_cover_ex(num, proxy)
         if c:
-            return c
+            return c, False
     except Exception:
-        pass
-    # ③ fourhoi 确定性封面：仅 MissAV 开启时尝试，且必须验证确实出图（否则 404/死）
+        gone = False
+    # ③ fourhoi 确定性封面（软兜底）：仅 MissAV 开启时尝试，且须验证确实出图（否则 404/死）
     if _missav_enabled():
         fh = _missav.cover_url(num)
         if fh and await _img_is_real(fh, proxy):
-            return fh
-    return ""
+            return fh, gone
+    # ④ 传入的非官图列表封面（软兜底）：官图暂取不到时，保住已在显示的 MissAV 图，别变空图
+    if listing_cover and not _is_guess_cover(listing_cover):
+        return listing_cover, gone
+    return "", gone
 
 
 def _schedule_cover_prewarm(items: list[dict], proxy: Optional[str]) -> None:
@@ -893,11 +995,13 @@ async def _cover_prewarm_bg(jobs: list, proxy: Optional[str]) -> None:
                 return
             async with sem:
                 try:
-                    url = await _resolve_cover(num, listing, proxy)
+                    url, gone = await _resolve_cover(num, listing, proxy)
                 except Exception:
-                    url = ""
-            if url:
-                _cover_mark_ok(num, url)
+                    url, gone = "", False
+            if gone:
+                _cover_mark(num, url, gone=True)  # 确认下架→锁定软兜底、停止重抓官图
+            elif url:
+                _cover_mark(num, url)        # 官图→锁定；软兜底→显示并计退避，下轮继续抓官图
             else:
                 _cover_mark_failed(num)
             changed["v"] = True
@@ -916,10 +1020,10 @@ async def resolve_covers(codes_or_nums: list, proxy: Optional[str] = None) -> di
         num = _extract_number(str(raw)) or str(raw)
         if not num:
             continue
-        u = _cover_ok_url(num)
-        if u:
-            out[raw] = u
-        else:
+        disp = _cover_display_url(num)        # 官图或软兜底，先给前端即时显示（翻页不空窗）
+        if disp:
+            out[raw] = disp
+        if _cover_needs_fetch(num):           # 未锁官图且到期 → 仍排队尝试升级官图
             todo.append((raw, num))
     if todo:
         sem = asyncio.Semaphore(_COVER_PREWARM_CONCURRENCY)
@@ -928,12 +1032,16 @@ async def resolve_covers(codes_or_nums: list, proxy: Optional[str] = None) -> di
         async def _one(raw, num):
             async with sem:
                 try:
-                    url = await _resolve_cover(num, "", proxy)
+                    url, gone = await _resolve_cover(num, out.get(raw, ""), proxy)
                 except Exception:
-                    url = ""
-            if url:
-                _cover_mark_ok(num, url)
-                out[raw] = url
+                    url, gone = "", False
+            if gone:
+                _cover_mark(num, url, gone=True)
+                if url:
+                    out[raw] = url
+            elif url:
+                _cover_mark(num, url)
+                out[raw] = url                # 升级为官图或软兜底，回填给前端
             else:
                 _cover_mark_failed(num)
             changed["v"] = True

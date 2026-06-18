@@ -15,14 +15,15 @@ from typing import Optional
 import mteam
 import mteam_enums
 
-# 有码番号形态：2~7 个字母 + 可选连字符 + 2~6 位数字（如 ABP-123 / SSIS001 / MIDV-789）
-_CODE_RE = re.compile(r"^[A-Za-z]{2,7}-?\d{2,6}$")
-
 
 def is_target_code(code: str, source: str = "") -> bool:
-    """是否为应查 DMM 的「有码字母+数字番号」。"""
+    """是否为应查 DMM 的番号。
+
+    规则（V1.5.0-beta30 改）：判定为【无码】的一律跳过，判定为【有码】的一律查 DMM
+    （口径与发种分类同源 mteam_enums.is_uncensored）。不再用「字母+数字」严格正则预筛——
+    凡有码就查一下，真查不到候选才留空（由 resolve 返回 ok=False，发种端非阻断地留空）。"""
     c = (code or "").strip().replace("_", "-")
-    if not c or not _CODE_RE.match(c):
+    if not c:
         return False
     # FC2 / 无码厂牌 / 日期型 / avsox·avmoo 来源 → 无码，跳过
     if mteam_enums.is_uncensored(c, source):

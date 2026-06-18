@@ -152,6 +152,7 @@
   .card-cover .no-cover { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 40px; }
   .source-badge { position: absolute; top: 8px; right: 8px; background: rgba(10,10,15,.8); border: 1px solid var(--border); border-radius: 4px; padding: 2px 7px; font-size: 10px; color: var(--text-muted); letter-spacing: .5px; backdrop-filter: blur(4px); }
   .score-badge { position: absolute; top: 8px; left: 8px; background: rgba(232,160,32,.15); border: 1px solid rgba(232,160,32,.3); border-radius: 4px; padding: 2px 7px; font-size: 11px; color: var(--accent); font-weight: 700; }
+  .official-badge { position: absolute; bottom: 8px; left: 8px; background: rgba(51,170,102,.18); border: 1px solid rgba(51,170,102,.45); border-radius: 4px; padding: 2px 7px; font-size: 10px; color: #33aa66; font-weight: 700; letter-spacing: .5px; backdrop-filter: blur(4px); }
 
   .card-body { padding: 14px; display: flex; flex-direction: column; gap: 10px; flex: 1; }
   .card-code { font-family: 'Bebas Neue', sans-serif; letter-spacing: 2px; font-size: 15px; color: var(--accent); }
@@ -1560,6 +1561,12 @@ function _coverCands(m) {
   if (m.cover_thumb) c.push(m.cover_thumb);
   return c;
 }
+// 是否 FC2 官方卖场封面（contents.fc2.com / 缩略图 CDN）——据此打「官图」标志。
+// 直接看原始封面 URL，与实际显示的图始终一致，无需后端额外字段。
+function isOfficialCover(m) {
+  const u = (m && m.cover) || '';
+  return u.indexOf('contents.fc2.com') !== -1 || u.indexOf('contents-thumbnail') !== -1;
+}
 // 封面加载失败 → 走下一个候选；全失败显示占位
 function coverErr(img, idx) {
   const m = currentResults[idx];
@@ -1580,6 +1587,9 @@ function renderCard(m, idx) {
 
   const scoreBadge = m.score ? `<div class="score-badge">★ ${escHtml(m.score)}</div>` : '';
 
+  // 官图标志：仅当封面确为 FC2 官方卖场图时显示（MissAV/fourhoi 兜底图不打标）
+  const officialBadge = isOfficialCover(m) ? `<div class="official-badge" title="FC2 官方卖场封面">官图</div>` : '';
+
   // 多来源命中时展示来源徽标（如 JavBus+JavDB）
   const srcLabel = (m.sources && m.sources.length > 1) ? m.sources.join('+') : (m.source || '');
 
@@ -1591,6 +1601,7 @@ function renderCard(m, idx) {
       <div class="card-cover" onclick="openDetail(${idx})" title="点击查看详情">
         ${cover}
         ${scoreBadge}
+        ${officialBadge}
         <div class="source-badge">${escHtml(srcLabel)}</div>
         <div class="cover-zoom">🔍 详情</div>
       </div>
@@ -2110,6 +2121,7 @@ function buildDetailContent(m, idx) {
     ['番号', m.code], ['发行日期', m.release_date], ['时长', m.duration],
     ['导演', m.director], ['出品商', m.studio], ['发行商', m.label],
     ['系列', m.series], ['评分', scoreText], ['来源', srcText],
+    ['封面', isOfficialCover(m) ? '官图（FC2 官方卖场）' : ''],
   ].filter(([,v]) => v).map(([k, v]) =>
     `<div class="detail-meta-item"><span class="k">${k}</span><span class="v">${escHtml(v)}</span></div>`
   ).join('');

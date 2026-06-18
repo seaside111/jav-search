@@ -117,11 +117,20 @@ async def _fetch_via_flaresolverr(url: str, fs_url: str, proxy: Optional[str],
 
 async def _get_html(num: str, proxy: Optional[str], opts: dict,
                     allow_flaresolverr: bool = True,
-                    priority: int = PRIO_LATEST) -> str:
+                    priority: int = PRIO_LATEST) -> tuple:
     """按镜像依次直连抓 MissAV 的 FC2 页面；命中 CF 时退到 FlareSolverr。
+    返回 (html, status)，status ∈ {"ok","notfound","blocked"}：
+      ok       ：取到含番号的真实页面（html 非空）。
+      notfound ：服务器可达且明确 404（MissAV 尚未收录该号/号不存在）——重试无意义，可负缓存退避。
+      blocked  ：CF 盾 / 网络错误 / 其它非 404 失败——属可重试（FlareSolverr 或稍后再试）。
     allow_flaresolverr=False（列表批量补全用）：命中 CF 直接放弃，绝不回退 FlareSolverr，
     避免一次列表补全产生几十个 FlareSolverr 请求把它压垮。"""
-    paths = [f"/ja/FC2-PPV-{num}", f"/FC2-PPV-{num}"]
+    # 带语言前缀的路径优先：missav 对无前缀的 /FC2-PPV-xxx 会按地区做 302 跳转
+    #（德国机房常跳到 /en/），无前缀直链在部分地区/时段会触发盾或重定向异常，导致直连判失败、
+    # 白白回退 FlareSolverr。显式带 /en/（用户实测德国可达）首位、/ja/ 次之、无前缀兜底。
+    paths = [f"/en/FC2-PPV-{num}", f"/ja/FC2-PPV-{num}", f"/FC2-PPV-{num}"]
+    saw_404 = False     # 见过明确 404（未收录信号）
+    saw_block = False   # 见过 CF/网络/其它失败（可重试信号）
     for base in opts["bases"]:
         for path in paths:
             url = base.rstrip("/") + path
@@ -129,20 +138,29 @@ async def _get_html(num: str, proxy: Optional[str], opts: dict,
                 async with httpx.AsyncClient(headers=_HEADERS, proxy=proxy or None,
                                              timeout=12, follow_redirects=True) as client:
                     resp = await client.get(url)
-                if resp.status_code == 200 and not _looks_like_cf(resp.text, 200):
-                    if str(num) in resp.text:
-                        return resp.text
-                elif allow_flaresolverr and _looks_like_cf(resp.text, resp.status_code):
+            except Exception:
+                saw_block = True
+                continue
+            if resp.status_code == 200 and not _looks_like_cf(resp.text, 200):
+                if str(num) in resp.text:
+                    return resp.text, "ok"
+                saw_404 = True                      # 200 但页面不含番号（通用站名页）→ 未收录信号
+            elif resp.status_code == 404:
+                saw_404 = True                      # 明确 404 → 未收录/不存在
+            elif _looks_like_cf(resp.text, resp.status_code):
+                saw_block = True
+                if allow_flaresolverr:
                     fs_url = opts.get("flaresolverr_url") or await _fs_discover()  # 留空则自动探测
                     if not fs_url:
                         continue
                     fs_proxy = proxy if opts.get("flaresolverr_use_proxy", True) else None
                     html = await _fetch_via_flaresolverr(url, fs_url, fs_proxy, priority)
                     if html and str(num) in html:
-                        return html
-            except Exception:
-                continue
-    return ""
+                        return html, "ok"
+            else:
+                saw_block = True                    # 其它非 200/404 状态 → 可重试
+    # 只有「见过 404 且全程没被挡/没出错」才判 notfound，避免把地区拦截/CF 误判成未收录
+    return "", ("notfound" if (saw_404 and not saw_block) else "blocked")
 
 
 def _clean_title(title: str, num: str) -> str:
@@ -157,29 +175,27 @@ def _clean_title(title: str, num: str) -> str:
     return t.strip()
 
 
-async def fetch_fc2(num: str, proxy: Optional[str] = None,
-                    allow_flaresolverr: bool = True,
-                    priority: int = PRIO_LATEST) -> Optional[dict]:
-    """
-    抓 MissAV 补全 FC2 元数据。返回 {title, cover, actors, tags} 或 None（不存在/未启用）。
-    封面优先用页面 og:image，没有则回退确定性 fourhoi URL。
-    allow_flaresolverr=False：列表批量补全时禁用 FlareSolverr 回退（保护其不被压垮）。
-    priority：FlareSolverr 回退时的闸优先级；详情路径传 PRIO_DETAIL 以便插队。
-    """
+async def fetch_fc2_ex(num: str, proxy: Optional[str] = None,
+                       allow_flaresolverr: bool = True,
+                       priority: int = PRIO_LATEST) -> tuple:
+    """同 fetch_fc2，但返回 (data, status)。
+    data 为 None 时，status 指示是「未收录(notfound)」还是「被挡/出错(blocked)」——
+    供上层对「MissAV 尚未收录的最新番号」做负缓存退避，避免每轮刷新都重抓（甚至白打 FlareSolverr）。
+    status ∈ {"ok","notfound","blocked","disabled"}。"""
     if not num:
-        return None
+        return None, "notfound"
     opts = _runtime()
     if not opts.get("enabled"):
-        return None
-    html = await _get_html(num, proxy, opts, allow_flaresolverr=allow_flaresolverr,
-                           priority=priority)
+        return None, "disabled"
+    html, status = await _get_html(num, proxy, opts, allow_flaresolverr=allow_flaresolverr,
+                                   priority=priority)
     if not html:
-        return None
+        return None, status
 
     title_raw = _og(html, "og:title")
     # 校验：真实条目标题含番号；通用站名（MissAV | …）视为「无此条目」
     if not title_raw or str(num) not in title_raw:
-        return None
+        return None, "notfound"
 
     cover = _og(html, "og:image") or cover_url(num)
     # 注：不从 MissAV 抽取女优/体裁——其 /actresses//genres/ 链接里混有「女優ランキング」
@@ -204,8 +220,20 @@ async def fetch_fc2(num: str, proxy: Optional[str] = None,
         "cover": cover,
         "samples": samples[:40],
         "preview_video": preview_video,
-        "source_url": f"{opts['bases'][0].rstrip('/')}/ja/FC2-PPV-{num}",
-    }
+        "source_url": f"{opts['bases'][0].rstrip('/')}/en/FC2-PPV-{num}",
+    }, "ok"
+
+
+async def fetch_fc2(num: str, proxy: Optional[str] = None,
+                    allow_flaresolverr: bool = True,
+                    priority: int = PRIO_LATEST) -> Optional[dict]:
+    """抓 MissAV 补全 FC2 元数据。返回 {title, cover, samples, ...} 或 None（不存在/被挡/未启用）。
+    兼容旧接口：只回 data；需要区分「未收录/被挡」的调用方改用 fetch_fc2_ex。
+    allow_flaresolverr=False：列表批量补全时禁用 FlareSolverr 回退（保护其不被压垮）。
+    priority：FlareSolverr 回退时的闸优先级；详情路径传 PRIO_DETAIL 以便插队。"""
+    data, _status = await fetch_fc2_ex(num, proxy, allow_flaresolverr=allow_flaresolverr,
+                                       priority=priority)
+    return data
 
 
 # ───────────────────────── 最新域名自动发现 ─────────────────────────
