@@ -25,9 +25,10 @@ from ._fsgate import (flaresolverr_request as _fs_request, discover_auto as _fs_
                       PRIO_DETAIL, PRIO_LATEST)
 
 # 可直连的镜像优先；域名常变，可由配置 fc2_missav_base 覆盖（逗号分隔）。
-# 这里是「兜底默认」，运行期会被后台自动发现（discover_bases）出来的最新域名顶替。
-# .ai 为当前站点主推主域名，.ws 次之，再加一个历史镜像兜底。
-DEFAULT_BASES = ["https://missav.ai", "https://missav.ws", "https://missav123.com"]
+# 这里是「兜底默认」，自动发现的域名排在它们前面，但默认永远保留作兜底（见 discover_bases）。
+# 实测 2026-06：missav.ws 的 FC2【详情页】直连即出真内容、无 CF 盾（仅首页有盾），
+# title/封面/40 张样品图都能拿到 → 放第一。.ai / missav123 从机房常 ConnectError，作兜底。
+DEFAULT_BASES = ["https://missav.ws", "https://missav.ai", "https://missav123.com"]
 FOURHOI_CDN = "https://fourhoi.com"
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -367,6 +368,11 @@ async def discover_bases(config: Optional[dict] = None, force: bool = False) -> 
             _bases_state.update(list=list(DEFAULT_BASES), source="fallback")
         return _bases_state
 
+    # 始终把内置默认（含直连可用的 missav.ws）并入兜底——避免发现误选死域名后把 .ws 挤掉，
+    # 导致补图全失败（本次根因）。发现到的排前面，默认永远在列表里垫底可用。
+    for b in DEFAULT_BASES:
+        if b not in ranked:
+            ranked.append(b)
     ranked = ranked[:6]
     _bases_state.update(ts=now, list=ranked, source="discovered")
     try:

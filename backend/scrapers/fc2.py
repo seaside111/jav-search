@@ -12,7 +12,11 @@ JavDB 那一套「FlareSolverr 优先 + 增强 httpx 兜底」的取页策略；
 FC2 站点不提供磁力；下载链路仍走 Jackett/sukebei（用番号 FC2-PPV-xxxxxxx 检索）。
 """
 import re
+import os
+import json
+import time
 import asyncio
+from pathlib import Path
 from typing import Optional
 import httpx
 from bs4 import BeautifulSoup
@@ -406,12 +410,6 @@ async def _fetch_list_pages(url_builder, proxy, max_results, max_pages=10,
 _LIST_ENRICH_CACHE: dict = {}
 _LIST_ENRICH_CACHE_MAX = 2000
 
-# 卖场封面缓存（num → 商品页 og:image）。给「卖场最新列表够不到的老号」补卖场真封面用，
-# 由后台 _market_cover_prewarm_bg 渐进填充。纯内存、容量上限近似 LRU。
-_MARKET_COVER_CACHE: dict = {}
-_MARKET_COVER_CACHE_MAX = 4000
-
-
 def _cache_put(num: str, data: dict) -> None:
     """写入 MissAV 结果缓存（带容量上限 LRU 近似：满了丢最早的）。"""
     if not num:
@@ -424,17 +422,88 @@ def _cache_put(num: str, data: dict) -> None:
     _LIST_ENRICH_CACHE[num] = data
 
 
-def _market_cover_put(num: str, url: str) -> None:
-    if not num or not url:
-        return
-    if num not in _MARKET_COVER_CACHE and len(_MARKET_COVER_CACHE) >= _MARKET_COVER_CACHE_MAX:
-        _MARKET_COVER_CACHE.pop(next(iter(_MARKET_COVER_CACHE)))
-    _MARKET_COVER_CACHE[num] = url
+# ──────────────────────────────────────────────
+# 封面状态缓存（按番号，多渠道、成功即锁定、失败带冷却重试）
+#   num → {"url": str, "ok": bool, "ts": float}
+#     ok=True ：任一渠道已取到真实封面 → 锁定，永不再抓（落盘持久化，重启不丢）。
+#     ok=False：所有渠道都没取到 → 记失败，后台慢抓时按冷却周期换渠道重试
+#               （该片重新上架 / MissAV 复活后即可补上）。
+# 渠道优先级：FC2 卖场列表缩略图 > 卖场商品页 og:image > fourhoi 验证图(MissAV 复活时生效)。
+# ──────────────────────────────────────────────
+_COVER_CACHE: dict = {}
+_COVER_CACHE_LOADED = False
+_COVER_FAIL_RETRY = 21600          # 失败后重试冷却：6 小时（避免对死号每次刷新都重抓）
 
 
 def _is_market_cover(u: str) -> bool:
     """是否已是 FC2 卖场封面（contents.fc2.com 图床）。"""
     return "contents.fc2.com" in (u or "") or "contents-thumbnail" in (u or "")
+
+
+def _cover_cache_file() -> Path:
+    return Path(os.getenv("CONFIG_DIR", "/config")) / "fc2_covers_cache.json"
+
+
+def _load_cover_cache() -> None:
+    global _COVER_CACHE_LOADED
+    if _COVER_CACHE_LOADED:
+        return
+    _COVER_CACHE_LOADED = True
+    try:
+        p = _cover_cache_file()
+        if p.exists():
+            d = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                _COVER_CACHE.update(d)
+    except Exception:
+        pass
+
+
+def _save_cover_cache() -> None:
+    try:
+        p = _cover_cache_file()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(_COVER_CACHE, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _cover_ok_url(num: str) -> str:
+    """已确认成功并锁定的封面 URL；无则 ''。"""
+    e = _COVER_CACHE.get(num)
+    return e["url"] if (e and e.get("ok") and e.get("url")) else ""
+
+
+def _cover_mark_ok(num: str, url: str) -> None:
+    if num and url:
+        _COVER_CACHE[num] = {"url": url, "ok": True, "ts": time.time()}
+
+
+def _cover_mark_failed(num: str) -> None:
+    if not num:
+        return
+    e = _COVER_CACHE.get(num)
+    if e and e.get("ok"):                       # 已成功的不回退
+        return
+    _COVER_CACHE[num] = {"url": "", "ok": False, "ts": time.time()}
+
+
+def _cover_needs_fetch(num: str) -> bool:
+    """该号是否需要（再）解析封面：未确认成功；失败的过了冷却期才重试。"""
+    e = _COVER_CACHE.get(num)
+    if not e:
+        return True
+    if e.get("ok"):
+        return False
+    return (time.time() - float(e.get("ts", 0))) > _COVER_FAIL_RETRY
+
+
+def _missav_enabled() -> bool:
+    try:
+        from config_manager import load as load_config
+        return bool(load_config().get("fc2_missav_enabled", True))
+    except Exception:
+        return True
 
 
 def _missav_enabled() -> bool:
@@ -708,69 +777,116 @@ def _merge_latest(rich_items: list[dict], extra_items: list[dict]) -> list[dict]
 
 
 def _apply_market_covers(items: list[dict], market_items: list[dict]) -> None:
-    """**以 FC2 官方卖场封面为准**覆盖列表封面。
-    卖场图是卖家真截图、稳定可用；而 MissAV 补图缓存里可能存下旧的失败/失效封面
-    （fourhoi 对新号 404、或已失效的 missav 图床地址），这类封面非 fourhoi、不会被
-    「不降级」规则换掉，于是旧失败封面一直贴着。故凡卖场有该番号的真实封面，一律用它，
-    覆盖之前任何来源（含 MissAV 缓存）写入的封面。**须在 _apply_cached_missav 之后调用**，
-    确保卖场图最终生效。标题仅在缺失时补卖场标题（不覆盖 MissAV 的干净标题）。"""
+    """即时套用封面：① 已锁定成功的封面（_COVER_CACHE，任意渠道取到的）最权威；
+    ② 否则用本轮卖场列表缩略图（新号，顺带锁进缓存）；③ 失败标记的号 → 置空（不显示
+    死掉的 MissAV 旧封面，留白比破图好）。**须在 _apply_cached_missav 之后调用**。
+    标题仅在缺失时补卖场标题（不覆盖 MissAV 的干净标题）。"""
+    _load_cover_cache()
     mp = {m.get("code"): m for m in market_items
           if m.get("cover") and not _is_guess_cover(m.get("cover"))}
     for it in items:
         num = _extract_number(it.get("code") or it.get("url") or "")
+        if not num:
+            continue
         m = mp.get(it.get("code"))
-        if m:
-            it["cover"] = m["cover"]                      # 卖场列表封面，最权威
-            if _needs_title(it) and m.get("title"):
-                it["title"] = m["title"]
-        elif num and _MARKET_COVER_CACHE.get(num):
-            it["cover"] = _MARKET_COVER_CACHE[num]        # 老号：用后台预抓的卖场商品页封面
+        if m and _needs_title(it) and m.get("title"):
+            it["title"] = m["title"]
+        locked = _cover_ok_url(num)
+        if locked:                                   # ① 已锁定的真封面
+            it["cover"] = locked
+        elif m:                                       # ② 本轮卖场列表缩略图 → 同时锁定
+            it["cover"] = m["cover"]
+            _cover_mark_ok(num, m["cover"])
+        else:
+            e = _COVER_CACHE.get(num)
+            if e and not e.get("ok"):                 # ③ 已判定失败 → 留白，别贴死封面
+                it["cover"] = ""
 
 
-# ── 后台「卖场封面」预抓：给列表里仍非卖场封面的老号补 /article 商品页封面 ──
+# ── 多渠道封面解析 + 后台预抓（成功即锁定、失败带冷却重试） ──
 _COVER_PREWARM_LOCK = asyncio.Lock()
 _COVER_PREWARM_TASKS: set = set()
 _COVER_PREWARM_THROTTLE = 0.3
-_COVER_PREWARM_MAX = 120          # 单轮最多补多少个老号封面
+_COVER_PREWARM_MAX = 120          # 单轮最多解析多少个封面
+
+_IMG_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 
-def _schedule_market_cover_prewarm(items: list[dict], proxy: Optional[str]) -> None:
-    """后台给「卖场列表够不到、且当前不是卖场封面」的老号补 /article 商品页封面（fire-and-forget）。
-    以官方卖场为唯一封面权威，彻底不依赖 MissAV。"""
-    if not _market_enabled() or _COVER_PREWARM_LOCK.locked():
+async def _img_is_real(url: str, proxy: Optional[str]) -> bool:
+    """确认一个图片 URL 真能取到图（200 + image/* + 有体量），用于验证 fourhoi 等猜测封面。"""
+    if not url:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True,
+                                     proxy=proxy or None) as c:
+            r = await c.get(url, headers={"User-Agent": _IMG_UA,
+                                          "Referer": "https://missav.ws/"})
+        ct = r.headers.get("content-type", "")
+        return r.status_code == 200 and ct.startswith("image") and len(r.content) > 1500
+    except Exception:
+        return False
+
+
+async def _resolve_cover(num: str, listing_cover: str, proxy: Optional[str]) -> str:
+    """多渠道解析单个番号的真实封面，取到即返回；全失败返回 ''。
+    渠道：① 卖场列表缩略图(已是真图) ② 卖场商品页 og:image ③ fourhoi 验证图(MissAV 复活时)。"""
+    # ① 本轮列表已给的卖场缩略图
+    if listing_cover and _is_market_cover(listing_cover):
+        return listing_cover
+    # ② 卖场商品页（对仍上架的号有效；下架的会 404 → 空）
+    try:
+        c = await _fc2market.fetch_cover(num, proxy)
+        if c:
+            return c
+    except Exception:
+        pass
+    # ③ fourhoi 确定性封面：仅 MissAV 开启时尝试，且必须验证确实出图（否则 404/死）
+    if _missav_enabled():
+        fh = _missav.cover_url(num)
+        if fh and await _img_is_real(fh, proxy):
+            return fh
+    return ""
+
+
+def _schedule_cover_prewarm(items: list[dict], proxy: Optional[str]) -> None:
+    """后台多渠道解析「尚未锁定成功」的封面（fire-and-forget）：成功锁定、失败记冷却。"""
+    if _COVER_PREWARM_LOCK.locked():
         return
-    nums = []
+    _load_cover_cache()
+    jobs = []
     for it in items:
-        if _is_market_cover(it.get("cover") or ""):       # 已是卖场封面，跳过
-            continue
         num = _extract_number(it.get("code") or it.get("url") or "")
-        if num and not _MARKET_COVER_CACHE.get(num):
-            nums.append(num)
-    nums = nums[:_COVER_PREWARM_MAX]
-    if not nums:
+        if num and _cover_needs_fetch(num):
+            jobs.append((num, it.get("cover") or ""))
+    jobs = jobs[:_COVER_PREWARM_MAX]
+    if not jobs:
         return
     try:
-        task = asyncio.create_task(_market_cover_prewarm_bg(nums, proxy))
+        task = asyncio.create_task(_cover_prewarm_bg(jobs, proxy))
         _COVER_PREWARM_TASKS.add(task)
         task.add_done_callback(_COVER_PREWARM_TASKS.discard)
     except RuntimeError:
         pass
 
 
-async def _market_cover_prewarm_bg(nums: list[str], proxy: Optional[str]) -> None:
+async def _cover_prewarm_bg(jobs: list, proxy: Optional[str]) -> None:
     if _COVER_PREWARM_LOCK.locked():
         return
     async with _COVER_PREWARM_LOCK:
-        for num in nums:
-            if _MARKET_COVER_CACHE.get(num):
+        changed = False
+        for num, listing in jobs:
+            if not _cover_needs_fetch(num):
                 continue
-            try:
-                cover = await _fc2market.fetch_cover(num, proxy)
-            except Exception:
-                cover = ""
-            if cover:
-                _market_cover_put(num, cover)
+            url = await _resolve_cover(num, listing, proxy)
+            if url:
+                _cover_mark_ok(num, url)
+            else:
+                _cover_mark_failed(num)
+            changed = True
             await asyncio.sleep(_COVER_PREWARM_THROTTLE)
+        if changed:
+            _save_cover_cache()
 
 
 async def _fetch_fc2ppvdb_latest(proxy: Optional[str], pool: int) -> list[dict]:
@@ -845,8 +961,8 @@ async def get_latest(proxy: Optional[str] = None, max_results: int = 40) -> list
     items = _sort_by_number_desc(items)[:max_results]
     items = await _enrich_list_missav(items, proxy)   # 缺标题的卡内联补全（sukebei 卡有标题→跳过，快）
     _apply_cached_missav(items)                        # 已预热的卡升级干净标题（可能含旧失败封面）
-    _apply_market_covers(items, market_items)          # **以卖场封面为准**，放最后覆盖一切（含旧失败缓存封面）
-    _schedule_market_cover_prewarm(items, proxy)       # 后台给老号补卖场商品页封面（下次刷新即生效）
+    _apply_market_covers(items, market_items)          # 套用锁定封面/卖场列表封面，失败号置空
+    _schedule_cover_prewarm(items, proxy)              # 后台多渠道解析未锁定封面（成功锁定/失败冷却）
     _schedule_prewarm(items, proxy)                    # 后台慢慢抓 MissAV(样品图)入缓存
     return items
 
