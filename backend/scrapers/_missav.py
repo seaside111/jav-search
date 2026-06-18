@@ -125,10 +125,11 @@ async def _get_html(num: str, proxy: Optional[str], opts: dict,
       blocked  ：CF 盾 / 网络错误 / 其它非 404 失败——属可重试（FlareSolverr 或稍后再试）。
     allow_flaresolverr=False（列表批量补全用）：命中 CF 直接放弃，绝不回退 FlareSolverr，
     避免一次列表补全产生几十个 FlareSolverr 请求把它压垮。"""
-    # 带语言前缀的路径优先：missav 对无前缀的 /FC2-PPV-xxx 会按地区做 302 跳转
-    #（德国机房常跳到 /en/），无前缀直链在部分地区/时段会触发盾或重定向异常，导致直连判失败、
-    # 白白回退 FlareSolverr。显式带 /en/（用户实测德国可达）首位、/ja/ 次之、无前缀兜底。
-    paths = [f"/en/FC2-PPV-{num}", f"/ja/FC2-PPV-{num}", f"/FC2-PPV-{num}"]
+    # 只用带语言前缀的路径：missav 对**无前缀** /FC2-PPV-xxx 会按地区做 302 跳转，过程中撞 CF 盾
+    # → 白白回退 FlareSolverr，且会把"未收录号"的结果污染成 blocked、令负缓存失效、每轮重抓
+    #（beta31 churn 根因）。带前缀的 /en/、/ja/（用户实测）对未收录号是干净 404、对已收录号直连 200，
+    # 源头上不触发盾，故彻底去掉无前缀兜底。/en/（德国可达）首位、/ja/ 次之。
+    paths = [f"/en/FC2-PPV-{num}", f"/ja/FC2-PPV-{num}"]
     saw_404 = False     # 见过明确 404（未收录信号）
     saw_block = False   # 见过 CF/网络/其它失败（可重试信号）
     for base in opts["bases"]:
