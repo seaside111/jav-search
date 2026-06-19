@@ -188,7 +188,8 @@ async def poll(config: dict) -> None:
             e["_name"] = nm
             e["_tname"] = t.get("name", "") or nm
             changed = True
-        done = float(t.get("progress") or 0) >= 0.999
+        # 以下载器自身状态为第一依据（做种中/已完成才算完成），不按文件大小或文件名判断
+        done = downloader.is_download_complete(config, t)
         if done and not e.get("_done"):
             e["_done"] = True
             changed = True

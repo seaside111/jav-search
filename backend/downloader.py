@@ -125,6 +125,45 @@ async def add_torrent(
     )
 
 
+# qBittorrent 表示「下载已完成」（做种/已完成阶段）的状态。
+# qB 凡处于上传/做种阶段的 state 都以 "UP" 结尾（uploading 例外），含暂停做种 pausedUP、
+# 排队做种 queuedUP、卡住做种 stalledUP、强制做种 forcedUP、对完成数据再校验 checkingUP。
+_QB_DONE_STATES = {"uploading", "completed"}
+# Transmission status 整数语义：5=排队做种 6=做种。
+_TR_SEEDING_STATES = {5, 6}
+
+
+def is_download_complete(config: dict, torrent: dict) -> bool:
+    """以下载器自身上报的【状态】为第一依据判断磁力/种子是否「下载完成」。
+
+    仅当下载器明确处于「做种中 / 已完成」状态时才算完成，绝不依据文件大小（progress
+    本质是 已下载字节/总字节 的比例）或文件名来判断——避免「选择性下载」「分片刚到 99%」
+    等场景被误判为完成。
+
+    - qBittorrent：state 以 "UP" 结尾（pausedUP/queuedUP/stalledUP/forcedUP/checkingUP）
+      或为 uploading / completed 即视为完成。
+    - Transmission：status 为 5（排队做种）或 6（做种）视为完成；
+      已停止(0)但已下满(percentDone≈1，即用户主动停种或达比率自动停)亦算完成。
+    """
+    t = active_type(config)
+    state = torrent.get("state")
+    if t == TRANSMISSION:
+        try:
+            st = int(state)
+        except (TypeError, ValueError):
+            return False
+        if st in _TR_SEEDING_STATES:
+            return True
+        # 停止态需借助完成度区分「下完后停种」与「未下完被停」——这是状态判断的必要补充，
+        # 而非以大小为第一依据：仅在状态已是「停止」时才看是否下满。
+        if st == 0 and float(torrent.get("progress") or 0.0) >= 0.999:
+            return True
+        return False
+    # qBittorrent
+    s = (state or "").strip()
+    return s in _QB_DONE_STATES or s.endswith("UP")
+
+
 async def delete_torrents(config: dict, hashes: list,
                           delete_files: bool = False) -> dict:
     """删除种子（可选连数据）。供种子管理使用。"""

@@ -454,7 +454,8 @@ async def _step_download_poll(t: dict, config: dict):
     tor = await _find_torrent(config, t["infohash"])
     if not tor:
         return  # 可能还没出现，下个 tick 再看
-    if tor.get("progress", 0) < 0.999:
+    # 以下载器自身状态为第一依据判断完成（做种中/已完成），不按文件大小或文件名
+    if not downloader.is_download_complete(config, tor):
         return
     # 记录下载器自报路径（完成后才稳定，供刮削目录定位与做种 save_path 用）
     t["content_path"] = tor.get("content_path") or t.get("content_path") or ""
