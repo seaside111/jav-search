@@ -24,6 +24,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from . import _missav  # fourhoi 兜底封面
+from . import _sukebei  # 复用「无码」标题判定 _is_uncensored_title
 
 MARKET_BASE = "https://adult.contents.fc2.com"
 SOURCE = "FC2"
@@ -93,6 +94,8 @@ def _card(num: str, cover: str, title: str) -> dict:
         "label": LABEL, "series": "", "score": "", "score_count": "",
         "has_magnet": False, "actors": [], "tags": [], "samples": [],
         "magnets": [], "description": "", "detail_loaded": False,
+        # 「无码」弱标记：商品标题含卖家自填无码字样即 True（仅参考，未命中≠有码）
+        "uncensored_hint": _sukebei._is_uncensored_title(title),
     }
 
 

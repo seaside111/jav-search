@@ -35,6 +35,18 @@ _HEADERS = {
 # 种子标题里抽 FC2-PPV 番号：FC2-PPV-1234567 / FC2PPV1234567 / FC2 1234567
 _NUM_RE = re.compile(r"FC2[-_\s]?PPV[-_\s]?(\d{5,7})", re.I)
 
+# 「无码」弱信号：卖家在种子/商品标题里自填的无码字样。FC2 官方卖场无「有无马赛克」结构化字段，
+# 这只是从标题精确命中的卖家标注——**命中即很可能无码，未命中不代表有码**，仅作参考弱标记。
+# 注意排除 "無垢"(纯洁)≠"無修正"；故不用单字 "無修"，要求带「正/整/版」或明确「モザイク無」等。
+_UNCENSORED_RE = re.compile(
+    r"無修[正整]|无修|無碼|無码|无码|モザイク無|モザイクなし|ノーモザイク|uncensored",
+    re.I)
+
+
+def _is_uncensored_title(raw: str) -> bool:
+    """标题是否含卖家自填的「无码」字样（弱信号，仅作参考）。"""
+    return bool(_UNCENSORED_RE.search(raw or ""))
+
 
 def _proxy() -> Optional[str]:
     try:
@@ -105,6 +117,8 @@ def _card(num: str, raw_title: str) -> dict:
         "magnets": [],
         "description": "",
         "detail_loaded": False,
+        # 「无码」弱标记：种子标题含卖家自填无码字样即 True（仅参考，未命中≠有码）
+        "uncensored_hint": _is_uncensored_title(raw_title),
     }
 
 

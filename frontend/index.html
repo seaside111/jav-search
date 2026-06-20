@@ -153,6 +153,8 @@
   .source-badge { position: absolute; top: 8px; right: 8px; background: rgba(10,10,15,.8); border: 1px solid var(--border); border-radius: 4px; padding: 2px 7px; font-size: 10px; color: var(--text-muted); letter-spacing: .5px; backdrop-filter: blur(4px); }
   .score-badge { position: absolute; top: 8px; left: 8px; background: rgba(232,160,32,.15); border: 1px solid rgba(232,160,32,.3); border-radius: 4px; padding: 2px 7px; font-size: 11px; color: var(--accent); font-weight: 700; }
   .official-badge { position: absolute; bottom: 8px; left: 8px; background: rgba(51,170,102,.18); border: 1px solid rgba(51,170,102,.45); border-radius: 4px; padding: 2px 7px; font-size: 10px; color: #33aa66; font-weight: 700; letter-spacing: .5px; backdrop-filter: blur(4px); }
+  /* 「无码」弱标记：仅当种子/卖场标题含卖家自填无码字样时显示，带 ? 表示仅供参考 */
+  .uncensored-badge { position: absolute; bottom: 8px; right: 8px; background: rgba(229,72,77,.2); border: 1px solid rgba(229,72,77,.5); border-radius: 4px; padding: 2px 7px; font-size: 10px; color: #ff6b6e; font-weight: 700; letter-spacing: .5px; backdrop-filter: blur(4px); cursor: help; }
 
   .card-body { padding: 14px; display: flex; flex-direction: column; gap: 10px; flex: 1; }
   .card-code { font-family: 'Bebas Neue', sans-serif; letter-spacing: 2px; font-size: 15px; color: var(--accent); }
@@ -1597,6 +1599,11 @@ function renderCard(m, idx) {
   // 官图标志：仅当封面确为 FC2 官方卖场图时显示（MissAV/fourhoi 兜底图不打标）
   const officialBadge = isOfficialCover(m) ? `<div class="official-badge" title="FC2 官方卖场封面">官图</div>` : '';
 
+  // 「无码」弱标记：种子/卖场标题含卖家自填无码字样时提示（仅参考，未标≠有码）
+  const uncensoredBadge = m.uncensored_hint
+    ? `<div class="uncensored-badge" title="种子/卖场标题含「無修正」等字样——卖家自填，仅供参考；未显示不代表有码">无码?</div>`
+    : '';
+
   // 多来源命中时展示来源徽标（如 JavBus+JavDB）
   const srcLabel = (m.sources && m.sources.length > 1) ? m.sources.join('+') : (m.source || '');
 
@@ -1609,6 +1616,7 @@ function renderCard(m, idx) {
         ${cover}
         ${scoreBadge}
         ${officialBadge}
+        ${uncensoredBadge}
         <div class="source-badge">${escHtml(srcLabel)}</div>
         <div class="cover-zoom">🔍 详情</div>
       </div>
@@ -1857,6 +1865,7 @@ async function publishResource(btn, downloadUrl, idx) {
         cover: m ? (m.cover || m.cover_thumb || '') : '',
         source: m ? (m.source || '') : '',
         detail_url: m ? (m.url || '') : '',
+        uncensored: m ? !!m.uncensored_hint : false,  // 「无码」标记 → 发种选无码/有码分类
       }),
     });
     if (resp.status === 404) { showToast('发种流水线尚未实现'); if (btn){btn.disabled=false;btn.textContent='发种';} return; }

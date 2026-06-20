@@ -868,11 +868,16 @@ def _merge_latest(rich_items: list[dict], extra_items: list[dict]) -> list[dict]
     """合并两路最新：以 rich_items（fc2ppvdb，字段全）为主，按番号去重，
     extra_items（sukebei，字段少但更新）只补充 rich 里没有的番号。"""
     out = list(rich_items)
-    seen = {it.get("code") for it in rich_items}
+    by_code = {it.get("code"): it for it in out}
+    seen = set(by_code)
     for it in extra_items:
-        if it.get("code") not in seen:
+        code = it.get("code")
+        if code not in seen:
             out.append(it)
-            seen.add(it.get("code"))
+            seen.add(code)
+        elif it.get("uncensored_hint") and by_code.get(code) is not None:
+            # 同番号两路都在：主卡保留，但「无码」弱标记取并集，别因主卡没标而丢掉信号
+            by_code[code]["uncensored_hint"] = True
     return out
 
 

@@ -153,18 +153,32 @@ def _acodec_keywords(codec: str) -> list:
     return []
 
 
-# 无码厂牌/番号前缀（命中即判无码）
+# 真·无码厂牌/番号前缀（命中即判无码）。
+# 注意：FC2 不在此列——FC2-PPV 是业余源、多为打码，是否无码不能按前缀一刀切，
+# 改由标题「無修正」等标记判定（见 is_uncensored 的 FC2 分支与 uncensored_hint 参数）。
 _UNCENSORED_PREFIXES = (
-    "FC2", "HEYZO", "CARIB", "1PONDO", "10MUSUME", "PACOPACOMAMA", "PACO",
+    "HEYZO", "CARIB", "1PONDO", "10MUSUME", "PACOPACOMAMA", "PACO",
     "MURAMURA", "GACHINCO", "KIN8", "TOKYO-HOT", "HEYDOUGA", "0NDO", "1PON",
 )
 
 
-def is_uncensored(code: str, source: str) -> bool:
+def is_uncensored(code: str, source: str,
+                  uncensored_hint: Optional[bool] = None) -> bool:
+    """是否判为「无码」。
+
+    - avsox/avmoo 来源、真·无码厂牌(CARIB/HEYZO…)、日期型番号：恒为无码。
+    - **FC2-PPV**：业余源、绝大多数打码 → 看标记：
+        · 传入 uncensored_hint（发种分类口径）→ 按它（标题含「無修正」等才无码，否则有码）；
+        · 未传 hint（如 dmm.is_target_code 判定场景）→ 返回 True
+          （FC2 从无 DMM 码、须跳过 DMM；历史口径亦如此，保持不变）。
+    """
     src = (source or "").lower()
     if src in ("avsox", "avmoo"):
         return True
     c = (code or "").upper().replace("_", "-")
+    # FC2 单独判：分类选择按标记，DMM 等无 hint 场景沿用旧口径(True=跳过DMM)
+    if c.startswith("FC2") or "FC2" in c or src == "fc2":
+        return True if uncensored_hint is None else bool(uncensored_hint)
     if any(c.startswith(p) or p in c for p in _UNCENSORED_PREFIXES):
         return True
     # 日期型无码番号：060226-001 / 060226_01
@@ -193,10 +207,12 @@ def _match_category(cats: list, uncensored: bool, height: int) -> tuple:
     return "", ""
 
 
-async def smart_fields(config: dict, summary: dict, code: str, source: str) -> dict:
+async def smart_fields(config: dict, summary: dict, code: str, source: str,
+                       uncensored_hint: Optional[bool] = None) -> dict:
     """
     返回可自动填充的字段 id 字典（只含匹配到的）：
       {category, standard, videoCodec, audioCodec} + 调试用 _detected。
+    uncensored_hint：FC2 等按标题标记判定的「无码」弱标记，驱动有码/无码分类选择。
     """
     conf = await load_conf(config)
     summary = summary or {}
@@ -212,7 +228,7 @@ async def smart_fields(config: dict, summary: dict, code: str, source: str) -> d
     h = int(summary.get("height") or 0)
 
     # category：有码/无码 + HD/SD 精确匹配（如 410 有码HD / 429 无码HD / 424 有码SD / 430 无码SD）
-    uncensored = is_uncensored(code, source)
+    uncensored = is_uncensored(code, source, uncensored_hint)
     cid, cdesc = _match_category(cats, uncensored, h)
     detected["censorship"] = cdesc or ("无码" if uncensored else "有码")
     if cid:

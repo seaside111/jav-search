@@ -45,6 +45,7 @@ import screenshot as screenshot_mod
 import torrentmaker
 import imagehost
 from scrapers import search as scraper_search, SEARCH_MODE_CODE
+from scrapers._sukebei import _is_uncensored_title
 from library import (
     VIDEO_EXTS, _safe_name, _download_image, _cover_referer, _fetch_cover, _build_nfo,
     _strip_code_prefix, _compose_title,
@@ -902,6 +903,24 @@ def _build_descr(t: dict, bbcodes: list, config: dict) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+def _uncensored_marker(t: dict) -> bool:
+    """该发种任务是否带「无码」标记——驱动 FC2 等选无码/有码分类。
+    依次看：① 入队时条目自带的 uncensored_hint（最权威，列表卡按原始种子标题判过）；
+    ② 实际下载内容名 dl_name / 标题里卖家自填的「無修正」等字样（兜底，命中即无码）。
+    未命中 → 有码（FC2-PPV 默认打码）。"""
+    if t.get("uncensored_hint"):
+        return True
+    item = t.get("item_meta") or {}
+    if item.get("uncensored_hint"):
+        return True
+    for key in ("dl_name", "title", "title_jp"):
+        if _is_uncensored_title(t.get(key) or ""):
+            return True
+    if _is_uncensored_title(item.get("title") or ""):
+        return True
+    return False
+
+
 async def _step_upload(t: dict, config: dict):
     """截图→图床→组装→createOredit→取回官方种子做种。"""
     _set(t, state=UPLOADING, note="上传截图到图床")
@@ -939,9 +958,11 @@ async def _step_upload(t: dict, config: dict):
 
     # 智能识别类型/规格（category/standard/videoCodec/audioCodec），匹配不到再兜底
     smart = {}
+    unc_hint = _uncensored_marker(t)   # 「无码」标记：驱动 FC2 等有码/无码分类选择
     try:
         smart = await mteam_enums.smart_fields(
-            config, t.get("media_summary", {}), t["code"], t.get("source_site", ""))
+            config, t.get("media_summary", {}), t["code"], t.get("source_site", ""),
+            uncensored_hint=unc_hint)
     except Exception as e:
         _set(t, note=f"智能类型识别失败（用默认分类）：{e}")
     detected = smart.pop("_detected", {}) if smart else {}
@@ -1200,6 +1221,8 @@ class EnqueueRequest(BaseModel):
     cover: Optional[str] = ""
     source: Optional[str] = ""
     detail_url: Optional[str] = ""
+    # 列表卡的「无码」弱标记（按原始种子/卖场标题判定），驱动发种时选无码/有码分类
+    uncensored: Optional[bool] = None
 
 
 @router.post("/enqueue")
@@ -1213,10 +1236,13 @@ async def api_enqueue(req: EnqueueRequest):
         "cover": (req.cover or "").strip(),
         "source": (req.source or "").strip(),
         "detail_url": (req.detail_url or "").strip(),
+        "uncensored_hint": bool(req.uncensored),
     }
     cfg = load_config()
     t = _new_task(req.code.strip(), req.download_url.strip(),
                   (req.title or "").strip(), item_meta=item_meta)
+    # 列表卡带的「无码」标记落到任务上，供发种选有码/无码分类（FC2 默认有码）
+    t["uncensored_hint"] = bool(req.uncensored)
     # 全局「自动发布」开启 → 入队即【预授权】本任务：全流程跑到发布闸门不再等待，
     # 前端也不再显示「确认」按钮（canConfirm 看 !t.confirmed）。这样用户在首页点一次
     # 「发种」后，查重→下载→刮削→制种→发布→取回做种全部按预设条件自动执行，无需任何确认。
