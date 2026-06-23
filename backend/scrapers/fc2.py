@@ -1267,6 +1267,7 @@ async def diagnose(proxy: Optional[str] = None) -> dict:
         "http_status": status,
         "item_count": len(items),
         "via": via,
+        "market_cookie": _fc2market.market_cookie_status(),   # 卖场登录 cookie 状态（方案二预警）
         "fs_endpoint": fs_auto,              # 自动探测到的 FlareSolverr 地址（手填则为空）
         "error": err,
         "page_title": page.get("title", ""),

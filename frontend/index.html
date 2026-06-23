@@ -594,6 +594,15 @@
 </header>
 
 <main>
+  <!-- FC2 卖场登录 Cookie 过期预警（方案二）：cookie 失效时最新片取不到官图，此处提醒续 cookie -->
+  <div id="fc2MarketWarn" style="display:none;margin:0 0 12px;padding:10px 14px;border:1px solid var(--red);
+       border-radius:8px;background:rgba(229,57,53,.08);font-size:13px;line-height:1.6;">
+    <span style="color:var(--red);font-weight:600">⚠ FC2 官方卖场登录已过期</span>
+    —— 新片可能取不到官图（只剩 MissAV 兜底图）。请在
+    <a href="#" onclick="openSettings();return false;" style="color:var(--accent)">设置 → FC2 数据源</a>
+    重新登录 <code>adult.contents.fc2.com</code> 后更新「官方卖场 Cookie」。
+    <a href="#" onclick="dismissFc2MarketWarn();return false;" style="color:var(--text-dim);float:right">忽略</a>
+  </div>
   <div class="status-bar">
     <div class="spinner" id="spinner"></div>
     <div class="status-text" id="statusText">输入番号、演员或关键词开始搜索</div>
@@ -2568,6 +2577,19 @@ async function testFc2() {
       rows.push(`<div>自动探测到 FlareSolverr：<b style="color:var(--accent)">${escHtml(d.fs_endpoint)}</b> —— 已填入上方 FC2 地址框，点「保存设置」即可固定（留空则每次自动探测）</div>`);
     }
     rows.push(`<div>Cloudflare 拦截：${d.cf_blocked ? '<span style="color:var(--red)">是</span>' : '否'}</div>`);
+    // 官方卖场登录 Cookie 状态（方案二）
+    const mc = d.market_cookie;
+    if (mc) {
+      const map = {
+        none:    '<span style="color:var(--text-dim)">未配置（走免登录首页，新片/付费片官图可能缺失）</span>',
+        unknown: '<span style="color:var(--text-dim)">已配置，待下次抓取最新时校验</span>',
+        ok:      '<span style="color:var(--green)">有效（走 /search 深翻页，官图最全）</span>',
+        expired: '<span style="color:var(--red)">已过期 —— 请重新登录卖场后更新 Cookie</span>',
+      };
+      rows.push(`<div>官方卖场登录 Cookie：${map[mc.status] || '-'}</div>`);
+    }
+    // 同步顶部预警条
+    checkFc2MarketWarn();
     if (d.error && d.error !== 'cf_challenge') {
       rows.push(`<div style="color:var(--text-dim)">错误：${escHtml(d.error)}</div>`);
     }
@@ -2973,10 +2995,25 @@ async function checkVersion() {
   } catch (e) { /* 检测失败保留静态版本号 */ }
 }
 
+// FC2 卖场登录 Cookie 过期预警（方案二）
+function dismissFc2MarketWarn() {
+  const el = document.getElementById('fc2MarketWarn');
+  if (el) el.style.display = 'none';
+}
+async function checkFc2MarketWarn() {
+  try {
+    const resp = await fetch(`${API}/api/fc2/market_status`, { cache: 'no-store' });
+    const d = await safeJson(resp);
+    const el = document.getElementById('fc2MarketWarn');
+    if (el) el.style.display = (d && d.success && d.status === 'expired') ? 'block' : 'none';
+  } catch (e) { /* 预警失败不影响主流程 */ }
+}
+
 async function init() {
   await checkAuthStatus();   // 未登录会跳转，登录态/免登录则继续
   await loadRuntimeConfig(); // 读取预取开关 / 首页最新来源等运行配置
   checkVersion();            // 后台检测版本更新（不阻塞）
+  checkFc2MarketWarn();      // FC2 卖场 cookie 过期则顶部提示（不阻塞）
   // 首页最新：优先用本标签页缓存（从发种页返回时不重抓），无缓存才抓取
   if (showLatestCfg) { if (!tryRestoreLatest()) loadLatest(); }
   else document.getElementById('statusText').innerHTML = '输入番号、演员或关键词开始搜索';

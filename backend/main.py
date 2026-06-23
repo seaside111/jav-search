@@ -108,6 +108,13 @@ async def _on_startup():
         _missav.start_discover_loop(load_config)
     except Exception as e:
         print(f"[启动] MissAV 域名发现启动失败: {e}", flush=True)
+    # FC2 卖场登录 cookie 后台心跳：维持会话不因闲置过期 + 吸收滚动 Set-Cookie 自我续期
+    try:
+        from scrapers import _fc2market
+        import asyncio as _asyncio
+        _asyncio.create_task(_fc2market.start_heartbeat_loop())
+    except Exception as e:
+        print(f"[启动] FC2 卖场 cookie 心跳启动失败: {e}", flush=True)
     # 按配置拉起后台刮削监控
     print(f"[启动] JAV Search {APP_VERSION} 启动完成，初始化刮削监控…", flush=True)
     try:
@@ -824,6 +831,16 @@ async def api_fc2_test():
         return {"success": True, **result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"FC2 诊断失败: {str(e)}")
+
+
+@app.get("/api/fc2/market_status")
+async def api_fc2_market_status():
+    """FC2 官方卖场登录 Cookie 状态（方案二预警）：前端轻量轮询，过期则提示重新登录续 cookie。"""
+    try:
+        from scrapers import _fc2market
+        return {"success": True, **_fc2market.market_cookie_status()}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 @app.post("/api/jackett/search")

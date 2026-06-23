@@ -18,7 +18,12 @@ FC2 官方成人卖场「最新发现源」(adult.contents.fc2.com, V1.5.0-beta2
 卡同构，可被 fc2._merge_latest 无缝合并去重（同番号优先保留先到的较丰富卡）。
 """
 import re
+import os
+import json
+import time
 import math
+import asyncio
+from pathlib import Path
 from typing import Optional
 import httpx
 from bs4 import BeautifulSoup
@@ -71,6 +76,124 @@ def _parse_cookie_str(s: str) -> dict:
             if k:
                 out[k] = v
     return out
+
+
+# ──────────────────────────────────────────────
+# 卖场登录 Cookie 自我续期 + 状态跟踪（V1.5.0-beta· 方案一/二）
+#
+# 痛点：FC2 登录会话 Cookie 短命（几天即失效），失效后卖场回退免登录首页、最新片
+# 取不到官图，用户却毫无感知。这里做两件事：
+#   ① 自我续期：以设置项 fc2_market_cookie 为「种子」落盘到 store，每次请求卖场后
+#      吸收服务端滚动下发的 Set-Cookie 写回 store——只要持久 token 没被作废，会话
+#      就能靠「持续使用 + 心跳」自我续期，把有效期从几天拉到数周/数月。
+#   ② 状态跟踪：登录模式(/search)被弹到 id.fc2.com 即判定 cookie 失效，记 expired；
+#      成功取到登录列表记 ok。供诊断/前端预警「卖场登录已过期，请重新登录续 Cookie」。
+# store 文件：CONFIG_DIR/fc2_market_cookie.json
+#   {"seed": 配置里的原始 cookie 串, "cookies": {当前生效的 cookie 字典(含滚动更新)},
+#    "status": none|unknown|ok|expired, "checked_ts", "ok_ts", "renewed_ts"}
+# ──────────────────────────────────────────────
+_NONLOGIN_KEYS = set(_AGE_COOKIES.keys())   # 年龄/语言 cookie：恒定，不并入 store 以免污染登录态判定
+
+
+def _cookie_store_file() -> Path:
+    return Path(os.getenv("CONFIG_DIR", "/config")) / "fc2_market_cookie.json"
+
+
+def _load_cookie_store() -> dict:
+    try:
+        p = _cookie_store_file()
+        if p.exists():
+            d = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                return d
+    except Exception:
+        pass
+    return {}
+
+
+def _save_cookie_store(store: dict) -> None:
+    try:
+        p = _cookie_store_file()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(store, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _effective_cookies() -> tuple:
+    """返回 (httpx 用 cookie dict, has_login)。
+    has_login=True 表示配置了卖场登录 cookie（应走 /search 登录模式）。
+    登录 cookie 取自持久化 store（含历次滚动续期）；用户在设置里重填了新 cookie
+    （种子变化）则重置 store 以新值为准、状态清回 unknown。"""
+    cfg_cookie = _market_cookie()
+    if not cfg_cookie:
+        return dict(_AGE_COOKIES), False
+    store = _load_cookie_store()
+    if store.get("seed") != cfg_cookie:          # 用户重填新 cookie → 以配置为准重置
+        store = {"seed": cfg_cookie,
+                 "cookies": _parse_cookie_str(cfg_cookie),
+                 "status": "unknown", "checked_ts": 0, "ok_ts": 0, "renewed_ts": 0}
+        _save_cookie_store(store)
+    login = store.get("cookies") or _parse_cookie_str(cfg_cookie)
+    return {**_AGE_COOKIES, **login}, True
+
+
+def _absorb(jar, seed: str) -> None:
+    """把响应 cookie jar 里滚动更新的登录 cookie 并回 store 持久化（自我续期）。
+    seed 防并发覆盖：请求期间配置被改了就别写回旧种子。"""
+    try:
+        if not seed:
+            return
+        store = _load_cookie_store()
+        if store.get("seed") != seed:
+            return
+        cookies = dict(store.get("cookies") or {})
+        changed = False
+        for name, value in jar.items():
+            if not value or name in _NONLOGIN_KEYS:
+                continue
+            if cookies.get(name) != value:
+                cookies[name] = value
+                changed = True
+        if changed:
+            store["cookies"] = cookies
+            store["renewed_ts"] = time.time()
+            _save_cookie_store(store)
+    except Exception:
+        pass
+
+
+def _mark_status(status: str, seed: str) -> None:
+    """记录卖场登录状态：ok（登录模式取数成功）/ expired（被弹登录，cookie 失效）。"""
+    try:
+        store = _load_cookie_store()
+        if seed and store.get("seed") != seed:
+            return
+        store.setdefault("seed", seed)
+        store["status"] = status
+        store["checked_ts"] = time.time()
+        if status == "ok":
+            store["ok_ts"] = time.time()
+        _save_cookie_store(store)
+    except Exception:
+        pass
+
+
+def market_cookie_status() -> dict:
+    """供诊断/前端读取卖场登录 cookie 状态。
+    configured：是否填了 cookie；status：none/unknown/ok/expired；时间戳便于显示。"""
+    cfg_cookie = _market_cookie()
+    if not cfg_cookie:
+        return {"configured": False, "status": "none",
+                "checked_ts": 0, "ok_ts": 0, "renewed_ts": 0}
+    store = _load_cookie_store()
+    return {
+        "configured": True,
+        "status": store.get("status", "unknown"),
+        "checked_ts": float(store.get("checked_ts", 0) or 0),
+        "ok_ts": float(store.get("ok_ts", 0) or 0),
+        "renewed_ts": float(store.get("renewed_ts", 0) or 0),
+    }
 
 
 def _bigger(thumb: str) -> str:
@@ -165,13 +288,13 @@ async def fetch_fc2_latest(proxy: Optional[str] = None, limit: int = 60,
     """
     if proxy is None:
         proxy = _proxy()
-    cookie = _market_cookie()
-    cookies = {**_AGE_COOKIES, **(_parse_cookie_str(cookie) if cookie else {})}
+    cookies, has_login = _effective_cookies()
+    seed = _market_cookie()
     # 翻页策略按模式区分：
     #  - 免登录首页(?sort=date)：是「新着+排行+推荐」混排，唯一番号实测饱和在 ~40，翻再多
     #    页也是重复 → 封顶 3 页即可（够拿最新一批，且快，不空跑）。
     #  - 登录搜索(/search)：真正的倒序分页，按 limit 深翻（每页约 18 个），封顶 10 页。
-    if cookie:
+    if has_login:
         pages = min(10, max(max_pages, math.ceil(max(1, limit) / 18)))
     else:
         pages = max(max_pages, 3)
@@ -187,12 +310,16 @@ async def fetch_fc2_latest(proxy: Optional[str] = None, limit: int = 60,
         async with httpx.AsyncClient(headers=_HEADERS, cookies=cookies,
                                      proxy=proxy or None, timeout=15,
                                      follow_redirects=True) as client:
-            if cookie:
+            if has_login:
                 cards = await _fetch_mode(client, search_url, pages)
-                if cards is None:
+                if cards is None:                    # 登录模式被弹 id.fc2.com → cookie 失效
                     print("[fc2market] 登录 Cookie 无效/过期，回退免登录首页模式")
+                    _mark_status("expired", seed)
+                else:                                # 登录模式拿到数据 → cookie 有效
+                    _mark_status("ok", seed)
             if not cards:                            # None(被弹) 或 [](空) → 免登录首页
                 cards = await _fetch_mode(client, home_url, pages) or []
+            _absorb(client.cookies, seed)            # 吸收滚动下发的 Set-Cookie，自我续期
     except Exception as e:
         print(f"[fc2market] 取最新失败: {type(e).__name__}: {e}")
         cards = cards or []
@@ -244,18 +371,21 @@ async def fetch_cover_ex(num: str, proxy: Optional[str] = None) -> tuple:
         return "", False
     if proxy is None:
         proxy = _proxy()
-    cookie = _market_cookie()
-    cookies = {**_AGE_COOKIES, **(_parse_cookie_str(cookie) if cookie else {})}
+    cookies, has_login = _effective_cookies()
+    seed = _market_cookie()
     url = f"{MARKET_BASE}/article/{num}/"
     try:
         async with httpx.AsyncClient(headers=_HEADERS, cookies=cookies,
                                      proxy=proxy or None, timeout=12,
                                      follow_redirects=True) as client:
             r = await client.get(url)
+            _absorb(client.cookies, seed)     # 顺带吸收滚动下发的 Set-Cookie
     except Exception:
         return "", False                      # 网络错误/超时 → 临时失败
     # 被弹登录/年龄确认页 → 访问受限（地区/Cookie），不是下架
     if "id.fc2.com" in str(r.url):
+        if has_login:                         # 带了登录 cookie 仍被弹 → cookie 失效
+            _mark_status("expired", seed)
         return "", False
     if r.status_code == 404:
         return "", True                       # 明确 404 → 下架/不存在
@@ -265,7 +395,10 @@ async def fetch_cover_ex(num: str, proxy: Optional[str] = None) -> tuple:
     #   无登录 Cookie → 匿名永远取不到 → 当"取不到"收手(gone)，不再每轮白抓；
     #   有 Cookie 仍被弹 → Cookie 失效 → 临时失败可重试（修好 Cookie 即自愈）。
     if _LOGIN_REDIRECT_RE.search(r.text):
-        return "", (not cookie)
+        if has_login:                         # 带 cookie 仍跳登录 → cookie 失效，可重试自愈
+            _mark_status("expired", seed)
+            return "", False
+        return "", True                       # 无 cookie 的需登录商品：匿名永远取不到 → 收手
     m = _OG_IMG_RE.search(r.text)
     if m:
         u = m.group(1).strip()
@@ -285,3 +418,53 @@ async def fetch_cover(num: str, proxy: Optional[str] = None) -> str:
     """兼容旧接口：只取封面 URL（不关心下架信号）。失败/下架/非商品图均返回 ''。"""
     cover, _gone = await fetch_cover_ex(num, proxy)
     return cover
+
+
+# ──────────────────────────────────────────────
+# 后台心跳（V1.5.0-beta· 方案一）：定时用当前 cookie 探一次登录态，
+# 维持会话不因长期闲置而过期 + 吸收滚动 Set-Cookie 续期 + 刷新状态。
+# 平时浏览首页最新就会调 fetch_fc2_latest 顺带续期；心跳是给「长时间不开页」兜底。
+# ──────────────────────────────────────────────
+_HEARTBEAT_INTERVAL = 6 * 3600       # 6 小时一次，负担极低
+_HEARTBEAT_FIRST_DELAY = 120         # 启动后等 2 分钟再首探，避开启动高峰
+
+
+async def heartbeat_once(proxy: Optional[str] = None) -> dict:
+    """主动探一次卖场登录态（仅在配了 cookie 时实际请求）。返回最新 market_cookie_status()。"""
+    cfg_cookie = _market_cookie()
+    if not cfg_cookie:
+        return market_cookie_status()
+    if proxy is None:
+        proxy = _proxy()
+    cookies, has_login = _effective_cookies()
+    seed = cfg_cookie
+    try:
+        async with httpx.AsyncClient(headers=_HEADERS, cookies=cookies,
+                                     proxy=proxy or None, timeout=15,
+                                     follow_redirects=True) as client:
+            r = await client.get(f"{MARKET_BASE}/search/?sort=date&order=desc")
+            _absorb(client.cookies, seed)
+            if "id.fc2.com" in str(r.url):
+                _mark_status("expired", seed)
+            elif r.status_code == 200 and "/article/" in r.text:
+                _mark_status("ok", seed)
+    except Exception as e:
+        print(f"[fc2market] cookie 心跳探测失败: {type(e).__name__}: {e}")
+    return market_cookie_status()
+
+
+async def start_heartbeat_loop() -> None:
+    """后台定时心跳循环（fire-and-forget，由 main 启动时拉起）。"""
+    try:
+        await asyncio.sleep(_HEARTBEAT_FIRST_DELAY)
+    except Exception:
+        pass
+    while True:
+        try:
+            await heartbeat_once()
+        except Exception:
+            pass
+        try:
+            await asyncio.sleep(_HEARTBEAT_INTERVAL)
+        except Exception:
+            break
