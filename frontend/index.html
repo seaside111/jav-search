@@ -1413,6 +1413,10 @@ function mergeDetail(base, d) {
     // 封面特例：列表已有真实封面(如 FC2 卖场缩略图)时，绝不让详情的 fourhoi 猜测封面降级覆盖
     //（这正是「点详情补图失败后连原图也消失」的根因）
     if (k === 'cover' && isGuessCover(v) && base.cover && !isGuessCover(base.cover)) continue;
+    // 标题特例：详情无内容时（如 FC2 MissAV 未收录/被本地化拒收）后端会回填「纯番号」占位标题，
+    // 列表卡已有真实标题时绝不让它被降级成光秃秃的番号（这正是「点详情回列表只剩番号」的根因）。
+    if (k === 'title' && (v === d.code || v === base.code)
+        && base.title && base.title !== base.code) continue;
     out[k] = v;
   }
   out.sources = base.sources || out.sources;

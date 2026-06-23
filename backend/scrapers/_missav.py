@@ -106,6 +106,33 @@ def _looks_like_cf(html: str, status: int) -> bool:
             or "cf-chl-bypass" in head)
 
 
+# 只接受这些语言的 MissAV 页面（og:title 随页面语言本地化）。
+# 根因：机房 IP 落地国家会让 MissAV 按地区返回**本地化**页面——德国 VPS 上即便请求
+# /en/、/ja/，也可能被地区本地化成德语(/de/)页面，og:title 变德语，污染 FC2 标题。
+# 这里按页面自报语言（<html lang> / og:locale）只收 日/英/中，命中德语等其它语言即拒收
+# （宁可不补全、退回 FC2 原标题，也不要德语标题）。
+_ALLOWED_LANGS = ("ja", "en", "zh")
+
+
+def _page_locale(html: str) -> str:
+    """读页面自报语言：优先 <html lang="xx">，否则 og:locale。取不到返回空。"""
+    if not html:
+        return ""
+    m = re.search(r'<html[^>]*\blang=["\']([a-z]{2})', html[:3000], re.I)
+    if m:
+        return m.group(1).lower()
+    m = re.search(r'og:locale["\'][^>]*content=["\']([a-z]{2})', html[:8000], re.I)
+    if m:
+        return m.group(1).lower()
+    return ""
+
+
+def _locale_ok(html: str) -> bool:
+    """页面语言是否为可接受语言（日/英/中）。取不到语言标记时放行（不误杀）。"""
+    loc = _page_locale(html)
+    return (not loc) or (loc in _ALLOWED_LANGS)
+
+
 async def _fetch_via_flaresolverr(url: str, fs_url: str, proxy: Optional[str],
                                   priority: int = PRIO_LATEST) -> str:
     """统一走 _fsgate 的智能适配 + 全局串行；MissAV 仅需 HTML，丢弃 status/err。"""
@@ -134,6 +161,7 @@ async def _get_html(num: str, proxy: Optional[str], opts: dict,
     # 第一轮：所有镜像 × 语言路径，**仅直连**（绝不过盾）。任一镜像直连给出干净 404 → 立即判未收录
     #   （missav 各镜像同源，.ws 说没有就是没有），既不再试其它镜像、也不过盾。
     saw_empty = False   # 200 但页面无番号（通用站名页）——较弱的未收录信号
+    saw_wrong_locale = False  # 200 含番号、但页面被地区本地化成非目标语言（如德语）→ 拒收
     cf_urls = []        # 直连撞盾的 URL，留待第二轮过盾
     for base in opts["bases"]:
         for path in paths:
@@ -146,8 +174,11 @@ async def _get_html(num: str, proxy: Optional[str], opts: dict,
                 continue                            # 网络错误：可重试，不记未收录
             if resp.status_code == 200 and not _looks_like_cf(resp.text, 200):
                 if str(num) in resp.text:
-                    return resp.text, "ok"
-                saw_empty = True                    # 200 但无番号 → 弱未收录信号
+                    if _locale_ok(resp.text):
+                        return resp.text, "ok"
+                    saw_wrong_locale = True          # 地区本地化(德语等) → 拒收，继续试其它路径
+                else:
+                    saw_empty = True                # 200 但无番号 → 弱未收录信号
             elif resp.status_code == 404:
                 return "", "notfound"               # 干净 404 → 未收录，立即收手（不过盾、不试其它镜像）
             elif _looks_like_cf(resp.text, resp.status_code):
@@ -156,6 +187,10 @@ async def _get_html(num: str, proxy: Optional[str], opts: dict,
     # 第一轮直连里出现过「200 无番号」→ 也判未收录（真镜像返回通用页≈没这个号），不必再过盾
     if saw_empty:
         return "", "notfound"
+    # 所有命中都是「地区本地化的非目标语言页」(如德语)，且没有撞盾的 URL 可过盾 → 终态收手：
+    # 过盾仍从同一落地 IP 出，仍会被本地化成德语，没意义；记 notfound 走负缓存退避（不每轮重抓）。
+    if saw_wrong_locale and not cf_urls:
+        return "", "notfound"
     # 第二轮：仅对直连撞盾的 URL 过 FlareSolverr（且允许时）。未收录号在第一轮已 return，不会走到这。
     if allow_flaresolverr and cf_urls:
         fs_url = opts.get("flaresolverr_url") or await _fs_discover()  # 留空则自动探测
@@ -163,8 +198,11 @@ async def _get_html(num: str, proxy: Optional[str], opts: dict,
             fs_proxy = proxy if opts.get("flaresolverr_use_proxy", True) else None
             for url in cf_urls:
                 html = await _fetch_via_flaresolverr(url, fs_url, fs_proxy, priority)
-                if html and str(num) in html:
+                if html and str(num) in html and _locale_ok(html):
                     return html, "ok"
+    # 过盾后仍只拿到非目标语言页（地区本地化）→ 终态收手，记负缓存退避，别每轮重抓白打 FS
+    if saw_wrong_locale:
+        return "", "notfound"
     # 全程撞盾/网络失败、未见 404 → 可重试
     return "", "blocked"
 

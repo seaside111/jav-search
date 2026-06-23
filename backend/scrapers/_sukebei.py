@@ -48,6 +48,18 @@ def _is_uncensored_title(raw: str) -> bool:
     return bool(_UNCENSORED_RE.search(raw or ""))
 
 
+# 「有码」明确信号：卖家在标题里自标的打码字样。注意不能用裸 "モザイク"——它也出现在
+# "モザイク無/モザイクなし"(无码)里，故只匹配「モザイク有/あり/有り」「有修正」「有码/有碼」等
+# 明确表示**有马赛克**的写法。用于 FC2「默认无码，仅明确有码才判有码」的口径。
+_CENSORED_RE = re.compile(
+    r"モザイク有り?|モザイクあり|有修[正整]|有碼|有码|要モザイク", re.I)
+
+
+def _is_censored_title(raw: str) -> bool:
+    """标题是否含卖家自填的「有码/有马赛克」明确字样。"""
+    return bool(_CENSORED_RE.search(raw or ""))
+
+
 def _proxy() -> Optional[str]:
     try:
         from config_manager import load as load_config

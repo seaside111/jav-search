@@ -108,6 +108,16 @@
   .cat .n { opacity: .8; margin-left: 4px; }
   .task { cursor: pointer; }
   .task:hover { border-color: var(--accent); }
+  /* 批量操作工具条 + 选择框 */
+  .batch-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 8px 14px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--bg-card); margin-bottom: 12px; }
+  .batch-bar .sep { width: 1px; height: 18px; background: var(--border); }
+  .batch-bar .btn-sm:disabled { opacity: .4; cursor: default; }
+  .batch-bar .btn-sm.danger:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+  .task-check { display: flex; align-items: center; flex-shrink: 0; padding: 0 2px; }
+  .task-check input { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+  .task.selected { border-color: var(--accent); background: rgba(255,107,157,.06); }
   /* 详情弹窗 */
   .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6);
     z-index: 60; align-items: center; justify-content: center; padding: 20px; }
@@ -157,6 +167,17 @@
       <label class="chk"><input type="checkbox" id="autoRefresh" checked onchange="toggleAuto()"> 自动刷新(30s)</label>
     </div>
     <div class="cats" id="taskCats"></div>
+    <div class="batch-bar" id="batchBar">
+      <label class="chk"><input type="checkbox" id="selAll" onchange="toggleSelAll(this)"> 全选</label>
+      <span class="sep"></span>
+      <span class="hint" id="selCount">未选择</span>
+      <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn-sm" id="batchConfirm" onclick="batchAct('confirm')" disabled>批量确认</button>
+        <button class="btn-sm" id="batchCancel" onclick="batchAct('cancel')" disabled>批量取消</button>
+        <button class="btn-sm" id="batchRetry" onclick="batchAct('retry')" disabled>批量重试</button>
+        <button class="btn-sm danger" id="batchDelete" onclick="batchAct('delete')" disabled>批量删除</button>
+      </div>
+    </div>
     <div id="taskList"><div class="empty">加载中…</div></div>
   </div>
 
@@ -322,6 +343,16 @@
           <span class="hint">达此做种时长停种（0=不按时长）</span>
         </div>
         <div class="row">
+          <label class="lbl">停止·低速空闲(KB/s)</label>
+          <input type="number" id="cfgPubStopIdleKbps" min="0" step="1" value="0" oninput="updateStopGate()">
+          <span class="hint">上传速度持续低于此值即视为无人下载、可停种（0=不启用）。需配合右侧「持续时长」</span>
+        </div>
+        <div class="row">
+          <label class="lbl">低速·持续时长(分钟)</label>
+          <input type="number" id="cfgPubStopIdleMinutes" min="1" step="1" value="30">
+          <span class="hint">上传速度须【连续】低于上面阈值这么多分钟才停种，防偶发瞬时低速误停</span>
+        </div>
+        <div class="row">
           <label class="lbl">单种上传限速(KB/s)</label>
           <input type="number" id="cfgPubUpLimit" min="0" step="64" value="0">
           <span class="hint">0=不限。防超 PT 单种限速被封</span>
@@ -333,7 +364,7 @@
       </div>
       <div class="row">
         <label class="chk"><input type="checkbox" id="cfgPubDeleteAfterStop" onchange="updateStopGate()"> 停止后删除做种任务</label>
-        <span class="hint" id="pubDeleteHint">仅在做种<b>达到上面的停止条件</b>后才执行；「停止·分享率」「停止·时长」都为 0 时永不触发，此开关无效</span>
+        <span class="hint" id="pubDeleteHint">仅在做种<b>达到上面任一停止条件</b>（分享率／时长／低速空闲）后才执行；这些条件全未设置时永不触发，此开关无效</span>
       </div>
       <div class="row">
         <label class="chk"><input type="checkbox" id="cfgPubDeleteFiles"> 删除时连同文件（危险）</label>
@@ -404,6 +435,8 @@ async function loadConfig(){
     $('cfgFreeimageKey').value = c.image_freeimage_key || '';
     $('cfgPubStopRatio').value = c.publish_stop_ratio ?? 0;
     $('cfgPubStopHours').value = c.publish_stop_hours ?? 72;
+    $('cfgPubStopIdleKbps').value = c.publish_stop_idle_kbps ?? 0;
+    $('cfgPubStopIdleMinutes').value = c.publish_stop_idle_minutes ?? 30;
     $('cfgPubUpLimit').value = c.publish_upload_limit_kbps ?? 0;
     $('cfgPubPoll').value = c.publish_poll_interval ?? 30;
     $('cfgPubDeleteAfterStop').checked = !!c.publish_delete_after_stop;
@@ -422,7 +455,9 @@ async function loadConfig(){
 function updateStopGate(){
   const ratio = parseFloat($('cfgPubStopRatio').value) || 0;
   const hours = parseFloat($('cfgPubStopHours').value) || 0;
-  const hasStop = ratio > 0 || hours > 0;
+  const idleKbps = parseFloat($('cfgPubStopIdleKbps').value) || 0;
+  const idleMin = parseFloat($('cfgPubStopIdleMinutes').value) || 0;
+  const hasStop = ratio > 0 || hours > 0 || (idleKbps > 0 && idleMin > 0);
   const delAfter = $('cfgPubDeleteAfterStop');
   const delFiles = $('cfgPubDeleteFiles');
   const hint = $('pubDeleteHint');
@@ -449,6 +484,8 @@ async function saveSettings(){
     image_freeimage_key: $('cfgFreeimageKey').value,
     publish_stop_ratio: Math.max(0, parseFloat($('cfgPubStopRatio').value)||0),
     publish_stop_hours: Math.max(0, parseFloat($('cfgPubStopHours').value)||0),
+    publish_stop_idle_kbps: Math.max(0, parseFloat($('cfgPubStopIdleKbps').value)||0),
+    publish_stop_idle_minutes: Math.max(1, parseInt($('cfgPubStopIdleMinutes').value)||30),
     publish_upload_limit_kbps: Math.max(0, parseInt($('cfgPubUpLimit').value)||0),
     publish_poll_interval: Math.max(10, parseInt($('cfgPubPoll').value)||30),
     publish_delete_after_stop: $('cfgPubDeleteAfterStop').checked,
@@ -551,6 +588,7 @@ async function testDmm(){
 
 // ── 任务（分类 + 列表 + 详情弹窗）──
 let _tasks = [], _counts = {}, _cat = 'all';
+let _selected = new Set();   // 选中的任务 id（跨自动刷新保留）
 const CATS = [
   ['all','全部'], ['ready','待确认'], ['active','进行中'],
   ['seeding','做种中'], ['done','已结束'], ['failed','失败'],
@@ -571,19 +609,28 @@ function renderCats(){
   }).join('');
 }
 function setCat(k){ _cat=k; renderCats(); renderTaskList(); }
+// 当前分类下可见的任务列表
+function visibleTasks(){ return _cat==='all' ? _tasks : _tasks.filter(t=>t.group===_cat); }
 function renderTaskList(){
   const box=$('taskList');
-  const list = _cat==='all' ? _tasks : _tasks.filter(t=>t.group===_cat);
-  if (!list.length){ box.innerHTML='<div class="empty">该分类暂无任务</div>'; return; }
+  // 剔除已不存在的选中项（任务被删除/刷新后消失）
+  const liveIds = new Set(_tasks.map(t=>t.id));
+  for (const id of [..._selected]) if (!liveIds.has(id)) _selected.delete(id);
+  const list = visibleTasks();
+  if (!list.length){ box.innerHTML='<div class="empty">该分类暂无任务</div>'; updateBatchBar(); return; }
   box.innerHTML = list.map(t=>{
     const cls = t.state==='ready' ? 'ready' : (t.group==='failed' ? 'failed' : '');
+    const sel = _selected.has(t.id);
     // 确认全程可点：活跃/待发布且未确认时显示「确认」；已确认显示标记
     const canConfirm = !t.confirmed && ['active','ready'].includes(t.group);
     const quick =
       (canConfirm ? `<button class="btn btn-sm" style="color:#fff;border:none;background:linear-gradient(135deg,var(--accent),var(--accent2))" onclick="event.stopPropagation();confirmPub('${t.id}',this)">确认</button>` : '') +
       (t.group!=='done' ? `<button class="btn-sm" onclick="event.stopPropagation();cancelPub('${t.id}')">取消</button>` : '') +
       (t.group==='failed'||t.group==='done' ? `<button class="btn-sm" onclick="event.stopPropagation();retryPub('${t.id}')">重试</button>` : '');
-    return `<div class="task ${cls}" onclick="openTask('${t.id}')">
+    return `<div class="task ${cls} ${sel?'selected':''}" onclick="openTask('${t.id}')">
+      <label class="task-check" onclick="event.stopPropagation()">
+        <input type="checkbox" ${sel?'checked':''} onchange="toggleSel('${t.id}',this)">
+      </label>
       <div class="task-main">
         <div class="task-title">${escHtml(t.code||'')} ${escHtml(t.title_jp||t.title||'')}</div>
         <div class="task-meta"><span class="task-state">${escHtml(t.state_label||'')}</span>${t.confirmed?'<span class="task-state" style="color:var(--green)">已确认</span>':''}${t.mteam_id?'id '+escHtml(t.mteam_id)+' · ':''}${t.error?'⚠ '+escHtml(t.error):escHtml((t.log&&t.log[t.log.length-1])||'')}</div>
@@ -591,6 +638,56 @@ function renderTaskList(){
       <div class="task-actions">${quick}</div>
     </div>`;
   }).join('');
+  updateBatchBar();
+}
+
+// ── 多选 / 全选 / 批量操作 ──
+function toggleSel(id, el){
+  if (el.checked) _selected.add(id); else _selected.delete(id);
+  // 同步该卡片高亮，不整列表重渲染（避免打断滚动）
+  const card = el.closest('.task'); if (card) card.classList.toggle('selected', el.checked);
+  updateBatchBar();
+}
+function toggleSelAll(el){
+  const ids = visibleTasks().map(t=>t.id);
+  if (el.checked) ids.forEach(id=>_selected.add(id));
+  else ids.forEach(id=>_selected.delete(id));
+  renderTaskList();
+}
+function updateBatchBar(){
+  const vis = visibleTasks();
+  const visSel = vis.filter(t=>_selected.has(t.id)).length;
+  const n = _selected.size;
+  $('selCount').textContent = n ? `已选 ${n}` : '未选择';
+  const none = n===0;
+  ['batchConfirm','batchCancel','batchRetry','batchDelete'].forEach(bid=>{ const b=$(bid); if(b) b.disabled=none; });
+  const all = $('selAll');
+  if (all){
+    all.checked = vis.length>0 && visSel===vis.length;
+    all.indeterminate = visSel>0 && visSel<vis.length;
+  }
+}
+async function batchAct(action){
+  const ids = [..._selected];
+  if (!ids.length){ toast('请先选择任务'); return; }
+  const labels = {confirm:'确认',cancel:'取消',retry:'重试',delete:'删除'};
+  if ((action==='delete'||action==='cancel') &&
+      !confirm(`确定批量${labels[action]} ${ids.length} 个任务？`)) return;
+  try {
+    const r = await fetch(`${API}/api/publish/batch`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ ids, action }),
+    });
+    const d = await safeJson(r);
+    if (r.ok && d.success){
+      let msg = `已${labels[action]} ${d.done} 个`;
+      if (d.skipped) msg += `，跳过 ${d.skipped} 个（状态不适用）`;
+      if (d.errors && d.errors.length) msg += `，失败 ${d.errors.length} 个`;
+      toast(msg);
+      if (action==='delete') _selected.clear();   // 删除后选中项已不存在
+      refreshTasks();
+    } else toast('✗ '+(d.detail||'批量操作失败'));
+  } catch(e){ toast('✗ '+e.message); }
 }
 
 async function openTask(id){

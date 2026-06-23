@@ -116,6 +116,8 @@ DEFAULT_CONFIG = {
     "publish_max_active": 3,             # 同时活跃任务数（含做种）；超限排队
     "publish_stop_ratio": 0,             # 做种停止：分享率达此值（0=不按分享率停，默认不自动停做种）
     "publish_stop_hours": 72,            # 做种停止：做种时长达此小时（0=不按时长停）
+    "publish_stop_idle_kbps": 0,         # 做种停止·低速空闲：上传速度持续低于此值(KB/s)即视为无人下载（0=不启用）
+    "publish_stop_idle_minutes": 30,     # 做种停止·低速空闲：上传速度须连续低于阈值这么多分钟才停种
     "publish_delete_after_stop": False,  # 停止后是否删除做种任务
     "publish_delete_files": False,       # 删除做种时是否连同文件（危险，默认否）
     "publish_screenshot_count": 6,       # 发种截图张数

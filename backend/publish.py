@@ -29,7 +29,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -45,7 +45,7 @@ import screenshot as screenshot_mod
 import torrentmaker
 import imagehost
 from scrapers import search as scraper_search, SEARCH_MODE_CODE
-from scrapers._sukebei import _is_uncensored_title
+from scrapers._sukebei import _is_uncensored_title, _is_censored_title
 from library import (
     VIDEO_EXTS, _safe_name, _download_image, _cover_referer, _fetch_cover, _build_nfo,
     _strip_code_prefix, _compose_title,
@@ -903,20 +903,35 @@ def _build_descr(t: dict, bbcodes: list, config: dict) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+def _is_fc2_task(t: dict) -> bool:
+    """该发种任务是否为 FC2-PPV（按番号 / 来源判定）。"""
+    code = (t.get("code") or "").upper()
+    src = (t.get("source_site") or (t.get("item_meta") or {}).get("source") or "").lower()
+    return ("FC2" in code) or (src == "fc2")
+
+
 def _uncensored_marker(t: dict) -> bool:
-    """该发种任务是否带「无码」标记——驱动 FC2 等选无码/有码分类。
-    依次看：① 入队时条目自带的 uncensored_hint（最权威，列表卡按原始种子标题判过）；
-    ② 实际下载内容名 dl_name / 标题里卖家自填的「無修正」等字样（兜底，命中即无码）。
-    未命中 → 有码（FC2-PPV 默认打码）。"""
+    """该发种任务是否判为「无码」——驱动 FC2 等选无码/有码分类。
+
+    ① 入队时条目自带的 uncensored_hint（列表卡按原始种子标题判过）→ 无码；
+    ② 下载内容名 dl_name / 标题里卖家自填的「無修正」等无码字样 → 无码；
+    ③ **FC2-PPV 默认无码**：除非标题/内容名里有明确「有码/モザイク有」字样才判有码，
+       否则（无任何标记，或明确标无码）一律按无码。这是用户口径——FC2 以无码为默认。
+    ④ 非 FC2 且无任何无码标记 → 维持有码默认（此分支实际只影响 FC2，
+       因 mteam_enums.is_uncensored 对普通有码番号恒判有码、忽略本 hint）。"""
     if t.get("uncensored_hint"):
         return True
     item = t.get("item_meta") or {}
     if item.get("uncensored_hint"):
         return True
-    for key in ("dl_name", "title", "title_jp"):
-        if _is_uncensored_title(t.get(key) or ""):
-            return True
-    if _is_uncensored_title(item.get("title") or ""):
+    titles = [t.get(k) or "" for k in ("dl_name", "title", "title_jp")]
+    titles.append(item.get("title") or "")
+    if any(_is_uncensored_title(s) for s in titles):
+        return True
+    if _is_fc2_task(t):
+        # FC2 默认无码：仅当标题/内容名明确标注有码（モザイク有/有修正…）才判有码
+        if any(_is_censored_title(s) for s in titles):
+            return False
         return True
     return False
 
@@ -1107,16 +1122,43 @@ async def _step_seed_check(t: dict, config: dict):
 
     ratio = tor.get("ratio", 0) if tor else 0
     seeding_time = tor.get("seeding_time", 0) if tor else 0
+    upspeed = int(tor.get("upspeed", 0) or 0) if tor else 0          # 当前上传速度 字节/s
     stop_ratio = float(config.get("publish_stop_ratio", 0) or 0)
     stop_hours = float(config.get("publish_stop_hours", 72) or 0)
+    idle_kbps = float(config.get("publish_stop_idle_kbps", 0) or 0)        # 低速空闲阈值 KB/s
+    idle_minutes = float(config.get("publish_stop_idle_minutes", 30) or 0)  # 须持续低速的分钟数
     hit = False
+    reason = ""
     if stop_ratio > 0 and ratio >= stop_ratio:
         hit = True
+        reason = f"分享率{ratio:.2f}≥{stop_ratio:g}"
     if stop_hours > 0 and seeding_time >= stop_hours * 3600:
         hit = True
+        reason = reason or f"做种时长{seeding_time / 3600:.1f}h≥{stop_hours:g}h"
+
+    # 低速空闲停止：上传速度【持续】低于阈值达设定时长 → 判定已无人下载、可停种。
+    # 用任务上的 seed_idle_since 记「首次跌破阈值的时刻」：速度回升即清零（须连续低速才触发，
+    # 杜绝偶发瞬时低速误停）。idle_kbps 或 idle_minutes 任一为 0 即停用本条件。
+    if not hit and idle_kbps > 0 and idle_minutes > 0:
+        thresh_bps = idle_kbps * 1024
+        if upspeed < thresh_bps:
+            since = float(t.get("seed_idle_since") or 0)
+            if not since:
+                _set(t, seed_idle_since=time.time(),
+                     note=f"上传速度 {upspeed / 1024:.0f}KB/s 低于 {idle_kbps:g}KB/s，"
+                          f"开始计时（持续 {idle_minutes:g} 分钟则停种）")
+            elif time.time() - since >= idle_minutes * 60:
+                hit = True
+                reason = f"上传速度持续{idle_minutes:g}分钟低于{idle_kbps:g}KB/s（无人下载）"
+        elif t.get("seed_idle_since"):
+            _set(t, seed_idle_since=0,
+                 note=f"上传速度回升至 {upspeed / 1024:.0f}KB/s，低速计时清零")
+
     if not hit:
         return
-    # 达停止条件
+    # 达停止条件：清掉低速计时，按是否删种执行
+    if t.get("seed_idle_since"):
+        t["seed_idle_since"] = 0
     if config.get("publish_delete_after_stop"):
         del_files = bool(config.get("publish_delete_files", False))
         hashes = [h for h in [tor["hash"] if tor else ""] if h]
@@ -1124,12 +1166,12 @@ async def _step_seed_check(t: dict, config: dict):
             await downloader.delete_torrents(config, hashes, delete_files=del_files)
         # 做种种子已从下载器删除 → 文件不再被做种，置位让监控可正常归档
         _set(t, state=STOPPED, seed_torrent_removed=True,
-             note=f"达停止条件(分享率{ratio:.2f})，已删除做种{'+文件' if del_files else ''}")
+             note=f"达停止条件({reason})，已删除做种{'+文件' if del_files else ''}")
     else:
         # 仅停止『占用槽位』，官方种子仍留在下载器继续做种同一批文件 →
         # 不置 seed_torrent_removed，监控继续保护这些文件（见 _needs_file_protection）
         _set(t, state=STOPPED,
-             note=f"达停止条件(分享率{ratio:.2f})，停止占用槽位（种子仍在下载器做种，文件继续保护）")
+             note=f"达停止条件({reason})，停止占用槽位（种子仍在下载器做种，文件继续保护）")
 
 
 # ── 后台 worker ──
@@ -1279,23 +1321,53 @@ async def api_task_detail(tid: str):
     return {"success": True, "task": _public(t)}
 
 
+# ── 任务操作核心（单条路由 & 批量共用；返回 'ok'/'skip'，不抛异常便于批量逐条统计）──
+async def _act_cancel(t: dict, config: dict) -> str:
+    if t["state"] in _TERMINAL:
+        return "skip"
+    # 做种中取消：尝试从下载器移除新种子（不删数据）
+    if t["state"] == SEEDING and t.get("infohash_new"):
+        try:
+            await downloader.delete_torrents(config, [t["infohash_new"]], delete_files=False)
+        except Exception:
+            pass
+    _set(t, state=CANCELLED, note="用户取消")
+    return "ok"
+
+
+async def _act_confirm(t: dict, config: dict) -> str:
+    if t["state"] in _TERMINAL:
+        return "skip"
+    t["confirmed"] = True
+    if t["state"] == READY and t["id"] not in _BUSY:
+        _set(t, note="已确认，开始发布")
+        asyncio.create_task(_confirm_run(t, config))
+    else:
+        _set(t, note="已确认（预授权）：流水线到发布闸门将自动发布")
+    return "ok"
+
+
+def _act_retry(t: dict) -> str:
+    if t["state"] not in (FAILED, ABORTED_TAKEN, ABORTED_EXISTS, STOPPED, CANCELLED):
+        return "skip"
+    _set(t, state=QUEUED, error="", note="重新入队")
+    return "ok"
+
+
+def _act_delete(t: dict) -> str:
+    _TASKS.pop(t["id"], None)
+    _save_tasks()
+    return "ok"
+
+
 @router.post("/{tid}/cancel")
 async def api_cancel(tid: str):
     """取消任务：标记为已取消（释放并发槽位）。做种中的任务会从下载器移除。"""
     t = _TASKS.get(tid)
     if not t:
         raise HTTPException(status_code=404, detail="任务不存在")
-    if t["state"] in _TERMINAL:
-        return {"success": True, "note": "已是终态"}
-    # 做种中取消：尝试从下载器移除新种子（不删数据）
-    if t["state"] == SEEDING and t.get("infohash_new"):
-        try:
-            config = load_config()
-            await downloader.delete_torrents(config, [t["infohash_new"]], delete_files=False)
-        except Exception:
-            pass
-    _set(t, state=CANCELLED, note="用户取消")
-    return {"success": True}
+    r = await _act_cancel(t, load_config())
+    return {"success": True, "note": "已是终态" if r == "skip" else ""}
 
 
 @router.post("/{tid}/confirm")
@@ -1310,13 +1382,7 @@ async def api_confirm(tid: str):
         raise HTTPException(status_code=404, detail="任务不存在")
     if t["state"] in _TERMINAL:
         raise HTTPException(status_code=400, detail=f"任务已终止：{_STATE_LABELS.get(t['state'])}")
-    t["confirmed"] = True
-    if t["state"] == READY and tid not in _BUSY:
-        config = load_config()
-        _set(t, note="已确认，开始发布")
-        asyncio.create_task(_confirm_run(t, config))
-    else:
-        _set(t, note="已确认（预授权）：流水线到发布闸门将自动发布")
+    await _act_confirm(t, load_config())
     return {"success": True}
 
 
@@ -1335,18 +1401,53 @@ async def api_retry(tid: str):
     t = _TASKS.get(tid)
     if not t:
         raise HTTPException(status_code=404, detail="任务不存在")
-    if t["state"] not in (FAILED, ABORTED_TAKEN, ABORTED_EXISTS, STOPPED, CANCELLED):
+    if _act_retry(t) == "skip":
         raise HTTPException(status_code=400, detail="仅失败/终止的任务可重试")
-    _set(t, state=QUEUED, error="", note="重新入队")
     return {"success": True}
 
 
 @router.delete("/{tid}")
 async def api_delete(tid: str):
     if tid in _TASKS:
-        _TASKS.pop(tid, None)
-        _save_tasks()
+        _act_delete(_TASKS[tid])
     return {"success": True}
+
+
+class BatchRequest(BaseModel):
+    ids: List[str]
+    action: str   # confirm | cancel | retry | delete
+
+
+@router.post("/batch")
+async def api_batch(req: BatchRequest):
+    """批量操作选中任务：confirm/cancel/retry/delete。逐条执行，
+    不适用的任务（如对已终态点确认）记为 skipped，不影响其余任务。"""
+    action = (req.action or "").strip()
+    if action not in ("confirm", "cancel", "retry", "delete"):
+        raise HTTPException(status_code=400, detail="未知批量操作")
+    config = load_config() if action in ("confirm", "cancel") else {}
+    done = skipped = 0
+    errors = []
+    for tid in (req.ids or []):
+        t = _TASKS.get(tid)
+        if not t:
+            skipped += 1
+            continue
+        try:
+            if action == "cancel":
+                r = await _act_cancel(t, config)
+            elif action == "confirm":
+                r = await _act_confirm(t, config)
+            elif action == "retry":
+                r = _act_retry(t)
+            else:
+                r = _act_delete(t)
+            done += 1 if r == "ok" else 0
+            skipped += 1 if r == "skip" else 0
+        except Exception as e:
+            errors.append({"id": tid, "error": f"{type(e).__name__}: {e}"})
+    return {"success": True, "action": action,
+            "done": done, "skipped": skipped, "errors": errors}
 
 
 @router.get("/mteam/conf")
