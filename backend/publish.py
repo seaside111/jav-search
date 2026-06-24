@@ -91,6 +91,11 @@ _TERMINAL = {STOPPED, ABORTED_EXISTS, ABORTED_TAKEN, CANCELLED}
 # （每 tick≈publish_poll_interval 秒）再放行处理；超时仍无则进处理、由 _step_process 出带诊断的失败。
 _DL_SETTLE_TICKS = 6
 
+# 完成判断的「双重确认」门槛：下载器报告「完成/做种中」状态后，须【连续】这么多个 tick
+# 都仍是完成态、且下载器可达，才放行进入破坏性处理。抗「qB 假死/重启后从 resume data
+# 恢复出的瞬时假完成态」——那种情况下文件其实没下完，单次读到完成态就处理会误删主文件。
+_DL_COMPLETE_CONFIRM_TICKS = 2
+
 # 做种期间若连续这么多个 tick 在下载器列表里都找不到本任务的做种种子（且下载器可达），
 # 判定为「被外部手动删除」→ 任务置 STOPPED 并释放文件保护，避免永久卡 SEEDING、永久占槽。
 # 仅当下载器返回非空列表(确证可达)才计数，规避下载器重启/暂不可达造成的误判。
@@ -123,11 +128,23 @@ def _load_tasks():
             with open(_TASKS_PATH, "r", encoding="utf-8") as f:
                 for t in json.load(f):
                     _TASKS[t["id"]] = t
-            # 重启后把「中间态」任务标记为失败，避免卡死（用户可重试）
+            # 重启后处理「中间态」任务，按是否可安全续跑分别恢复：
+            #   · CHECKING   → QUEUED：查重未持久任何副作用，重新排队从头跑即可（自动恢复）；
+            #   · DOWNLOADING→ 保持：磁力仍在下载器，轮询(_step_download_poll)会自动接上续跑，
+            #                  且完成态须二次确认 + 处理前复验，重启不会导致误判（自动恢复）；
+            #   · PROCESSING / UPLOADING → FAILED：可能已动过文件/已提交一半，不可盲目续跑，
+            #                  标失败由用户重试——重试会重新走「处理前复验」，确保不对不一致数据动手。
             for t in _TASKS.values():
-                if t["state"] in (CHECKING, DOWNLOADING, PROCESSING, UPLOADING):
+                st = t.get("state")
+                if st == CHECKING:
+                    t["state"] = QUEUED
+                    t["error"] = ""
+                    t["complete_ticks"] = 0
+                elif st == DOWNLOADING:
+                    t["complete_ticks"] = 0   # 重置完成确认，避免重启前的瞬时计数残留
+                elif st in (PROCESSING, UPLOADING):
                     t["state"] = FAILED
-                    t["error"] = "服务重启中断，请重试"
+                    t["error"] = "服务重启中断，请重试（重试会重新复验数据完整性）"
     except Exception as e:
         _log(f"任务加载失败: {e}")
 
@@ -339,7 +356,9 @@ def _archive_for_emby(pub_folder: Path, code: str, config: dict) -> dict:
 async def _delete_and_verify(t: dict, config: dict, infohash: str,
                              delete_files: bool = True) -> tuple[bool, str]:
     """删除种子并【回查确认】消失，最多重试 3 次。
-    qB 的删除接口对不存在的 hash 也回 200（静默忽略），不能只看返回值，必须回查。"""
+    qB 的删除接口对不存在的 hash 也回 200（静默忽略），不能只看返回值，必须回查。
+    抗「qB 假死」：回查必须在【下载器可达】时确认「列表里确实没有该 hash」才算删成功——
+    下载器连不上(reachable=False)时列表为空≠种子已删，绝不能误判成功。"""
     ih = (infohash or "").strip().lower()
     if not ih:
         return False, "infohash 未知"
@@ -349,8 +368,12 @@ async def _delete_and_verify(t: dict, config: dict, infohash: str,
         if not res.get("success"):
             last_err = res.get("error", "") or last_err
         await asyncio.sleep(1.0)
-        if not await _find_torrent(config, ih):
-            return True, ""
+        chk = await downloader.find_torrent_ex(config, ih)
+        if not chk["reachable"]:
+            last_err = f"下载器不可达，无法确认删除（{chk.get('error', '')}）"
+            continue
+        if chk["torrent"] is None:
+            return True, ""   # 下载器可达 + 列表无此 hash = 确认已删
     return False, last_err or "删除后种子仍在下载器列表中"
 
 
@@ -400,7 +423,14 @@ async def _step_check(t: dict, config: dict) -> bool:
 
 async def _step_download_start(t: dict, config: dict) -> bool:
     """推送磁力到下载器并记录 infohash。"""
-    before = {x["hash"] for x in await downloader.list_torrents(config)}
+    # 推送前先确认下载器可达：假死/重启时退回排队、下个 tick 自动重试，
+    # 不直接失败、也不在「列表读不到」时盲目重复推送（避免下载器恢复后重复加种、重下重校）。
+    lst = await downloader.list_torrents_ex(config)
+    if not lst["reachable"]:
+        _set(t, state=QUEUED, error="",
+             note=f"下载器暂不可达，稍后自动重试推送（{lst.get('error', '')[:60]}）")
+        return False
+    before = {x["hash"] for x in lst["torrents"]}
     # 幂等续跑：重启/重试场景下，原磁力可能仍在下载器里（甚至已下完做种）。
     # 此时重复 add 既浪费、又可能因 hash 口径不一致导致后续轮询找不到种子、白白重下重校。
     # 先按【已记录的 infohash 或磁力 btih】探测下载器，命中即直接复用、进入轮询，不重复推送。
@@ -443,25 +473,37 @@ async def _step_download_start(t: dict, config: dict) -> bool:
     return True
 
 
-async def _find_torrent(config: dict, infohash: str) -> Optional[dict]:
-    for x in await downloader.list_torrents(config):
-        if x["hash"] == infohash:
-            return x
-    return None
-
-
 async def _step_download_poll(t: dict, config: dict):
-    """轮询下载进度；完成且文件已落地才进入 PROCESSING。"""
-    tor = await _find_torrent(config, t["infohash"])
+    """轮询下载进度；【完成态须连续确认】且文件已落地才进入 PROCESSING。"""
+    chk = await downloader.find_torrent_ex(config, t["infohash"])
+    if not chk["reachable"]:
+        # 下载器不可达（假死/重启/网络）：什么都不做，下个 tick 再看。
+        # 绝不能因为列表空就推进或误判——完成与否的唯一依据是下载器明确报告的状态。
+        _set(t, note=f"下载器暂不可达，跳过本次轮询（{chk.get('error', '')[:60]}）")
+        return
+    tor = chk["torrent"]
     if not tor:
-        return  # 可能还没出现，下个 tick 再看
+        return  # 下载器可达但尚未出现该种子，下个 tick 再看
     # 以下载器自身状态为第一依据判断完成（做种中/已完成），不按文件大小或文件名
     if not downloader.is_download_complete(config, tor):
+        # 未完成：清掉「连续完成确认」计数（避免之前的瞬时完成态残留导致提前放行）
+        if t.get("complete_ticks"):
+            _set(t, complete_ticks=0)
         return
+    # 完成态【连续确认】：抗 qB 重启后从 resume data 恢复出的瞬时假完成态。
+    # 须连续 _DL_COMPLETE_CONFIRM_TICKS 个 tick 都读到完成态才放行处理。
+    cn = int(t.get("complete_ticks", 0)) + 1
+    if cn < _DL_COMPLETE_CONFIRM_TICKS:
+        _set(t, complete_ticks=cn,
+             note=f"下载器报告完成，二次确认中（{cn}/{_DL_COMPLETE_CONFIRM_TICKS}）")
+        return
+    t["complete_ticks"] = cn
     # 记录下载器自报路径（完成后才稳定，供刮削目录定位与做种 save_path 用）
     t["content_path"] = tor.get("content_path") or t.get("content_path") or ""
     t["dl_save_path"] = tor.get("save_path") or t.get("dl_save_path") or ""
     t["dl_name"] = tor.get("name") or t.get("dl_name") or ""
+    # 记录下载器自报的种子总大小（权威），供处理前与磁盘实际大小交叉校验，识别「文件没下满」
+    t["dl_total_size"] = int(tor.get("size") or 0) or t.get("dl_total_size", 0)
     # 完成后可能仍在 Moving/校验 → 确认视频已真正落到刮削目录再处理，避免"没有视频文件"误判。
     _cp, vids = _locate_download(t, config)
     if not vids:
@@ -569,20 +611,35 @@ def _paths_overlap(a: Path, b: Path) -> bool:
     return a == b or a in b.parents or b in a.parents
 
 
-def _clean_pub_folder(pub_folder: Path, keep_names: set) -> list:
+def _clean_pub_folder(pub_folder: Path, keep_names: set,
+                      quarantine_dir: Optional[Path] = None) -> list:
     """
-    清掉番号文件夹里除 keep_names 之外的所有文件/子目录（广告、样板、采样图等无用文件）。
-    用于"下载文件夹已是番号名、广告与主视频同处一个文件夹"的情形——规整后这些无用文件
-    会留在做种/制种文件夹里，必须主动剔除，否则会被打进种子、也无法靠删原种清掉。
-    返回被删除的名称列表，便于记录。
+    把番号文件夹里除 keep_names 之外的文件/子目录（广告、样板、采样图等）清出制种范围。
+    用于"下载文件夹已是番号名、广告与主视频同处一个文件夹"的情形——这些无用文件不剔除
+    会被打进种子、也无法靠删原种清掉。
+
+    【可逆】：不直接删除，而是【移动到隔离区 quarantine_dir】（默认在 .meta 下，不进种子）。
+    万一分层判定出错（如 qB 假死期主文件被误判为广告），数据仍在隔离区可人工找回——
+    这是「出错也不致命」的最后一道安全网。未提供隔离区时才退化为直接删除。
+    返回被清出的名称列表，便于记录。
     """
     removed = []
     try:
+        if quarantine_dir is not None:
+            quarantine_dir.mkdir(parents=True, exist_ok=True)
         for f in list(pub_folder.iterdir()):
             if f.name in keep_names:
                 continue
             try:
-                if f.is_dir():
+                if quarantine_dir is not None:
+                    tgt = quarantine_dir / f.name
+                    # 同名冲突则加序号，绝不覆盖隔离区里已有的数据
+                    i = 1
+                    while tgt.exists():
+                        tgt = quarantine_dir / f"{f.stem}.{i}{f.suffix}"
+                        i += 1
+                    shutil.move(str(f), str(tgt))
+                elif f.is_dir():
                     shutil.rmtree(str(f))
                 else:
                     f.unlink()
@@ -659,6 +716,50 @@ async def _scrape_meta(t: dict, config: dict) -> dict:
     return movie
 
 
+async def _reverify_complete(t: dict, config: dict, cpath: Optional[Path],
+                            videos: list) -> tuple[bool, str]:
+    """破坏性处理(改名/删广告/删原种)前的【二次复验】，确保动手的数据确实是完整下载的。
+    抗两类事故：① qB 假死/重启后从 resume data 恢复出的「假完成态」（状态说完成、文件没下满）；
+               ② 任务因故中断后重试时，对处于不一致中间态的数据动手。
+    返回 (是否可继续, 不可继续时的原因)。原则：宁可暂缓重试，绝不对疑似不完整数据动破坏性操作。
+
+    判定（完成与否的唯一依据仍是下载器状态）：
+      - 下载器不可达           → 暂缓（等恢复后复验）；
+      - 种子仍在且状态未完成   → 暂缓（假死后未下满 / 重试时未就绪）；
+      - 种子仍在且状态已完成   → 再做磁盘数据量交叉校验（见下）；
+      - 种子已不在(可达确认)   → 原种已删，说明此前已成功处理过一轮，跳过校验放行（数据已是我们的）。
+    磁盘交叉校验：下载内容目录里所有文件的实际字节，应接近下载器自报的种子总量；
+      显著偏小(默认<80%)即判「没下满」——正是「主文件没下完、比广告还小→选主必错」的根因拦截点。"""
+    ih = (t.get("infohash") or "").strip().lower()
+    torrent_present = True
+    if ih:
+        chk = await downloader.find_torrent_ex(config, ih)
+        if not chk["reachable"]:
+            return False, f"下载器不可达，暂缓处理（{chk.get('error', '')[:60]}）"
+        tor = chk["torrent"]
+        if tor is None:
+            torrent_present = False   # 原种已删 → 复跑场景，不再做磁盘量校验
+        elif not downloader.is_download_complete(config, tor):
+            return False, "下载器报告该种子尚未完成，暂缓处理（疑似假死未下满/重试时数据未就绪）"
+        else:
+            # 状态确属完成：把权威总量刷新一次（首轮可能没记上）
+            t["dl_total_size"] = int(tor.get("size") or 0) or int(t.get("dl_total_size") or 0)
+    # 磁盘数据量交叉校验：仅在原种仍在（首轮处理）且已知种子总量时执行
+    total_known = int(t.get("dl_total_size") or 0)
+    if torrent_present and total_known > 0 and cpath is not None and cpath.exists():
+        try:
+            if cpath.is_file():
+                disk = cpath.stat().st_size
+            else:
+                disk = sum(p.stat().st_size for p in cpath.rglob("*") if p.is_file())
+            if disk < total_known * 0.80:
+                return False, (f"磁盘数据 {disk // (1024 * 1024)}MB 远小于下载器自报种子总量 "
+                               f"{total_known // (1024 * 1024)}MB，疑似未下满，暂缓处理（防误删主文件）")
+        except Exception:
+            pass
+    return True, ""
+
+
 async def _step_process(t: dict, config: dict):
     """停种 → 刮削规整(番号+日文原名/封面/NFO) → 制种 → 删原磁力种 → 复查 → READY。"""
     _set(t, state=PROCESSING, note="开始刮削制种")
@@ -691,6 +792,24 @@ async def _step_process(t: dict, config: dict):
             _set(t, state=FAILED,
                  error=f"下载内容里没有视频文件（定位={cpath}）｜刮削目录现有视频：{listing or '无'}")
         return
+
+    # 1.5) 破坏性处理前【二次复验】：确认数据确实下满（抗 qB 假死假完成态 / 重试时不一致）。
+    #      不通过则【退回 DOWNLOADING】，由轮询重新确认完成态后再进——绝不对疑似不完整数据动手。
+    #      真·假死场景下载器最终会下满、复验自然通过；为防极端情况（如用户对种子做了
+    #      选择性下载，磁盘量恒小于种子总量）无限循环，累计失败超过上限则标失败，留诊断给人工。
+    ok_v, why = await _reverify_complete(t, config, cpath, videos)
+    if not ok_v:
+        n = int(t.get("reverify_fails", 0)) + 1
+        if n >= 8:
+            _set(t, state=FAILED, reverify_fails=0,
+                 error=f"处理前复验连续 {n} 次未通过，已停止以防误操作：{why}"
+                       f"（若确为选择性下载/特殊种子，请人工核对后重试）")
+        else:
+            _set(t, state=DOWNLOADING, complete_ticks=0, reverify_fails=n,
+                 note=f"处理前复验未通过({n}/8)，退回等待：{why}")
+        return
+    if t.get("reverify_fails"):
+        t["reverify_fails"] = 0
 
     # 做种【原地】：番号文件夹建在刮削目录（本项目视角）；
     #   做种 save_path 用下载器自报的 save_path（下载器视角，最可靠，免换算）；
@@ -816,9 +935,11 @@ async def _step_process(t: dict, config: dict):
         keep.add(f"{t['code']}.nfo")
         if cover_path:
             keep.add("poster.jpg")
-        removed = _clean_pub_folder(pub_folder, keep)
+        # 隔离区放 .meta/<code>/_dropped/（不进种子、不做种），可逆——判错可人工找回
+        removed = _clean_pub_folder(pub_folder, keep, quarantine_dir=meta_dir / "_dropped")
         if removed:
-            _set(t, note=f"清理无用文件 {len(removed)} 项：{('、'.join(removed))[:80]}")
+            _set(t, note=f"清理无用文件 {len(removed)} 项(已移入隔离区 .meta/{t['code']}/_dropped/，"
+                         f"判错可找回)：{('、'.join(removed))[:80]}")
 
     # 5) mediainfo + 结构化摘要 + 截图
     mi = await mediainfo_mod.get_mediainfo_text(str(dst_video))
@@ -864,8 +985,25 @@ async def _step_process(t: dict, config: dict):
     overlap = _paths_overlap(cpath, pub_folder)
     del_files = not overlap
     ih = (t.get("infohash") or "").strip()
+    # 非重叠删原文件前：把原下载文件夹里残留的【视频】先移入隔离区，再删种连文件。
+    # 万一分层判错（把真正的正片当广告丢在原文件夹没移进番号夹），也不会随原文件夹被删掉，
+    # 可从 .meta/<code>/_dropped/ 找回——与第 4.5 步同一道可逆安全网，覆盖非重叠路径。
+    if del_files and cpath is not None and cpath.is_dir():
+        try:
+            qdir = meta_dir / "_dropped"
+            for p in list(cpath.rglob("*")):
+                if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
+                    qdir.mkdir(parents=True, exist_ok=True)
+                    tgt = qdir / p.name
+                    i = 1
+                    while tgt.exists():
+                        tgt = qdir / f"{p.stem}.{i}{p.suffix}"
+                        i += 1
+                    shutil.move(str(p), str(tgt))
+        except Exception:
+            pass
     ok_del, derr = await _delete_and_verify(t, config, ih, delete_files=del_files)
-    how = "仅移除记录(做种数据原地保留)" if overlap else "连同原文件(清广告残留)"
+    how = "仅移除记录(做种数据原地保留)" if overlap else "连同原文件(残留视频已隔离)"
     if ok_del:
         _set(t, note=f"已删除原磁力种子 {ih[:12]}（{how}）")
     elif not ih:
@@ -1098,16 +1236,17 @@ async def _step_seed_check(t: dict, config: dict):
     ih = (t.get("infohash_new") or "").lower()
     if not ih:
         return  # 无做种 infohash（如 reseed 失败），无可检查/可误判
-    torrents = await downloader.list_torrents(config)
-    tor = next((x for x in torrents if (x.get("hash") or "").lower() == ih), None)
+    chk = await downloader.find_torrent_ex(config, ih)
 
-    # P1：做种种子从下载器消失的处理。仅当列表非空(确证下载器可达)才计 miss，
-    #     连续 _SEED_GONE_TICKS 次仍找不到 → 判定被外部删除：置 STOPPED + 释放文件保护、退出占槽。
-    #     列表为空(可能下载器重启/不可达，无法区分)则跳过本次、不计数，宁可漏判不可误判。
+    # P1：做种种子从下载器消失的处理。用【可达性】而非「列表是否为空」判断——
+    #     下载器不可达(假死/重启/网络)时绝不计 miss，宁可漏判不可误判；
+    #     仅当下载器【可达】却找不到该 hash 时才计 miss，连续 _SEED_GONE_TICKS 次
+    #     → 判定被外部删除：置 STOPPED + 释放文件保护、退出占槽。
+    if not chk["reachable"]:
+        _set(t, note=f"下载器暂不可达，跳过本次做种检查（{chk.get('error', '')[:60]}）")
+        return
+    tor = chk["torrent"]
     if tor is None:
-        if not torrents:
-            _set(t, note="下载器暂无返回(可能重启/不可达)，跳过本次做种检查")
-            return
         miss = int(t.get("seed_missing_ticks", 0)) + 1
         if miss >= _SEED_GONE_TICKS:
             _set(t, state=STOPPED, seed_torrent_removed=True, seed_missing_ticks=0,

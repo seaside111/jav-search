@@ -412,27 +412,35 @@ async def get_version(qb_url: str, username: str, password: str,
             return {"online": False, "message": str(e)}
 
 
-async def list_torrents(qb_url: str, username: str, password: str,
-                        timeout: int = 15) -> list:
+async def list_torrents_ex(qb_url: str, username: str, password: str,
+                           timeout: int = 15) -> dict:
     """
-    列出 qB 所有种子的关键信息，用于刮削时按 infohash 反查推送时记录的番号。
-    返回 [{hash, name, content_path, save_path}]。失败返回 []。
+    列出 qB 所有种子，并【明确区分「下载器不可达」与「确实没有种子」】。
+    返回 {"reachable": bool, "torrents": [...], "error": str}。
+      - reachable=True  且 torrents=[]  → 下载器在线、确实空（可据此判断「种子已被删除」）；
+      - reachable=False                  → 登录失败/超时/HTTP 异常（qB 假死/重启/网络），
+        此时 torrents 必为 []，调用方【绝不能】据此判定种子消失或删除成功。
+    这是抗「qB 假死」的基石：以前无论哪种情况都回 []，无法分辨，
+    导致回查删除/做种消失检测把「连不上」误判成「没了」。
     """
     if not qb_url:
-        return []
+        return {"reachable": False, "torrents": [], "error": "未配置 qBittorrent 地址"}
     base = _base(qb_url)
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            ok, _msg = await _login(client, qb_url, username, password)
+            ok, msg = await _login(client, qb_url, username, password)
             if not ok:
-                return []
+                return {"reachable": False, "torrents": [], "error": msg}
             resp = await client.get(f"{base}/api/v2/torrents/info",
                                     headers=_headers(qb_url))
             if resp.status_code != 200:
-                return []
+                return {"reachable": False, "torrents": [],
+                        "error": f"列种子 HTTP {resp.status_code}"}
             data = resp.json()
+            if not isinstance(data, list):
+                return {"reachable": False, "torrents": [], "error": "列种子返回非预期格式"}
             # 统一字段（与 transmission.list_torrents 对齐，供辅种比对/种子管理共用）
-            return [{
+            torrents = [{
                 "hash": (t.get("hash") or "").lower(),
                 "name": t.get("name", "") or "",
                 "content_path": t.get("content_path", "") or "",
@@ -447,9 +455,18 @@ async def list_torrents(qb_url: str, username: str, password: str,
                 "dlspeed": int(t.get("dlspeed") or 0),
                 "size": int(t.get("size") or 0),
             } for t in data if isinstance(t, dict)]
+            return {"reachable": True, "torrents": torrents, "error": ""}
     except Exception as e:
         print(f"[qB] 列种子失败: {e}", flush=True)
-        return []
+        return {"reachable": False, "torrents": [], "error": str(e)}
+
+
+async def list_torrents(qb_url: str, username: str, password: str,
+                        timeout: int = 15) -> list:
+    """（兼容旧接口）只取种子列表；无法区分「不可达」与「空」时一律回 []。
+    需要区分可达性的场景请改用 list_torrents_ex。"""
+    res = await list_torrents_ex(qb_url, username, password, timeout)
+    return res["torrents"]
 
 
 async def add_torrent(

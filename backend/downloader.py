@@ -9,6 +9,7 @@
   get_version / list_torrents / add_torrent / delete_torrents
 本层负责：读配置取出对应后端的连接参数、补默认保存目录/分类、统一返回结构。
 """
+import asyncio
 from typing import Optional
 
 import qbittorrent
@@ -16,6 +17,13 @@ import transmission
 
 QB = "qb"
 TRANSMISSION = "transmission"
+
+# 全局并发闸：限制【同时】打向下载器 WebUI 的请求数。
+# 低配 VPS 上「一次性加多个发种任务」会让后台同 tick 并发多次 list/add/delete，
+# 把 qBittorrent 短暂打到假死——进而引发完成判断/删除回查的连锁误判。
+# 用信号量把并发压到很小（默认 2），从源头削峰，请求排队而非同时砸下。
+# 绑定到首次 await 时的事件循环（Python 3.10+ 行为），模块导入期不需要运行中的 loop。
+_DL_GATE = asyncio.Semaphore(2)
 
 
 def active_type(config: dict) -> str:
@@ -67,15 +75,37 @@ async def get_status(config: dict) -> dict:
     return res
 
 
-async def list_torrents(config: dict) -> list:
-    """列出当前下载器全部种子（统一字段结构）。"""
+async def list_torrents_ex(config: dict) -> dict:
+    """列出当前下载器全部种子，并【区分「不可达」与「确实为空」】。
+    返回 {"reachable": bool, "torrents": [...], "error": str}。
+    抗「下载器假死/重启」：reachable=False 时调用方绝不能据此判定种子消失/删除成功。"""
     t = active_type(config)
     url, user, pwd = _conn(config, t)
     if not url:
-        return []
-    if t == TRANSMISSION:
-        return await transmission.list_torrents(url, user, pwd)
-    return await qbittorrent.list_torrents(url, user, pwd)
+        return {"reachable": False, "torrents": [], "error": f"未配置下载器（{t}）地址"}
+    async with _DL_GATE:
+        if t == TRANSMISSION:
+            return await transmission.list_torrents_ex(url, user, pwd)
+        return await qbittorrent.list_torrents_ex(url, user, pwd)
+
+
+async def list_torrents(config: dict) -> list:
+    """列出当前下载器全部种子（统一字段结构）。无法区分「不可达」与「空」，
+    需要可达性判断（回查删除/做种消失检测）请改用 list_torrents_ex。"""
+    res = await list_torrents_ex(config)
+    return res["torrents"]
+
+
+async def find_torrent_ex(config: dict, infohash: str) -> dict:
+    """按 infohash 查单个种子，并带回下载器可达性。
+    返回 {"reachable": bool, "torrent": dict|None, "error": str}。
+    reachable=False 时 torrent 必为 None，且【不代表种子不存在】（可能只是下载器连不上）。"""
+    ih = (infohash or "").strip().lower()
+    res = await list_torrents_ex(config)
+    if not res["reachable"]:
+        return {"reachable": False, "torrent": None, "error": res.get("error", "")}
+    tor = next((x for x in res["torrents"] if (x.get("hash") or "").lower() == ih), None)
+    return {"reachable": True, "torrent": tor, "error": ""}
 
 
 async def add_torrent(
@@ -110,19 +140,21 @@ async def add_torrent(
     except Exception:
         pass
 
-    if t == TRANSMISSION:
-        return await transmission.add_torrent(
+    # 经并发闸：避免低配 VPS 上多任务同时推送磁力把 qB 打到假死
+    async with _DL_GATE:
+        if t == TRANSMISSION:
+            return await transmission.add_torrent(
+                url, user, pwd, download_url=download_url, torrent_bytes=torrent_bytes,
+                save_path=sp, category=cat, paused=paused, skip_checking=skip_checking,
+                upload_limit_kbps=upload_limit_kbps, reannounce=reannounce,
+                public_trackers=public_trackers,
+            )
+        return await qbittorrent.add_torrent(
             url, user, pwd, download_url=download_url, torrent_bytes=torrent_bytes,
             save_path=sp, category=cat, paused=paused, skip_checking=skip_checking,
             upload_limit_kbps=upload_limit_kbps, reannounce=reannounce,
             public_trackers=public_trackers,
         )
-    return await qbittorrent.add_torrent(
-        url, user, pwd, download_url=download_url, torrent_bytes=torrent_bytes,
-        save_path=sp, category=cat, paused=paused, skip_checking=skip_checking,
-        upload_limit_kbps=upload_limit_kbps, reannounce=reannounce,
-        public_trackers=public_trackers,
-    )
 
 
 # qBittorrent 表示「下载已完成」（做种/已完成阶段）的状态。
@@ -171,6 +203,7 @@ async def delete_torrents(config: dict, hashes: list,
     url, user, pwd = _conn(config, t)
     if not url:
         return {"success": False, "error": f"未配置下载器（{t}）地址"}
-    if t == TRANSMISSION:
-        return await transmission.delete_torrents(url, user, pwd, hashes, delete_files)
-    return await qbittorrent.delete_torrents(url, user, pwd, hashes, delete_files)
+    async with _DL_GATE:
+        if t == TRANSMISSION:
+            return await transmission.delete_torrents(url, user, pwd, hashes, delete_files)
+        return await qbittorrent.delete_torrents(url, user, pwd, hashes, delete_files)

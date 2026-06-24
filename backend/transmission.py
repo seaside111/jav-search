@@ -91,15 +91,17 @@ async def get_version(tr_url: str, username: str, password: str,
         return {"online": False, "message": f"RPC 返回：{(data or {}).get('result', '未知')}"}
 
 
-async def list_torrents(tr_url: str, username: str, password: str,
-                        timeout: int = 15) -> list:
+async def list_torrents_ex(tr_url: str, username: str, password: str,
+                           timeout: int = 15) -> dict:
     """
-    列出全部种子的关键信息（供辅种比对 / 种子管理使用）。
-    返回 [{hash, name, content_path, save_path, ratio, seeding_time, progress, state, category}]。
+    列出全部种子，并【区分「下载器不可达」与「确实没有种子」】。
+    返回 {"reachable": bool, "torrents": [...], "error": str}。
+    与 qbittorrent.list_torrents_ex 对齐——抗「下载器假死/重启」的基石：
+    reachable=False 时调用方绝不能据此判定种子消失。
     """
     url = _rpc_url(tr_url)
     if not url:
-        return []
+        return {"reachable": False, "torrents": [], "error": "未配置 Transmission 地址"}
     fields = ["hashString", "name", "downloadDir", "uploadRatio",
               "secondsSeeding", "percentDone", "status", "labels",
               "rateUpload", "uploadedEver", "rateDownload", "totalSize"]
@@ -109,7 +111,8 @@ async def list_torrents(tr_url: str, username: str, password: str,
         if err or not data:
             if err:
                 print(f"[TR] 列种子失败: {err}", flush=True)
-            return []
+            return {"reachable": False, "torrents": [],
+                    "error": err or "Transmission 无返回"}
         out = []
         for t in (data.get("arguments") or {}).get("torrents", []):
             if not isinstance(t, dict):
@@ -130,7 +133,15 @@ async def list_torrents(tr_url: str, username: str, password: str,
                 "dlspeed": int(t.get("rateDownload") or 0),
                 "size": int(t.get("totalSize") or 0),
             })
-        return out
+        return {"reachable": True, "torrents": out, "error": ""}
+
+
+async def list_torrents(tr_url: str, username: str, password: str,
+                        timeout: int = 15) -> list:
+    """（兼容旧接口）只取种子列表；无法区分「不可达」与「空」时一律回 []。
+    需要区分可达性的场景请改用 list_torrents_ex。"""
+    res = await list_torrents_ex(tr_url, username, password, timeout)
+    return res["torrents"]
 
 
 async def add_torrent(
