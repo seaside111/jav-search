@@ -67,6 +67,20 @@ DEFAULT_CONFIG = {
     "jackett_api_key": "",               # Jackett API Key
     "jackett_indexers": "all",           # 索引器，多个用逗号分隔
     "jackett_timeout": 20,               # 搜索超时秒数
+    # ── V1.5.1：FC2 全自动发种（autopilot）──
+    # 后台定时抓 FC2 最新番号 → 资源搜索(严格番号匹配) → 自动入队 → 交现有自动发布链路。
+    # 需配合发种设置里的「自动发布(publish_auto)」一并理解：autopilot 入队的任务已预授权，
+    # 无论 publish_auto 开关都会自动跑完发布；publish_auto 仅影响手动入队的任务。
+    "autopilot_fc2_enabled": False,         # 总开关（默认关）
+    "autopilot_resource_source": "sukebei", # 资源源：sukebei | jackett
+    "autopilot_resource_fallback": True,    # 选定源无精确匹配时，回退另一源再搜一次
+    "autopilot_fc2_interval_minutes": 30,   # 后台刷新/抓最新的间隔（分钟）
+    "autopilot_fc2_start_number": 0,        # 起点番号数字(如4925502)；0=用当前最新作起点、不回补历史
+    "autopilot_max_downloading": 2,         # 同时下载中的全自动任务上限(A)
+    "autopilot_max_seeding": 3,             # 做种中(未成熟)的全自动任务上限(B)
+    "autopilot_seed_settle_minutes": 120,   # 做种超此分钟视为「已成熟」，不再占B名额
+    "autopilot_max_new_per_round": 3,       # 每轮最多新增任务数(防刷新突增)
+    "autopilot_retry_rounds": 5,            # 无精确匹配的番号最多重试多少轮后放弃
     # V1.5：下载器类型切换（qb=qBittorrent / transmission=Transmission）
     "downloader_type": "qb",             # 当前启用的下载器后端
     # 首次经「推送」入口（搜索结果磁力/种子直推下载器）添加的种子上传限速(KB/s)，0=不限。

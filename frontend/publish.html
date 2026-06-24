@@ -265,6 +265,56 @@
     </div>
 
     <div class="group">
+      <h3>FC2 全自动发种（V1.5.1）</h3>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="cfgAutoEnabled"> 启用 FC2 全自动发种</label>
+        <span class="hint">后台定时抓 FC2 最新番号→资源搜索(严格番号匹配)→自动入队→走自动发布。入队任务已预授权、无需人工确认。</span>
+      </div>
+      <div class="row">
+        <label class="lbl">资源源</label>
+        <select id="cfgAutoSource">
+          <option value="sukebei">sukebei.nyaa.si（默认，直连免配置）</option>
+          <option value="jackett">Jackett（需在主设置配置）</option>
+        </select>
+        <label class="chk" style="margin-left:8px"><input type="checkbox" id="cfgAutoFallback"> 无精确匹配时回退另一源</label>
+      </div>
+      <div class="row">
+        <label class="lbl">刷新间隔(分钟)</label>
+        <input type="number" id="cfgAutoInterval" min="1" style="width:90px">
+        <label class="lbl" style="margin-left:8px">起点番号</label>
+        <input type="number" id="cfgAutoStartNum" min="0" placeholder="如 4925502；0=当前最新" style="width:160px">
+        <span class="hint">起点=只发现比该番号更新(更大)的号；0=以当前最新为起点、不回补历史</span>
+      </div>
+      <div class="row">
+        <label class="lbl">同时下载上限</label>
+        <input type="number" id="cfgAutoMaxDl" min="0" style="width:70px">
+        <label class="lbl" style="margin-left:8px">做种上限</label>
+        <input type="number" id="cfgAutoMaxSeed" min="0" style="width:70px">
+        <label class="lbl" style="margin-left:8px">做种成熟(分钟)</label>
+        <input type="number" id="cfgAutoSettle" min="0" style="width:90px">
+        <span class="hint">做种超过该分钟数即「成熟」、不再占做种名额，让流水线持续推进</span>
+      </div>
+      <div class="row">
+        <label class="lbl">每轮最多新增</label>
+        <input type="number" id="cfgAutoMaxNew" min="0" style="width:70px">
+        <label class="lbl" style="margin-left:8px">无匹配重试轮数</label>
+        <input type="number" id="cfgAutoRetry" min="0" style="width:70px">
+        <span class="hint">每轮最多新增防突增；某番号连续这么多轮搜不到精确匹配才放弃</span>
+      </div>
+      <div class="row" style="align-items:flex-start">
+        <label class="lbl">运行状态</label>
+        <div style="flex:1">
+          <div id="autoStatus" class="hint" style="line-height:1.7">未加载</div>
+          <div style="margin-top:6px;display:flex;gap:8px">
+            <button class="btn" type="button" onclick="autoRunOnce()">立即跑一轮</button>
+            <button class="btn" type="button" onclick="autoReset()">重置起点</button>
+            <button class="btn" type="button" onclick="loadAutoStatus()">刷新状态</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="group">
       <h3>DMM 链接</h3>
       <div class="row">
         <label class="chk"><input type="checkbox" id="cfgDmmEnabled" checked> 自动查询并填入 DMM 框</label>
@@ -445,7 +495,19 @@ async function loadConfig(){
     $('cfgPubAuto').checked = !!c.publish_auto;
     $('cfgDmmEnabled').checked = c.dmm_lookup_enabled !== false;
     $('cfgDmmField').value = c.publish_dmm_field || 'url';
+    // FC2 全自动发种
+    $('cfgAutoEnabled').checked = !!c.autopilot_fc2_enabled;
+    $('cfgAutoSource').value = c.autopilot_resource_source || 'sukebei';
+    $('cfgAutoFallback').checked = c.autopilot_resource_fallback !== false;
+    $('cfgAutoInterval').value = c.autopilot_fc2_interval_minutes ?? 30;
+    $('cfgAutoStartNum').value = c.autopilot_fc2_start_number ?? 0;
+    $('cfgAutoMaxDl').value = c.autopilot_max_downloading ?? 2;
+    $('cfgAutoMaxSeed').value = c.autopilot_max_seeding ?? 3;
+    $('cfgAutoSettle').value = c.autopilot_seed_settle_minutes ?? 120;
+    $('cfgAutoMaxNew').value = c.autopilot_max_new_per_round ?? 3;
+    $('cfgAutoRetry').value = c.autopilot_retry_rounds ?? 5;
     updateStopGate();
+    loadAutoStatus();
     if (c.mteam_api_key) checkMteam();
   } catch(e){ /* ignore */ }
 }
@@ -494,6 +556,17 @@ async function saveSettings(){
     publish_auto: $('cfgPubAuto').checked,
     dmm_lookup_enabled: $('cfgDmmEnabled').checked,
     publish_dmm_field: $('cfgDmmField').value,
+    // FC2 全自动发种
+    autopilot_fc2_enabled: $('cfgAutoEnabled').checked,
+    autopilot_resource_source: $('cfgAutoSource').value,
+    autopilot_resource_fallback: $('cfgAutoFallback').checked,
+    autopilot_fc2_interval_minutes: Math.max(1, parseInt($('cfgAutoInterval').value)||30),
+    autopilot_fc2_start_number: Math.max(0, parseInt($('cfgAutoStartNum').value)||0),
+    autopilot_max_downloading: Math.max(0, parseInt($('cfgAutoMaxDl').value)||0),
+    autopilot_max_seeding: Math.max(0, parseInt($('cfgAutoMaxSeed').value)||0),
+    autopilot_seed_settle_minutes: Math.max(0, parseInt($('cfgAutoSettle').value)||0),
+    autopilot_max_new_per_round: Math.max(0, parseInt($('cfgAutoMaxNew').value)||0),
+    autopilot_retry_rounds: Math.max(0, parseInt($('cfgAutoRetry').value)||0),
   };
   const msg = $('saveMsg'); msg.style.color='var(--text-dim)'; msg.textContent='保存中…';
   try {
@@ -503,6 +576,48 @@ async function saveSettings(){
       if (payload.mteam_api_key) setTimeout(checkMteam, 300); }
     else { msg.style.color='var(--red)'; msg.textContent='保存失败'; }
   } catch(e){ msg.style.color='var(--red)'; msg.textContent='出错：'+e.message; }
+}
+
+// ── FC2 全自动发种：状态/控制 ──
+async function loadAutoStatus(){
+  const el = $('autoStatus'); if (!el) return;
+  try {
+    const r = await fetch(`${API}/api/autopilot/status`);
+    const d = await safeJson(r);
+    if (!d.success){ el.textContent = '状态获取失败'; return; }
+    const s = d.stats || {};
+    const last = s.last_run ? new Date(s.last_run*1000).toLocaleString() : '从未';
+    el.innerHTML =
+      `开关：<b>${d.enabled?'已启用':'未启用'}</b> ｜ 资源源：${escHtml(d.resource_source||'')} ｜ 间隔：${d.interval_minutes}分钟<br>` +
+      `游标(已处理到)：<b>${d.cursor}</b> ｜ 已发现最新号：${d.latest_seen||0} ｜ 待重试：${d.pending_retry}<br>` +
+      `当前下载中：${d.downloading} ｜ 做种(未成熟)：${d.seeding_active} ｜ 本轮可新增名额：<b>${d.slots}</b><br>` +
+      `上轮：${last}，新增 ${s.last_added||0} ｜ 累计：入队 ${s.total_added||0}、无匹配 ${s.total_skipped_nomatch||0}、放弃 ${s.total_given_up||0}` +
+      (s.last_error ? `<br><span style="color:var(--red)">${escHtml(s.last_error)}</span>` : '');
+  } catch(e){ el.textContent = '状态获取出错：'+e.message; }
+}
+
+async function autoRunOnce(){
+  const el = $('autoStatus'); if (el) el.textContent = '正在跑一轮…';
+  try {
+    await saveSettings();   // 先存设置，确保用最新参数
+    const r = await fetch(`${API}/api/autopilot/run-once`, {method:'POST'});
+    const d = await safeJson(r);
+    if (!d.success){ alert('跑一轮失败：'+(d.error||'')); }
+  } catch(e){ alert('出错：'+e.message); }
+  loadAutoStatus();
+}
+
+async function autoReset(){
+  const v = prompt('重置起点番号（只发现比该号更新的番号；留空=用设置里的起点）：', '');
+  if (v === null) return;
+  const body = {};
+  if (v.trim() !== '') body.start_number = Math.max(0, parseInt(v)||0);
+  try {
+    const r = await fetch(`${API}/api/autopilot/reset`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const d = await safeJson(r);
+    if (d.success){ alert('已重置，游标='+d.cursor); } else { alert('重置失败'); }
+  } catch(e){ alert('出错：'+e.message); }
+  loadAutoStatus();
 }
 
 // ── 图床上传测试 ──（先保存设置，再用内置测试图按当前优先图床上传一次）

@@ -150,7 +150,8 @@ def _load_tasks():
 
 
 def _new_task(code: str, download_url: str, title: str,
-              item_meta: dict = None) -> dict:
+              item_meta: dict = None, auto: bool = False,
+              auto_source: str = "") -> dict:
     tid = uuid.uuid4().hex[:12]
     t = {
         "id": tid, "code": code, "download_url": download_url,
@@ -160,10 +161,57 @@ def _new_task(code: str, download_url: str, title: str,
         "log": [],
         # 点击条目自带的元数据（封面/来源/该条目详情页URL），供 _scrape_meta 直接采用
         "item_meta": item_meta or {},
+        # V1.5.1：全自动发种(autopilot)产生的任务标记——供节流计数与前端区分展示
+        "auto": bool(auto), "auto_source": auto_source or "",
     }
     _TASKS[tid] = t
     _save_tasks()
     return t
+
+
+def enqueue_auto(code: str, download_url: str, title: str = "",
+                 cover: str = "", source: str = "", detail_url: str = "",
+                 uncensored: bool = False, auto_source: str = "") -> dict:
+    """供 autopilot（FC2 全自动发种）入队的内部接口：建任务 + 预授权(confirmed=True)，
+    使其无需人工确认即可走完现有自动发布链路。不改公开 HTTP API。返回任务 dict。
+    入队后后台预抓元数据（与手动入队一致）。"""
+    item_meta = {
+        "title": (title or "").strip(),
+        "cover": (cover or "").strip(),
+        "source": (source or "").strip(),
+        "detail_url": (detail_url or "").strip(),
+        "uncensored_hint": bool(uncensored),
+    }
+    t = _new_task(code.strip(), download_url.strip(), (title or "").strip(),
+                  item_meta=item_meta, auto=True, auto_source=auto_source)
+    t["uncensored_hint"] = bool(uncensored)
+    t["confirmed"] = True   # 预授权：全自动任务跑到发布闸门不再等待
+    _set(t, note="全自动发种入队（已预授权，全流程自动执行）")
+    _log(f"[全自动] 入队：{t['code']} ({t['id']}) 源={auto_source or '?'}")
+    try:
+        asyncio.create_task(_scrape_meta(t, load_config()))
+    except Exception:
+        pass
+    return t
+
+
+def auto_task_states() -> list:
+    """返回全自动(autopilot)任务的 (state, seed_started) 列表，供 autopilot 节流计数。"""
+    return [(t.get("state"), float(t.get("seed_started") or 0))
+            for t in _TASKS.values() if t.get("auto")]
+
+
+def has_active_code(code: str) -> bool:
+    """该番号是否已有未终止的发种任务（去重：归一化仅字母数字小写比较）。
+    autopilot 用它避免对同一番号重复入队。"""
+    norm = re.sub(r"[^a-z0-9]", "", (code or "").lower())
+    if not norm:
+        return False
+    for t in _TASKS.values():
+        if re.sub(r"[^a-z0-9]", "", (t.get("code") or "").lower()) == norm \
+                and t.get("state") not in _TERMINAL:
+            return True
+    return False
 
 
 def _set(t: dict, state: str = None, error: str = None, note: str = None, **kw):
@@ -296,7 +344,8 @@ def _public(t: dict) -> dict:
     return {**{k: t.get(k) for k in (
         "id", "code", "title", "title_jp", "state", "error", "mteam_id",
         "infohash", "infohash_new", "confirmed", "created", "updated", "log",
-        "check_result", "scrape_result", "media_summary", "archive_path", "dmm")},
+        "check_result", "scrape_result", "media_summary", "archive_path", "dmm",
+        "auto", "auto_source")},
         "state_label": _STATE_LABELS.get(t["state"], t["state"]),
         "group": _STATE_GROUP.get(t["state"], "active")}
 

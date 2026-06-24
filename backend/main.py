@@ -36,6 +36,7 @@ import mteam
 import crossseed
 import publish
 import monitor
+import autopilot
 import mteam_enums
 import logbus
 import library
@@ -59,7 +60,7 @@ class _DropInvalidHTTPNoise(logging.Filter):
 logging.getLogger("uvicorn.error").addFilter(_DropInvalidHTTPNoise())
 
 
-APP_VERSION = "1.5.0-beta"
+APP_VERSION = "1.5.1-beta"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -78,6 +79,8 @@ app.include_router(library.router)
 app.include_router(publish.router)
 # 监控路由（V1.5）
 app.include_router(monitor.router)
+# FC2 全自动发种路由（V1.5.1）
+app.include_router(autopilot.router)
 
 
 @app.on_event("startup")
@@ -125,6 +128,10 @@ async def _on_startup():
         publish.start_worker()
     except Exception as e:
         print(f"[启动] 发种 worker 启动失败: {e}", flush=True)
+    try:
+        autopilot.start_worker()
+    except Exception as e:
+        print(f"[启动] 全自动发种 worker 启动失败: {e}", flush=True)
     # 推送入库后台轮询：磁力下完即删（保留文件）+ 给刮削补记下载内容名
     try:
         intake.start_poller(load_config)
@@ -364,6 +371,17 @@ class ConfigUpdateRequest(BaseModel):
     scrape_meta_enabled: Optional[bool] = None       # 刮削总开关：只写 NFO/封面
     scrape_organize_enabled: Optional[bool] = None   # 规整总开关：改名番号+删广告
     archive_enabled: Optional[bool] = None           # 归档总开关：成品放归档目录
+    # V1.5.1 FC2 全自动发种（autopilot）
+    autopilot_fc2_enabled: Optional[bool] = None
+    autopilot_resource_source: Optional[str] = None
+    autopilot_resource_fallback: Optional[bool] = None
+    autopilot_fc2_interval_minutes: Optional[int] = None
+    autopilot_fc2_start_number: Optional[int] = None
+    autopilot_max_downloading: Optional[int] = None
+    autopilot_max_seeding: Optional[int] = None
+    autopilot_seed_settle_minutes: Optional[int] = None
+    autopilot_max_new_per_round: Optional[int] = None
+    autopilot_retry_rounds: Optional[int] = None
 
 
 # ──────────────────────────────────────────────
