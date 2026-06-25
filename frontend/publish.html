@@ -279,6 +279,12 @@
         <label class="chk" style="margin-left:8px"><input type="checkbox" id="cfgAutoFallback"> 无精确匹配时回退另一源</label>
       </div>
       <div class="row">
+        <label class="chk"><input type="checkbox" id="cfgAutoPreferLargest"> 优先下载最大文件(最清晰)版本</label>
+        <label class="lbl" style="margin-left:8px">发现条数</label>
+        <input type="number" id="cfgAutoDiscover" min="1" max="200" style="width:80px">
+        <span class="hint">同番号多版本时选体积最大的种子；发现条数=每轮抓多少最新番号(越大越不易漏号，上限200)</span>
+      </div>
+      <div class="row">
         <label class="lbl">刷新间隔(分钟)</label>
         <input type="number" id="cfgAutoInterval" min="1" style="width:90px">
         <label class="lbl" style="margin-left:8px">起点番号</label>
@@ -499,6 +505,8 @@ async function loadConfig(){
     $('cfgAutoEnabled').checked = !!c.autopilot_fc2_enabled;
     $('cfgAutoSource').value = c.autopilot_resource_source || 'sukebei';
     $('cfgAutoFallback').checked = c.autopilot_resource_fallback !== false;
+    $('cfgAutoPreferLargest').checked = c.autopilot_prefer_largest !== false;
+    $('cfgAutoDiscover').value = c.autopilot_discover_count ?? 200;
     $('cfgAutoInterval').value = c.autopilot_fc2_interval_minutes ?? 30;
     $('cfgAutoStartNum').value = c.autopilot_fc2_start_number ?? 0;
     $('cfgAutoMaxDl').value = c.autopilot_max_downloading ?? 2;
@@ -560,6 +568,8 @@ async function saveSettings(){
     autopilot_fc2_enabled: $('cfgAutoEnabled').checked,
     autopilot_resource_source: $('cfgAutoSource').value,
     autopilot_resource_fallback: $('cfgAutoFallback').checked,
+    autopilot_prefer_largest: $('cfgAutoPreferLargest').checked,
+    autopilot_discover_count: Math.max(1, Math.min(200, parseInt($('cfgAutoDiscover').value)||200)),
     autopilot_fc2_interval_minutes: Math.max(1, parseInt($('cfgAutoInterval').value)||30),
     autopilot_fc2_start_number: Math.max(0, parseInt($('cfgAutoStartNum').value)||0),
     autopilot_max_downloading: Math.max(0, parseInt($('cfgAutoMaxDl').value)||0),

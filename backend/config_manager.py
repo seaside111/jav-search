@@ -81,6 +81,8 @@ DEFAULT_CONFIG = {
     "autopilot_seed_settle_minutes": 120,   # 做种超此分钟视为「已成熟」，不再占B名额
     "autopilot_max_new_per_round": 3,       # 每轮最多新增任务数(防刷新突增)
     "autopilot_retry_rounds": 5,            # 无精确匹配的番号最多重试多少轮后放弃
+    "autopilot_discover_count": 200,        # 每轮发现最新番号的抓取条数(窗口越大越不易漏号);上限200
+    "autopilot_prefer_largest": True,       # 同番号多版本时,默认下载文件体积最大(最清晰)的那个种子
     # V1.5：下载器类型切换（qb=qBittorrent / transmission=Transmission）
     "downloader_type": "qb",             # 当前启用的下载器后端
     # 首次经「推送」入口（搜索结果磁力/种子直推下载器）添加的种子上传限速(KB/s)，0=不限。
