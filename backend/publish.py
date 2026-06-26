@@ -274,6 +274,130 @@ def _work_root(config: dict) -> str:
     return d.replace("\\", "/").rstrip("/")
 
 
+# ─────────────────────────────────────────
+# .meta 缓存：发种过程在 <工作目录>/.meta/<番号>/ 下生成的中间产物
+#   （shots/ 截图、<番号>.torrent 种子、_dropped/ 隔离区）。发布完成后这些不进种子、
+#   也非做种数据，可安全清理释放空间。提供「立即清空」与「定时按保留天数清理」两种。
+# ─────────────────────────────────────────
+def _meta_cache_root(config: dict) -> Optional[Path]:
+    """.meta 缓存根目录 = <工作目录>/.meta；未配置工作目录则返回 None。"""
+    root = _work_root(config)
+    if not root:
+        return None
+    return Path(root) / ".meta"
+
+
+def _dir_size(p: Path) -> int:
+    total = 0
+    try:
+        for f in p.rglob("*"):
+            try:
+                if f.is_file():
+                    total += f.stat().st_size
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return total
+
+
+def _busy_codes() -> set:
+    """正在执行长步骤(_BUSY)的任务对应番号——这些任务的 .meta 正在写入，清理须避开。"""
+    codes = set()
+    for tid in list(_BUSY):
+        t = _TASKS.get(tid)
+        if t and t.get("code"):
+            codes.add(t["code"])
+    return codes
+
+
+def meta_cache_stat(config: dict) -> dict:
+    """统计 .meta 缓存占用：条目数 / 总字节 / 各番号(按最近修改时间排序)。"""
+    root = _meta_cache_root(config)
+    if not root or not root.exists():
+        return {"exists": False, "root": str(root or ""), "entries": 0, "bytes": 0, "items": []}
+    items, total = [], 0
+    try:
+        children = sorted(root.iterdir())
+    except Exception:
+        children = []
+    for sub in children:
+        try:
+            if sub.is_dir():
+                sz = _dir_size(sub)
+                mtimes = [f.stat().st_mtime for f in sub.rglob("*") if f.is_file()]
+                mtime = max(mtimes) if mtimes else sub.stat().st_mtime
+                items.append({"code": sub.name, "bytes": sz, "mtime": mtime})
+            else:
+                total += sub.stat().st_size
+                continue
+        except Exception:
+            continue
+        total += items[-1]["bytes"]
+    items.sort(key=lambda x: x["mtime"])
+    return {"exists": True, "root": str(root), "entries": len(items), "bytes": total, "items": items}
+
+
+def clean_meta_cache(config: dict, keep_days: Optional[int] = None) -> dict:
+    """清理 .meta 缓存。
+    keep_days=None → 取配置 meta_cache_keep_days；0 → 全清；>0 → 仅删最近修改早于 N 天的番号目录。
+    安全：只删 <工作目录>/.meta 下一级子项，绝不触碰番号做种文件夹；跳过正在发种(_BUSY)的番号。
+    返回 {removed:[番号...], freed:字节, kept:保留条目数, skipped:[占用中番号...]}。"""
+    if keep_days is None:
+        keep_days = int(config.get("meta_cache_keep_days", 7) or 0)
+    root = _meta_cache_root(config)
+    out = {"removed": [], "freed": 0, "kept": 0, "skipped": []}
+    if not root or not root.exists():
+        return out
+    busy = _busy_codes()
+    cutoff = time.time() - keep_days * 86400 if keep_days > 0 else None
+    try:
+        children = sorted(root.iterdir())
+    except Exception:
+        children = []
+    for sub in children:
+        try:
+            if sub.is_dir() and sub.name in busy:
+                out["skipped"].append(sub.name)
+                out["kept"] += 1
+                continue
+            if cutoff is not None and sub.is_dir():
+                mtimes = [f.stat().st_mtime for f in sub.rglob("*") if f.is_file()]
+                mtime = max(mtimes) if mtimes else sub.stat().st_mtime
+                if mtime >= cutoff:          # 还在保留期内，留着
+                    out["kept"] += 1
+                    continue
+            sz = _dir_size(sub) if sub.is_dir() else sub.stat().st_size
+            if sub.is_dir():
+                shutil.rmtree(sub, ignore_errors=True)
+            else:
+                sub.unlink(missing_ok=True)
+            out["removed"].append(sub.name)
+            out["freed"] += sz
+        except Exception as e:
+            _log(f".meta 清理跳过 {sub.name}：{e}")
+    return out
+
+
+async def _meta_cache_loop():
+    """定时清理 .meta 缓存：按配置的间隔检查一次，开启自动清理则按保留天数删旧缓存。
+    检查间隔(meta_cache_clean_interval_hours)每轮重新读配置，改了下一轮即生效。"""
+    while True:
+        interval_h = 24
+        try:
+            config = load_config()
+            interval_h = max(1, int(config.get("meta_cache_clean_interval_hours", 24) or 24))
+            if config.get("meta_cache_auto_clean"):
+                res = clean_meta_cache(config)
+                if res["removed"]:
+                    _log(f"定时清理 .meta 缓存：删除 {len(res['removed'])} 个番号目录，"
+                         f"释放 {res['freed'] // 1024 // 1024} MB"
+                         + (f"，跳过占用中 {len(res['skipped'])} 个" if res["skipped"] else ""))
+        except Exception as e:
+            _log(f".meta 定时清理异常：{e}")
+        await asyncio.sleep(interval_h * 3600)
+
+
 def _content_path_in_workdir(t: dict, config: dict) -> Optional[Path]:
     """把发种任务的下载内容映射到【刮削目录(本项目容器视角)】下的实际路径。
 
@@ -1437,6 +1561,7 @@ def start_worker():
     try:
         loop = asyncio.get_event_loop()
         _worker_task = loop.create_task(_worker_loop())
+        loop.create_task(_meta_cache_loop())   # .meta 缓存定时清理协程
     except Exception as e:
         _log(f"worker 启动失败: {e}")
 
@@ -1499,6 +1624,28 @@ async def api_tasks():
     for p in pub:
         counts[p["group"]] = counts.get(p["group"], 0) + 1
     return {"success": True, "tasks": pub, "counts": counts}
+
+
+@router.get("/meta-cache/stat")
+async def api_meta_cache_stat():
+    """查看 .meta 缓存占用（条目数 / 总字节 / 各番号明细）。"""
+    st = meta_cache_stat(load_config())
+    return {"success": True, **st}
+
+
+class MetaCacheCleanRequest(BaseModel):
+    # 留空=全清；填正数=仅删最近修改早于 N 天的番号缓存
+    keep_days: Optional[int] = None
+
+
+@router.post("/meta-cache/clean")
+async def api_meta_cache_clean(req: MetaCacheCleanRequest):
+    """手动清空 .meta 缓存。keep_days 留空=全清；填正数=仅清早于 N 天的。"""
+    keep = req.keep_days if (req.keep_days is not None and req.keep_days > 0) else 0
+    res = clean_meta_cache(load_config(), keep_days=keep)
+    _log(f"手动清理 .meta 缓存：删除 {len(res['removed'])} 个，释放 {res['freed'] // 1024 // 1024} MB"
+         + (f"，跳过占用中 {len(res['skipped'])} 个" if res["skipped"] else ""))
+    return {"success": True, **res}
 
 
 @router.get("/{tid}")

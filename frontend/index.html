@@ -1060,6 +1060,34 @@
           <div class="setting-hint" id="scrapeRunMsg"></div>
         </div>
         <div class="setting-group">
+          <h3>缓存清理（.meta）</h3>
+          <div class="setting-hint" style="margin-bottom:8px">
+            发种过程会在<b>工作目录下的 <code>.meta/番号/</code></b> 生成截图、种子文件、隔离区等中间产物（不进种子、非做种数据）。
+            发布完成后可安全清理释放空间。<b>注意：隔离区 <code>_dropped/</code>（误删找回用）也在 .meta 内，清空后不可恢复。</b>
+          </div>
+          <div class="setting-row">
+            <label class="source-chk" style="font-size:13px">
+              <input type="checkbox" id="cfgMetaCacheAutoClean"> 定时自动清理
+            </label>
+            <span class="setting-hint">开启后后台按下面的「检查间隔」定时执行，按「保留天数」删旧缓存；正在发种中的番号会自动跳过</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">检查间隔（小时）</label>
+            <input class="setting-input" id="cfgMetaCacheInterval" type="number" value="24" min="1" step="1">
+            <span class="setting-hint">每隔多久自动清理一次；改了下一轮生效</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">保留天数</label>
+            <input class="setting-input" id="cfgMetaCacheKeepDays" type="number" value="7" min="0" step="1">
+            <span class="setting-hint">自动清理时保留最近 N 天内修改过的缓存；填 0 = 每次全清</span>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="jackett-test-btn" style="margin-left:0" onclick="refreshMetaCache()">查看占用</button>
+            <button class="jackett-test-btn" style="margin-left:0;background:var(--red)" onclick="clearMetaCache()">立即清空缓存</button>
+          </div>
+          <div class="setting-hint" id="metaCacheMsg" style="margin-top:6px"></div>
+        </div>
+        <div class="setting-group">
           <h3>最近处理</h3>
           <div id="scrapeRecent" class="setting-hint">暂无记录</div>
         </div>
@@ -2390,6 +2418,10 @@ async function openSettings() {
     document.getElementById('cfgScrapeOrganizeEnabled').checked =
       (cfg.scrape_organize_enabled ?? cfg.scrape_meta_enabled ?? cfg.publish_scrape_enabled) !== false;
     document.getElementById('cfgArchiveEnabled').checked = (cfg.archive_enabled ?? cfg.publish_archive_enabled) !== false;
+    // V1.5.1 .meta 缓存清理
+    document.getElementById('cfgMetaCacheAutoClean').checked = cfg.meta_cache_auto_clean === true;
+    document.getElementById('cfgMetaCacheInterval').value = cfg.meta_cache_clean_interval_hours ?? 24;
+    document.getElementById('cfgMetaCacheKeepDays').value = cfg.meta_cache_keep_days ?? 7;
     currentProvider = cfg.default_translate_provider || 'baidu';
     // 检测 Jackett 状态
     if (cfg.jackett_url && cfg.jackett_api_key) await checkJackettStatus();
@@ -2488,6 +2520,53 @@ async function runScrapeOnce() {
   } catch (e) {
     msg.style.color = 'var(--red)';
     msg.textContent = '扫描失败：' + e.message;
+  }
+}
+
+// V1.5.1 .meta 缓存：查看占用
+function _fmtBytes(n) {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i ? 1 : 0) + ' ' + u[i];
+}
+async function refreshMetaCache() {
+  const msg = document.getElementById('metaCacheMsg');
+  msg.style.color = 'var(--text-muted)';
+  msg.textContent = '查询中…';
+  try {
+    const resp = await fetch(`${API}/api/publish/meta-cache/stat`);
+    const data = await safeJson(resp);
+    if (!resp.ok || !data.success) throw new Error(data.detail || '查询失败');
+    if (!data.exists) {
+      msg.style.color = 'var(--text-muted)';
+      msg.textContent = data.root ? `缓存目录暂不存在：${data.root}` : '未配置工作目录';
+      return;
+    }
+    msg.style.color = 'var(--text-muted)';
+    msg.textContent = `缓存共 ${data.entries} 个番号，占用 ${_fmtBytes(data.bytes)}（目录：${data.root}）`;
+  } catch (e) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = '查询失败：' + e.message;
+  }
+}
+async function clearMetaCache() {
+  if (!confirm('确定立即清空 .meta 缓存吗？将删除截图/种子文件/隔离区等中间产物（隔离区清空后不可找回）。正在发种中的番号会自动跳过。')) return;
+  const msg = document.getElementById('metaCacheMsg');
+  msg.style.color = 'var(--text-muted)';
+  msg.textContent = '清理中…';
+  try {
+    const resp = await fetch(`${API}/api/publish/meta-cache/clean`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    const data = await safeJson(resp);
+    if (!resp.ok || !data.success) throw new Error(data.detail || '清理失败');
+    msg.style.color = 'var(--green)';
+    msg.textContent = `已清理 ${data.removed.length} 个番号，释放 ${_fmtBytes(data.freed)}`
+      + (data.skipped.length ? `；跳过发种中 ${data.skipped.length} 个` : '');
+  } catch (e) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = '清理失败：' + e.message;
   }
 }
 
@@ -2718,6 +2797,10 @@ async function saveSettings() {
     scrape_meta_enabled: document.getElementById('cfgScrapeMetaEnabled').checked,
     scrape_organize_enabled: document.getElementById('cfgScrapeOrganizeEnabled').checked,
     archive_enabled: document.getElementById('cfgArchiveEnabled').checked,
+    // V1.5.1 .meta 缓存清理
+    meta_cache_auto_clean: document.getElementById('cfgMetaCacheAutoClean').checked,
+    meta_cache_clean_interval_hours: Math.max(1, parseInt(document.getElementById('cfgMetaCacheInterval').value) || 24),
+    meta_cache_keep_days: Math.max(0, parseInt(document.getElementById('cfgMetaCacheKeepDays').value) || 0),
   };
   currentProvider = payload.default_translate_provider;
   prefetchJavdbExtras = payload.javdb_prefetch_extras === true;

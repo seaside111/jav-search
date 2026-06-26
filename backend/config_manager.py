@@ -178,6 +178,10 @@ DEFAULT_CONFIG = {
     "scrape_meta_enabled": True,         # 刮削：只写 NFO/封面（抓元数据）；关=不写 NFO/封面
     "scrape_organize_enabled": True,     # 规整：视频改名为番号 + 删广告/赠片；关=保留原文件名、不删多余视频
     "archive_enabled": True,             # 归档：刮削/发种成品放进归档目录(供 EMBY)；关=不归档(发种仍原地做种)
+    # V1.5.1：.meta 缓存清理（<工作目录>/.meta 下的截图/种子/隔离区等中间产物，不进种子）
+    "meta_cache_auto_clean": False,      # 是否定时自动清理 .meta 缓存
+    "meta_cache_keep_days": 7,           # 自动清理时保留最近 N 天的缓存；0=每次全清
+    "meta_cache_clean_interval_hours": 24,  # 自动清理的检查间隔（小时）
 }
 
 # 列表抓取硬上限，防止配置过大拖垮服务

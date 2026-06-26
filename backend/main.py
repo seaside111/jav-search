@@ -371,6 +371,10 @@ class ConfigUpdateRequest(BaseModel):
     scrape_meta_enabled: Optional[bool] = None       # 刮削总开关：只写 NFO/封面
     scrape_organize_enabled: Optional[bool] = None   # 规整总开关：改名番号+删广告
     archive_enabled: Optional[bool] = None           # 归档总开关：成品放归档目录
+    # V1.5.1 .meta 缓存清理
+    meta_cache_auto_clean: Optional[bool] = None     # 定时自动清理 .meta 缓存
+    meta_cache_keep_days: Optional[int] = None       # 自动清理保留天数（0=全清）
+    meta_cache_clean_interval_hours: Optional[int] = None  # 自动清理检查间隔（小时）
     # V1.5.1 FC2 全自动发种（autopilot）
     autopilot_fc2_enabled: Optional[bool] = None
     autopilot_resource_source: Optional[str] = None
