@@ -172,12 +172,32 @@ async def _find_magnet(code: str, config: dict) -> dict:
     选种口径（autopilot_prefer_largest，默认 True）：同一番号常有多个版本（如 720p 小文件 /
     FHD 大文件），搜索结果默认按「做种数」排序，小文件未必清晰却因做种多排在最前——故这里
     在【全部严格匹配且有磁力】的候选里挑【体积最大】的那个（体积相同再看做种数），保证拿到
-    最清晰版本。关掉该项则回退「取结果首个匹配」（即按源排序：做种多优先）。"""
+    最清晰版本。关掉该项则回退「取结果首个匹配」（即按源排序：做种多优先）。
+
+    防「选中小文件」三道闸（修复 1.5.1 做种是小文件）：
+      ① 体积下限 autopilot_min_size_mb：已知体积低于下限的种子直接排除（堵小样片/预览片）；
+         体积【未知(解析为0)】的不受此限——避免把解析失败的大种子误杀；若全部低于下限则
+         放宽兜底（绝不空手而归，宁可发小也别漏发，再靠日志暴露）。
+      ② 退化告警：开了「选最大」但全部候选体积都未知(0) → max 退化成「按做种数选」，
+         FC2 做种最多的恰恰常是被广泛转发的小文件——此时明确告警，暴露体积解析问题。
+      ③ 全程日志：把每个候选(标题/体积/做种数)与最终选择都打出来，下次失手可立即定位。"""
     proxy = config.get("proxy") or None
-    primary = (config.get("autopilot_resource_source") or "sukebei").strip().lower()
+    primary = (config.get("autopilot_resource_source") or "jackett").strip().lower()
     fallback = bool(config.get("autopilot_resource_fallback", True))
     prefer_largest = bool(config.get("autopilot_prefer_largest", True))
+    min_bytes = int(config.get("autopilot_min_size_mb", 300) or 0) * 1024 * 1024
+    # Jackett 是否可用（与前端「搜索资源」同一判定：有 url+key 即可用）。Jackett 经 Torznab
+    # 返回数值字节 Size，体积判定最准——故默认优先用它选最大；未配置则自动退到 sukebei。
+    jackett_ok = bool((config.get("jackett_url") or "").strip()
+                      and (config.get("jackett_api_key") or "").strip())
+    if primary == "jackett" and not jackett_ok:
+        _log(f"[{code}] 资源源设为 Jackett 但未配置(缺 url/key)，自动改用 sukebei")
+        primary = "sukebei"
     order = [primary] + ([("jackett" if primary == "sukebei" else "sukebei")] if fallback else [])
+    order = [s for s in order if s != "jackett" or jackett_ok]   # 未配置则剔除 jackett，免空转
+
+    def _gb(n: int) -> str:
+        return f"{n / (1024**3):.2f}GB" if n > 0 else "体积未知"
 
     for src in order:
         try:
@@ -209,14 +229,34 @@ async def _find_magnet(code: str, config: dict) -> dict:
                 })
         if not matches:
             continue
+
+        # ③ 候选明细日志（多候选时才打，单候选无需）——下次「选中小文件」可凭此立即定位
+        if len(matches) > 1:
+            detail = "；".join(
+                f"{_gb(m['size_bytes'])}/做种{m['seeders']}·{(m['title'] or '')[:36]}"
+                for m in sorted(matches, key=lambda m: -m["size_bytes"])[:6])
+            _log(f"[{code}] {src} 严格匹配 {len(matches)} 个候选：{detail}")
+
         if prefer_largest:
-            # 体积最大优先，体积相同（或都未知）再看做种数，保证拿到最清晰版本
-            best = max(matches, key=lambda m: (m["size_bytes"], m["seeders"]))
-            if len(matches) > 1:
-                _log(f"[{code}] {src} 命中 {len(matches)} 个版本，选体积最大："
-                     f"{best['size_bytes'] / (1024**3):.2f}GB")
+            # ① 体积下限：先在「已知体积 ≥ 下限」里挑；为空（全未知或全偏小）则放宽到全部候选兜底
+            pool = [m for m in matches if min_bytes <= 0 or m["size_bytes"] >= min_bytes]
+            if not pool:
+                pool = matches
+                if min_bytes > 0:
+                    _log(f"[{code}] {src} 无 ≥{min_bytes // (1024*1024)}MB 的候选，"
+                         f"放宽兜底（可能确无大文件版，请留意）")
+            # ② 退化告警：开了选最大却全员体积未知 → max 实际按做种数选，易中小文件
+            if all(m["size_bytes"] <= 0 for m in pool):
+                _log(f"[{code}] {src} 警告：候选体积全部解析失败，"
+                     f"「选最大」已退化为「按做种数选」，可能选中小文件（请检查体积解析）")
+            best = max(pool, key=lambda m: (m["size_bytes"], m["seeders"]))
+            _log(f"[{code}] {src} 选定：{_gb(best['size_bytes'])}/做种{best['seeders']}·"
+                 f"{(best['title'] or '')[:40]}")
             return best
-        return matches[0]   # 关掉「选最大」：取源排序首个（做种多优先）
+        # 关掉「选最大」：取源排序首个（做种多优先）
+        _log(f"[{code}] {src} 选定(首个匹配)：{_gb(matches[0]['size_bytes'])}/"
+             f"做种{matches[0]['seeders']}·{(matches[0]['title'] or '')[:40]}")
+        return matches[0]
     return {}
 
 
@@ -406,7 +446,7 @@ async def api_status():
         "pending": len(_state["pending"]),
         "pending_retry": len(_state["pending"]),   # 兼容旧前端字段名
         "interval_minutes": int(config.get("autopilot_fc2_interval_minutes", 30) or 30),
-        "resource_source": config.get("autopilot_resource_source", "sukebei"),
+        "resource_source": config.get("autopilot_resource_source", "jackett"),
         "stats": _state["stats"],
     }
 

@@ -72,7 +72,9 @@ DEFAULT_CONFIG = {
     # 需配合发种设置里的「自动发布(publish_auto)」一并理解：autopilot 入队的任务已预授权，
     # 无论 publish_auto 开关都会自动跑完发布；publish_auto 仅影响手动入队的任务。
     "autopilot_fc2_enabled": False,         # 总开关（默认关）
-    "autopilot_resource_source": "sukebei", # 资源源：sukebei | jackett
+    "autopilot_resource_source": "jackett", # 资源源：jackett | sukebei。默认 jackett：与前端「搜索资源」同源，
+                                            #   Jackett 经 Torznab 返回【数值字节 Size 字段】，体积判定准、选最大版本可靠；
+                                            #   未配置 Jackett(无 url/key)时自动退到 sukebei，不影响免配置开箱。
     "autopilot_resource_fallback": True,    # 选定源无精确匹配时，回退另一源再搜一次
     "autopilot_fc2_interval_minutes": 30,   # 后台刷新/抓最新的间隔（分钟）
     "autopilot_fc2_start_number": 0,        # 起点番号数字(如4925502)；0=用当前最新作起点、不回补历史
@@ -83,6 +85,8 @@ DEFAULT_CONFIG = {
     "autopilot_retry_rounds": 5,            # 无精确匹配的番号最多重试多少轮后放弃
     "autopilot_discover_count": 200,        # 每轮发现最新番号的抓取条数(窗口越大越不易漏号);上限200
     "autopilot_prefer_largest": True,       # 同番号多版本时,默认下载文件体积最大(最清晰)的那个种子
+    "autopilot_min_size_mb": 300,           # 选种体积下限(MB):已知体积低于此的种子不选(堵小样片/预览片);0=不限。
+                                            #   体积未知(解析不到)的不受此限,避免误杀;若全部低于下限则放宽兜底,绝不空手
     # V1.5：下载器类型切换（qb=qBittorrent / transmission=Transmission）
     "downloader_type": "qb",             # 当前启用的下载器后端
     # 首次经「推送」入口（搜索结果磁力/种子直推下载器）添加的种子上传限速(KB/s)，0=不限。
