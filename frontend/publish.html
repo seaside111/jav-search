@@ -289,9 +289,9 @@
       <div class="row">
         <label class="lbl">刷新间隔(分钟)</label>
         <input type="number" id="cfgAutoInterval" min="1" style="width:90px">
-        <label class="lbl" style="margin-left:8px">起点番号</label>
-        <input type="number" id="cfgAutoStartNum" min="0" placeholder="如 4925502；0=当前最新" style="width:160px">
-        <span class="hint">起点=只发现比该番号更新(更大)的号；0=以当前最新为起点、不回补历史</span>
+        <label class="lbl" style="margin-left:8px">起点番号下限</label>
+        <input type="number" id="cfgAutoStartNum" min="0" placeholder="如 4925502；0=不限" style="width:160px">
+        <span class="hint">下限=号小于它的不入蓄种池；0=不限，发现窗口里的番号全部纳入</span>
       </div>
       <div class="row">
         <label class="lbl">同时下载上限</label>
@@ -305,9 +305,13 @@
       <div class="row">
         <label class="lbl">每轮最多新增</label>
         <input type="number" id="cfgAutoMaxNew" min="0" style="width:70px">
-        <label class="lbl" style="margin-left:8px">无匹配重试轮数</label>
-        <input type="number" id="cfgAutoRetry" min="0" style="width:70px">
-        <span class="hint">每轮最多新增防突增；某番号连续这么多轮搜不到精确匹配才放弃</span>
+        <label class="lbl" style="margin-left:8px">每轮查重数</label>
+        <input type="number" id="cfgAutoCheck" min="0" style="width:70px" title="每轮最多对多少个新番号做 PT 站查重(控 M-Team 调用量)">
+        <label class="lbl" style="margin-left:8px">每轮搜磁力数</label>
+        <input type="number" id="cfgAutoFind" min="0" style="width:70px" title="每轮最多对多少个查重通过的番号搜磁力(控资源源调用量)">
+        <label class="lbl" style="margin-left:8px">蓄种保留(天)</label>
+        <input type="number" id="cfgAutoKeepDays" min="0" style="width:70px" title="查重通过但持续搜不到磁力的番号，留池超此天数即剔除;0=永不剔除">
+        <span class="hint">每轮最多新增防突增；查重/搜磁力条数限调用量；蓄种保留=小号等磁力的最长天数</span>
       </div>
       <div class="row" style="align-items:flex-start">
         <label class="lbl">运行状态</label>
@@ -516,7 +520,9 @@ async function loadConfig(){
     $('cfgAutoMaxSeed').value = c.autopilot_max_seeding ?? 3;
     $('cfgAutoSettle').value = c.autopilot_seed_settle_minutes ?? 120;
     $('cfgAutoMaxNew').value = c.autopilot_max_new_per_round ?? 3;
-    $('cfgAutoRetry').value = c.autopilot_retry_rounds ?? 5;
+    $('cfgAutoCheck').value = c.autopilot_check_per_round ?? 20;
+    $('cfgAutoFind').value = c.autopilot_find_per_round ?? 60;
+    $('cfgAutoKeepDays').value = c.autopilot_pool_keep_days ?? 14;
     updateStopGate();
     loadAutoStatus();
     if (c.mteam_api_key) checkMteam();
@@ -580,7 +586,9 @@ async function saveSettings(){
     autopilot_max_seeding: Math.max(0, parseInt($('cfgAutoMaxSeed').value)||0),
     autopilot_seed_settle_minutes: Math.max(0, parseInt($('cfgAutoSettle').value)||0),
     autopilot_max_new_per_round: Math.max(0, parseInt($('cfgAutoMaxNew').value)||0),
-    autopilot_retry_rounds: Math.max(0, parseInt($('cfgAutoRetry').value)||0),
+    autopilot_check_per_round: Math.max(0, parseInt($('cfgAutoCheck').value)||0),
+    autopilot_find_per_round: Math.max(0, parseInt($('cfgAutoFind').value)||0),
+    autopilot_pool_keep_days: Math.max(0, parseInt($('cfgAutoKeepDays').value)||0),
   };
   const msg = $('saveMsg'); msg.style.color='var(--text-dim)'; msg.textContent='保存中…';
   try {
@@ -603,9 +611,9 @@ async function loadAutoStatus(){
     const last = s.last_run ? new Date(s.last_run*1000).toLocaleString() : '从未';
     el.innerHTML =
       `开关：<b>${d.enabled?'已启用':'未启用'}</b> ｜ 资源源：${escHtml(d.resource_source||'')} ｜ 间隔：${d.interval_minutes}分钟<br>` +
-      `游标(已处理到)：<b>${d.cursor}</b> ｜ 已发现最新号：${d.latest_seen||0} ｜ 待重试：${d.pending_retry}<br>` +
+      `蓄种池：<b>${d.pool||0}</b>（待查重 ${d.pending_check||0} / 待发种 ${d.ready||0}）｜ PT已有跳过：${d.done_pt||0} ｜ 已发现最新号：${d.latest_seen||0}<br>` +
       `当前下载中：${d.downloading} ｜ 做种(未成熟)：${d.seeding_active} ｜ 本轮可新增名额：<b>${d.slots}</b><br>` +
-      `上轮：${last}，新增 ${s.last_added||0} ｜ 累计：入队 ${s.total_added||0}、无匹配 ${s.total_skipped_nomatch||0}、放弃 ${s.total_given_up||0}` +
+      `上轮：${last}，发种 ${s.last_added||0} ｜ 累计：发种 ${s.total_added||0}、PT已有 ${s.total_on_pt||0}、蓄种超时剔除 ${s.total_evicted||0}` +
       (s.last_error ? `<br><span style="color:var(--red)">${escHtml(s.last_error)}</span>` : '');
   } catch(e){ el.textContent = '状态获取出错：'+e.message; }
 }
@@ -622,14 +630,14 @@ async function autoRunOnce(){
 }
 
 async function autoReset(){
-  const v = prompt('重置起点番号（只发现比该号更新的番号；留空=用设置里的起点）：', '');
+  const v = prompt('重置：清空蓄种池与 PT 已有登记。可填起点番号下限（号小于它的不入池；留空=用设置里的起点）：', '');
   if (v === null) return;
   const body = {};
   if (v.trim() !== '') body.start_number = Math.max(0, parseInt(v)||0);
   try {
     const r = await fetch(`${API}/api/autopilot/reset`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
     const d = await safeJson(r);
-    if (d.success){ alert('已重置，游标='+d.cursor); } else { alert('重置失败'); }
+    if (d.success){ alert('已清空蓄种池，起点下限='+d.start_number); } else { alert('重置失败'); }
   } catch(e){ alert('出错：'+e.message); }
   loadAutoStatus();
 }

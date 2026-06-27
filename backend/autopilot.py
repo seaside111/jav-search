@@ -1,17 +1,22 @@
 """
-FC2 全自动发种调度器（V1.5.1）
+FC2 全自动发种调度器（V1.5.1·蓄种池模型）
 
-后台定时跑「发现 → 资源搜索 → 严格番号匹配 → 自动入队」一条龙，入队后的发布/做种
+后台定时跑「发现 → 动态补池 → PT 站查重 → 等磁力 → 顺序发种」一条龙，入队后的发布/做种
 全部交给现有发种流水线（publish.py，已在 v1.5.0-beta39 做过容错加固）。本模块只负责：
-  ① 定时抓 FC2 最新番号（scrapers.fc2.get_latest，sukebei+官方卖场双源，最新最全）；
-  ② 对游标(cursor)之后的新番号，按设置的资源源搜种（sukebei 默认 / jackett）；
-  ③ 严格番号匹配——候选标题开头番号归一化后必须与目标完全一致（含数字边界），才入队；
-  ④ 节流——按现有全自动任务的「下载中 / 未成熟做种」数与每轮上限控制本轮入队个数，
-     避免刷新时突然涌入大量任务把低配 VPS / qB 打爆；
-  ⑤ 发现的新番号全部进「持久待办池」(pending)逐号处理，从旧到新不跳号；无精确匹配的本轮
-     留池后续继续找，超重试上限才放弃并推进游标——即便某号滑出发现窗口也不会被漏掉。
+  ① 定时抓 FC2 最新番号（scrapers.fc2.get_latest，sukebei+官方卖场双源，最新最全），
+     用「发现窗口」(autopilot_discover_count，约一两百条)动态【补充/刷新】蓄种池；
+  ② 逐号 PT 站查重(M-Team)：站点已有的登记进 done_pt 跳过，查重通过的留在蓄种池；
+  ③ 蓄种池里「查重通过」的番号按号顺序逐个搜磁力（资源源 sukebei/jackett，严格番号匹配）；
+  ④ 搜到磁力者经名额节流（下载中/未成熟做种数 + 每轮上限）陆续入队，避免突增打爆低配 VPS；
+  ⑤ 去重靠「登记册」而非游标：凡建过发种任务的番号(任意状态，publish.has_any_task)一律
+     不再抓取入池；PT 站已有的记 done_pt。故番号不按数字大小被「游标」跳过——小号磁力
+     即便晚出，只要还在发现窗口内就会被重新发现、入池、等磁力出现再发种。
 
-状态持久化在 /config/autopilot_state.json：cursor / pending / stats。
+为何废弃旧「游标(cursor)+跳号」：磁力不一定按番号顺序出现，小号常在大号之后才有人发布
+磁力。旧模型游标一旦推过某小号、它又滑出发现窗口，就永久漏发。蓄种池模型不设单调游标，
+只要发现窗口能再次扫到该号（且未发种、未在 PT），它就会回到池里继续等磁力。
+
+状态持久化在 /config/autopilot_state.json：pool（蓄种池）/ done_pt（PT已有登记）/ stats。
 """
 import asyncio
 import json
@@ -27,6 +32,7 @@ from config_manager import load as load_config
 import logbus
 import publish
 import downloader
+import mteam
 from scrapers import fc2 as fc2_scraper
 from scrapers._sukebei import search_sukebei
 from jackett import search_jackett
@@ -39,18 +45,20 @@ _BUSY = False   # 防止 worker tick 与「立即跑一轮」并发重入
 
 # 运行期状态（落盘）
 #
-# pending（V1.5.1 修复跳号）：持久「待办池」。凡发现的、号 > cursor 的新番号都落进这里，
-# 携带元数据(标题/封面/url/无码标记)与已重试轮数 tries；只有【入队成功 / 已有任务 /
-# 重试超限放弃】才从池里移除。这样即便某号滑出 sukebei/卖场的发现窗口（滑动窗口只含最新
-# 一两百条），它仍留在待办池里被逐号处理，不会被「窗口前移」吞掉而跳号。
-# cursor 语义随之收紧为「池中最小未决号 - 1」：池非空时绝不越过最小待办号，保证从旧到新
-# 逐号推进、不漏号；池空（全部处理完）才推进到当前最新。
+# pool（蓄种池）：持久候选池。发现窗口里、号 >= 起点下限、且【未建过任务、未在 done_pt】的
+#   番号都补进来，携带元数据与状态：
+#     checked=False → 待 PT 查重；checked=True → 查重通过、留池等磁力（蓄种中）。
+#   离开池的三种情形：入队发种成功 / 查重命中 PT(转 done_pt) / 蓄种超 keep_days 天剔除。
+# done_pt（PT 已有登记）：查重命中 PT 站、但本地没建过任务的番号。仅用于后续刷新时跳过，
+#   免得每轮对同一个「站点已有」番号反复查重/搜磁力。我方已发种的番号不进这里——它们由
+#   publish 任务表(has_any_task)登记，是另一套去重。
+# 不再有 cursor / pending 字段（旧「游标+跳号」模型已废弃）。
 _state = {
-    "cursor": 0,            # 已处理到的番号数字（只往大走；池非空时＝最小待办号-1）
-    "pending": {},          # {code: {"num","title","cover","url","source","uncensored","tries"}}
+    "pool": {},             # {code: {"num","title","cover","url","source","uncensored","checked","tries","added"}}
+    "done_pt": {},          # {code: {"num","ts"}}
     "stats": {
         "last_run": 0.0, "last_added": 0, "last_error": "",
-        "total_added": 0, "total_skipped_nomatch": 0, "total_given_up": 0,
+        "total_added": 0, "total_on_pt": 0, "total_evicted": 0,
         "latest_seen": 0,
     },
 }
@@ -63,38 +71,63 @@ def _log(msg: str):
 # ── 状态持久化 ──
 def _load_state():
     try:
-        if _STATE_PATH.exists():
-            d = json.loads(_STATE_PATH.read_text(encoding="utf-8"))
-            if isinstance(d, dict):
-                _state["cursor"] = int(d.get("cursor", 0) or 0)
-                pending = {}
-                # 新版：完整待办池（带元数据）
-                for code, meta in (d.get("pending") or {}).items():
-                    if isinstance(meta, dict):
-                        num = _number_of(str(code))
-                        if num > 0:
-                            pending[str(code)] = {
-                                "num": num,
-                                "title": str(meta.get("title", "")),
-                                "cover": str(meta.get("cover", "")),
-                                "url": str(meta.get("url", "")),
-                                "source": str(meta.get("source", "fc2")) or "fc2",
-                                "uncensored": bool(meta.get("uncensored")),
-                                "tries": int(meta.get("tries", 0) or 0),
-                            }
-                # 兼容旧版 pending_retry（仅番号→轮数）：并入待办池，元数据留空待下轮发现回填
-                for code, tries in (d.get("pending_retry") or {}).items():
-                    code = str(code)
-                    if code in pending:
-                        continue
-                    num = _number_of(code)
-                    if num > 0 and str(tries).lstrip("-").isdigit():
-                        pending[code] = {"num": num, "title": "", "cover": "", "url": "",
-                                         "source": "fc2", "uncensored": False,
-                                         "tries": int(tries)}
-                _state["pending"] = pending
-                st = d.get("stats") or {}
-                _state["stats"].update({k: st[k] for k in _state["stats"] if k in st})
+        if not _STATE_PATH.exists():
+            return
+        d = json.loads(_STATE_PATH.read_text(encoding="utf-8"))
+        if not isinstance(d, dict):
+            return
+        now = time.time()
+        pool = {}
+        # 新版蓄种池
+        for code, meta in (d.get("pool") or {}).items():
+            if not isinstance(meta, dict):
+                continue
+            num = _number_of(str(code))
+            if num <= 0:
+                continue
+            pool[str(code)] = {
+                "num": num,
+                "title": str(meta.get("title", "")),
+                "cover": str(meta.get("cover", "")),
+                "url": str(meta.get("url", "")),
+                "source": str(meta.get("source", "fc2")) or "fc2",
+                "uncensored": bool(meta.get("uncensored")),
+                "checked": bool(meta.get("checked")),
+                "tries": int(meta.get("tries", 0) or 0),
+                "added": float(meta.get("added", now) or now),
+            }
+        # 兼容旧版「待办池」pending / pending_retry：并入蓄种池（待查重 checked=False）
+        for code, meta in (d.get("pending") or {}).items():
+            code = str(code)
+            if code in pool or not isinstance(meta, dict):
+                continue
+            num = _number_of(code)
+            if num > 0:
+                pool[code] = {
+                    "num": num, "title": str(meta.get("title", "")),
+                    "cover": str(meta.get("cover", "")), "url": str(meta.get("url", "")),
+                    "source": str(meta.get("source", "fc2")) or "fc2",
+                    "uncensored": bool(meta.get("uncensored")),
+                    "checked": False, "tries": int(meta.get("tries", 0) or 0), "added": now,
+                }
+        for code in (d.get("pending_retry") or {}):
+            code = str(code)
+            num = _number_of(code)
+            if code not in pool and num > 0:
+                pool[code] = {"num": num, "title": "", "cover": "", "url": "",
+                              "source": "fc2", "uncensored": False,
+                              "checked": False, "tries": 0, "added": now}
+        _state["pool"] = pool
+        done_pt = {}
+        for code, meta in (d.get("done_pt") or {}).items():
+            code = str(code)
+            num = _number_of(code)
+            if num > 0:
+                m = meta if isinstance(meta, dict) else {}
+                done_pt[code] = {"num": num, "ts": float(m.get("ts", now) or now)}
+        _state["done_pt"] = done_pt
+        st = d.get("stats") or {}
+        _state["stats"].update({k: st[k] for k in _state["stats"] if k in st})
     except Exception as e:
         _log(f"状态加载失败（用默认）：{e}")
 
@@ -106,6 +139,11 @@ def _save_state():
                                encoding="utf-8")
     except Exception as e:
         _log(f"状态持久化失败：{e}")
+
+
+def _dedup_keyword(code: str) -> str:
+    """PT 站查重关键词：把番号破折号换空格并折叠空白（与 publish 查重一致，分词更易命中）。"""
+    return re.sub(r"\s+", " ", (code or "").replace("-", " ")).strip()
 
 
 # ── 番号工具 ──
@@ -260,9 +298,24 @@ async def _find_magnet(code: str, config: dict) -> dict:
     return {}
 
 
+# ── PT 站查重 ──
+async def _pt_check(code: str, config: dict) -> Optional[bool]:
+    """查 PT 站(M-Team)是否已有该番号。返回 True=站点已有 / False=站点暂无 / None=查询失败。
+    复用 publish 流水线同款关键词（破折号转空格，分词更易命中）。"""
+    try:
+        res = await mteam.search(config, keyword=_dedup_keyword(code), page_size=20)
+    except Exception as e:
+        _log(f"[{code}] PT 查重异常：{e}")
+        return None
+    if not res.get("ok"):
+        _log(f"[{code}] PT 查重失败：{res.get('error', '')[:60]}")
+        return None
+    return bool(res.get("items"))
+
+
 # ── 一轮 ──
 async def _round(config: dict) -> dict:
-    """跑一轮全自动发现+入队。返回本轮摘要 dict。"""
+    """跑一轮：动态补池 → PT 查重 → 蓄种等磁力 → 顺序发种。返回本轮摘要 dict。"""
     if not config.get("autopilot_fc2_enabled"):
         return {"skipped": "未启用"}
 
@@ -276,7 +329,7 @@ async def _round(config: dict) -> dict:
         return {"skipped": msg}
 
     proxy = config.get("proxy") or None
-    start_num = int(config.get("autopilot_fc2_start_number", 0) or 0)
+    floor = max(0, int(config.get("autopilot_fc2_start_number", 0) or 0))  # 起点下限，0=不限
 
     # 抓 FC2 最新（发现窗口条数可配，越大越不易在两轮间漏号；上限由 get_latest 收口到 200）
     discover_n = max(1, int(config.get("autopilot_discover_count", 200) or 200))
@@ -289,7 +342,6 @@ async def _round(config: dict) -> dict:
         _log(msg)
         return {"error": msg}
 
-    # 番号→数字，排重，记录见到的最大号
     discovered = []
     for it in (latest or []):
         code = (it.get("code") or "").strip()
@@ -299,29 +351,31 @@ async def _round(config: dict) -> dict:
     if discovered:
         _state["stats"]["latest_seen"] = max(n for n, _, _ in discovered)
 
-    # 首轮 cursor=0 且 start_number=0：以当前最新为起点、不回补历史
-    if _state["cursor"] <= 0:
-        _state["cursor"] = max(start_num, _state["stats"]["latest_seen"]) if start_num <= 0 \
-            else max(start_num - 1, 0)
-        _log(f"初始化游标 = {_state['cursor']}（之后只发现更新的番号）")
-        _save_state()
+    pool = _state["pool"]
+    done_pt = _state["done_pt"]
+    now = time.time()
 
-    cursor = max(_state["cursor"], (start_num - 1) if start_num > 0 else 0)
-    pending = _state["pending"]
-
-    # ① 把本轮发现的、号 > cursor 的新番号并入持久待办池（携带元数据）。
-    #    已在池中的号：用本轮更优的元数据回填（旧 pending_retry 迁移来的元数据为空时尤其重要）。
+    # ① 动态补池：把发现窗口里、号 >= 起点下限、且【未建过任务、未在 done_pt】的番号补进蓄种池。
+    #    已在池中的号用本轮更优元数据回填；已建任务/已在 done_pt 的号顺手从池里清掉（去重收敛）。
+    added_pool = 0
     for num, code, it in discovered:
-        if num <= cursor:
+        if num < floor:
             continue
-        meta = pending.get(code)
+        if code in done_pt:
+            pool.pop(code, None)
+            continue
+        if publish.has_any_task(code):     # 登记在册（任意状态的发种任务）→ 不再入池
+            pool.pop(code, None)
+            continue
+        meta = pool.get(code)
         if meta is None:
-            pending[code] = {
-                "num": num,
-                "title": it.get("title", ""), "cover": it.get("cover", ""),
+            pool[code] = {
+                "num": num, "title": it.get("title", ""), "cover": it.get("cover", ""),
                 "url": it.get("url", ""), "source": it.get("source", "fc2") or "fc2",
-                "uncensored": bool(it.get("uncensored_hint")), "tries": 0,
+                "uncensored": bool(it.get("uncensored_hint")),
+                "checked": False, "tries": 0, "added": now,
             }
+            added_pool += 1
         else:
             meta["num"] = num
             if it.get("title") and not meta.get("title"):
@@ -333,22 +387,60 @@ async def _round(config: dict) -> dict:
             if it.get("uncensored_hint"):
                 meta["uncensored"] = True
 
-    # ② 处理待办池：严格从旧到新逐号推进（不跳号）。slots 仅由「成功入队」消耗，
-    #    无精确匹配(nomatch)不占名额，故一个卡住的旧号不会挡住后面的号入队。
-    retry_rounds = int(config.get("autopilot_retry_rounds", 5) or 0)
+    # ② PT 查重：对池里待查重(checked=False)的号逐个查，按号从小到大，限每轮条数(控 M-Team 调用量)。
+    #    站点已有→移出池记 done_pt；站点暂无→checked=True（进入蓄种等磁力）。
+    #    M-Team 未配置则跳过查重、直接放行（交流水线 CHECKING 兜底）；查询失败则保留待下轮再查。
+    mteam_ok = bool((config.get("mteam_api_key") or "").strip())
+    check_cap = max(0, int(config.get("autopilot_check_per_round", 20) or 0))
+    on_pt = 0
+    unchecked = sorted((c for c in pool if not pool[c]["checked"]),
+                       key=lambda c: pool[c]["num"])
+    if not mteam_ok:
+        for code in unchecked:
+            pool[code]["checked"] = True
+    else:
+        for code in unchecked[:check_cap or len(unchecked)]:
+            verdict = await _pt_check(code, config)
+            if verdict is None:           # 查询失败：保留待下轮，避免误判
+                continue
+            if verdict:
+                pool.pop(code, None)
+                done_pt[code] = {"num": _number_of(code), "ts": now}
+                on_pt += 1
+            else:
+                pool[code]["checked"] = True
+
+    # ③ 蓄种超时剔除：查重通过但长期搜不到磁力的老号，留池超 keep_days 天即剔除（0=永不剔除）。
+    keep_days = max(0, int(config.get("autopilot_pool_keep_days", 14) or 0))
+    evicted = 0
+    if keep_days > 0:
+        ttl = keep_days * 86400
+        for code in [c for c in pool
+                     if pool[c]["checked"] and (now - pool[c]["added"]) > ttl]:
+            pool.pop(code, None)
+            evicted += 1
+        if evicted:
+            _log(f"蓄种池剔除 {evicted} 个超 {keep_days} 天仍无磁力的番号")
+
+    # ④ 顺序发种：蓄种池里「查重通过」的号按号从小到大逐个搜磁力，限每轮搜索条数(控资源源调用量)；
+    #    搜到磁力者受名额节流(slots)陆续入队。slots 仅由成功入队消耗，搜不到的不占名额。
+    find_cap = max(0, int(config.get("autopilot_find_per_round", 60) or 0))
     cap = _capacity(config)
     slots = cap["slots"]
-    added, nomatch, gaveup = 0, 0, 0
-
-    for code in sorted(pending, key=lambda c: pending[c]["num"]):
-        meta = pending[code]
-        num = meta["num"]
+    added, nomatch = 0, 0
+    ready = sorted((c for c in pool if pool[c]["checked"]),
+                   key=lambda c: pool[c]["num"])
+    searched = 0
+    for code in ready:
         if slots <= 0:
             break
-        # 已有未终止任务的番号：移出池（去重，避免重复入队）
-        if publish.has_active_code(code):
-            pending.pop(code, None)
+        if find_cap and searched >= find_cap:
+            break
+        meta = pool[code]
+        if publish.has_any_task(code):     # 期间已建任务：移出池去重
+            pool.pop(code, None)
             continue
+        searched += 1
         found = await _find_magnet(code, config)
         if found.get("magnet"):
             try:
@@ -360,40 +452,30 @@ async def _round(config: dict) -> dict:
                     auto_source=found.get("source", ""))
                 added += 1
                 slots -= 1
-                pending.pop(code, None)
+                pool.pop(code, None)       # 已发种登记在册(任务表)，离开蓄种池
             except Exception as e:
                 _log(f"[{code}] 入队失败：{e}")
         else:
-            # 无精确匹配：累计重试轮数，超上限才放弃移出池（推进游标越过它）
             meta["tries"] = int(meta.get("tries", 0)) + 1
-            if retry_rounds > 0 and meta["tries"] > retry_rounds:
-                pending.pop(code, None)
-                gaveup += 1
-                _log(f"[{code}] 超 {retry_rounds} 轮仍无精确匹配，放弃")
-            else:
-                nomatch += 1
+            nomatch += 1
 
-    # ③ 推进游标：池非空时＝最小未决号 - 1（绝不越过仍待办的号，杜绝跳号）；
-    #    池空（全部处理完）则推进到当前最新，之后只发现更新的号。
-    if pending:
-        _state["cursor"] = min(m["num"] for m in pending.values()) - 1
-    else:
-        _state["cursor"] = max(_state["cursor"], _state["stats"]["latest_seen"])
-
+    pending_check = sum(1 for c in pool if not pool[c]["checked"])
+    ready_cnt = len(pool) - pending_check
     _state["stats"].update({
         "last_run": time.time(), "last_added": added, "last_error": "",
         "total_added": _state["stats"]["total_added"] + added,
-        "total_skipped_nomatch": _state["stats"]["total_skipped_nomatch"] + nomatch,
-        "total_given_up": _state["stats"]["total_given_up"] + gaveup,
+        "total_on_pt": _state["stats"]["total_on_pt"] + on_pt,
+        "total_evicted": _state["stats"]["total_evicted"] + evicted,
     })
     _save_state()
-    summary = {"added": added, "nomatch": nomatch, "gaveup": gaveup,
-               "cursor": _state["cursor"], "slots": cap["slots"],
-               "downloading": cap["downloading"], "seeding_active": cap["seeding_active"],
-               "pending": len(pending)}
-    if added or nomatch or gaveup:
-        _log(f"本轮：新增{added} 待重试{nomatch} 放弃{gaveup} 待办池{len(pending)} "
-             f"游标→{_state['cursor']}（下载中{cap['downloading']}/做种{cap['seeding_active']}）")
+    summary = {"added": added, "nomatch": nomatch, "on_pt": on_pt, "evicted": evicted,
+               "pool": len(pool), "pending_check": pending_check, "ready": ready_cnt,
+               "done_pt": len(done_pt), "slots": cap["slots"],
+               "downloading": cap["downloading"], "seeding_active": cap["seeding_active"]}
+    if added_pool or added or on_pt or evicted:
+        _log(f"本轮：补池{added_pool} 发种{added} 站点已有{on_pt} 剔除{evicted} ｜ "
+             f"蓄种池{len(pool)}(待查重{pending_check}/待发种{ready_cnt}) "
+             f"PT已有库{len(done_pt)}（下载中{cap['downloading']}/做种{cap['seeding_active']}）")
     return summary
 
 
@@ -435,16 +517,19 @@ def start_worker():
 async def api_status():
     config = load_config()
     cap = _capacity(config)
+    pool = _state["pool"]
+    pending_check = sum(1 for c in pool if not pool[c]["checked"])
     return {
         "success": True,
         "enabled": bool(config.get("autopilot_fc2_enabled")),
-        "cursor": _state["cursor"],
         "latest_seen": _state["stats"].get("latest_seen", 0),
         "downloading": cap["downloading"],
         "seeding_active": cap["seeding_active"],
         "slots": cap["slots"],
-        "pending": len(_state["pending"]),
-        "pending_retry": len(_state["pending"]),   # 兼容旧前端字段名
+        "pool": len(pool),
+        "pending_check": pending_check,           # 蓄种池里待 PT 查重的号数
+        "ready": len(pool) - pending_check,        # 查重通过、等磁力发种的号数
+        "done_pt": len(_state["done_pt"]),         # PT 已有、跳过的号数
         "interval_minutes": int(config.get("autopilot_fc2_interval_minutes", 30) or 30),
         "resource_source": config.get("autopilot_resource_source", "jackett"),
         "stats": _state["stats"],
@@ -457,15 +542,17 @@ class ResetRequest(BaseModel):
 
 @router.post("/reset")
 async def api_reset(req: ResetRequest):
-    """重置游标到指定起点（或配置里的起点）并清空待办池。下一轮从该起点之后重新发现。"""
+    """清空蓄种池与 PT 已有登记，并把起点下限写回配置（仅影响下一轮：号 < 起点的不入池）。
+    下一轮从当前发现窗口重新补池、重新查重。"""
     config = load_config()
     start = req.start_number if req.start_number is not None \
         else int(config.get("autopilot_fc2_start_number", 0) or 0)
-    _state["cursor"] = max(0, int(start) - 1) if start > 0 else 0
-    _state["pending"] = {}
+    start = max(0, int(start))
+    _state["pool"] = {}
+    _state["done_pt"] = {}
     _save_state()
-    _log(f"游标已重置：起点={start}（cursor={_state['cursor']}）")
-    return {"success": True, "cursor": _state["cursor"]}
+    _log(f"已重置：清空蓄种池与 PT 已有登记，起点下限={start}")
+    return {"success": True, "start_number": start, "pool": 0}
 
 
 @router.post("/run-once")

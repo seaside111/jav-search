@@ -214,6 +214,20 @@ def has_active_code(code: str) -> bool:
     return False
 
 
+def has_any_task(code: str) -> bool:
+    """该番号是否已存在【任意状态】的发种任务（含已完成/已停止/已终止/失败）。
+    autopilot 蓄种池模型用它做「已发种登记在册」去重：凡建过任务的番号一律不再抓取入池，
+    无论成功(STOPPED/做种中)、站点已有(ABORTED_EXISTS)、被抢发(ABORTED_TAKEN)、
+    已取消(CANCELLED) 还是失败(FAILED，留待人工重试)——任务表本身即持久登记册。
+    归一化：仅字母数字小写比较。"""
+    norm = re.sub(r"[^a-z0-9]", "", (code or "").lower())
+    if not norm:
+        return False
+    return any(
+        re.sub(r"[^a-z0-9]", "", (t.get("code") or "").lower()) == norm
+        for t in _TASKS.values())
+
+
 def _set(t: dict, state: str = None, error: str = None, note: str = None, **kw):
     code = t.get("code", "")
     if state and state != t.get("state"):

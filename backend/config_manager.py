@@ -77,12 +77,19 @@ DEFAULT_CONFIG = {
                                             #   未配置 Jackett(无 url/key)时自动退到 sukebei，不影响免配置开箱。
     "autopilot_resource_fallback": True,    # 选定源无精确匹配时，回退另一源再搜一次
     "autopilot_fc2_interval_minutes": 30,   # 后台刷新/抓最新的间隔（分钟）
-    "autopilot_fc2_start_number": 0,        # 起点番号数字(如4925502)；0=用当前最新作起点、不回补历史
+    "autopilot_fc2_start_number": 0,        # 起点番号下限(如4925502)；0=不设下限,发现窗口里的番号全部纳入蓄种池
     "autopilot_max_downloading": 2,         # 同时下载中的全自动任务上限(A)
     "autopilot_max_seeding": 3,             # 做种中(未成熟)的全自动任务上限(B)
     "autopilot_seed_settle_minutes": 120,   # 做种超此分钟视为「已成熟」，不再占B名额
     "autopilot_max_new_per_round": 3,       # 每轮最多新增任务数(防刷新突增)
-    "autopilot_retry_rounds": 5,            # 无精确匹配的番号最多重试多少轮后放弃
+    # ── V1.5.1 蓄种池模型（替代旧「游标+跳号」）──
+    # 流程：定时抓最新番号 → 动态补进蓄种池 → 逐号 PT 站查重(去重) → 查重通过留池等磁力
+    #      → 有磁力者按号顺序受名额节流陆续入队发种。已建任务的番号(任意状态)即「登记在册」
+    #      不再重复抓取；故小号的磁力即便晚出，只要还在发现窗口内就会被重新发现、入池、发种。
+    "autopilot_check_per_round": 20,        # 每轮最多对多少个新番号做 PT 站查重(限 M-Team 调用量)
+    "autopilot_find_per_round": 60,         # 每轮最多对多少个「查重通过」番号搜磁力(限资源源调用量)
+    "autopilot_pool_keep_days": 14,         # 查重通过但持续搜不到磁力的番号，留在蓄种池超此天数即剔除;0=永不剔除
+    "autopilot_retry_rounds": 5,            # 【已弃用·蓄种池模型不再按轮放弃，改用 keep_days 天数剔除】保留仅为兼容旧配置
     "autopilot_discover_count": 200,        # 每轮发现最新番号的抓取条数(窗口越大越不易漏号);上限200
     "autopilot_prefer_largest": True,       # 同番号多版本时,默认下载文件体积最大(最清晰)的那个种子
     "autopilot_min_size_mb": 300,           # 选种体积下限(MB):已知体积低于此的种子不选(堵小样片/预览片);0=不限。
