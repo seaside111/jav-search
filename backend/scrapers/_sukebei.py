@@ -139,6 +139,9 @@ def _card(num: str, raw_title: str) -> dict:
 # 默认资源源：sukebei 直连（按种子站，磁力齐全、不过盾）；Jackett 关闭时即用它。
 # ──────────────────────────────────────────────
 _SIZE_RE = re.compile(r"([\d.]+)\s*([KMGT]?i?B)", re.I)
+# 「整格恰为一个体积」严格判定：用于在一行里**精准定位 Size 单元格**——只认整格就是
+# 「数字+单位」(如 1.4 GiB / 850.3 MiB) 的格子，杜绝把标题或日期里的数字误当体积。
+_SIZE_CELL_RE = re.compile(r"^\s*[\d.]+\s*[KMGT]?i?B\s*$", re.I)
 _SIZE_MULT = {"B": 1, "KIB": 1024, "MIB": 1024**2, "GIB": 1024**3, "TIB": 1024**4,
               "KB": 1000, "MB": 1000**2, "GB": 1000**3, "TB": 1000**4}
 
@@ -153,26 +156,46 @@ def _size_to_bytes(s: str) -> int:
         return 0
 
 
+def _int_text(s: str) -> int:
+    """从单元格文本里取纯数字（剥逗号/空白），无数字返回 0。"""
+    try:
+        return int(re.sub(r"[^\d]", "", s or "") or 0)
+    except Exception:
+        return 0
+
+
 def _parse_search(html: str, max_results: int) -> list[dict]:
-    """解析 sukebei 搜索结果表（nyaa 布局：分类/名称/下载链接/大小/日期/种/下/完成）。"""
+    """解析 sukebei 搜索结果表（nyaa 布局：分类/名称/下载/大小/日期/种/下/完成）。
+
+    **列定位一律「按内容识别」而非写死下标**——nyaa 模板里「名称」单元格带 colspan=2、
+    偶有列错位，写死 tds[3] 取体积会取偏。这里逐项精准定位，保证**体积一定来自真正的
+    Size 列**（用户反馈的核心痛点：文件大小判断/识别不准）：
+      · Size      ：整格恰为「数字+单位」的那一格（_SIZE_CELL_RE 命中）；
+      · 名称/详情 ：含 /view/N（非 #comments）链接的那一格，取 title/文本；
+      · 磁力/种子 ：扫全行所有 <a>，magnet: 收磁力，.torrent / /download/ 收种子直链；
+      · 种/下     ：结果行最后三列恒为 种子/下载者/完成数——取倒数第 3、第 2 格纯数字最稳；
+      · 日期      ：带 data-timestamp 属性的那一格（nyaa 必有）。
+    """
     from jackett import _infer_quality, _infer_codec   # 复用画质/编码推断，避免重复实现
     soup = BeautifulSoup(html, "html.parser")
     out = []
     rows = soup.select("table.torrent-list tbody tr") or soup.select("tbody tr")
     for tr in rows:
-        tds = tr.find_all("td")
-        if len(tds) < 8:
+        tds = tr.find_all("td", recursive=False)
+        if len(tds) < 5:                       # 太短的不是结果行（分类/名称/下载/大小/…）
             continue
         # 名称 + 详情页（取 /view/N 且无 #comments 的标题链接）
         title, info_url = "", ""
-        for a in tds[1].find_all("a", href=True):
-            if a["href"].startswith("/view/") and "#" not in a["href"]:
+        for td in tds:
+            a = next((x for x in td.find_all("a", href=True)
+                      if x["href"].startswith("/view/") and "#" not in x["href"]), None)
+            if a:
                 title = (a.get("title") or a.get_text(" ", strip=True)).strip()
                 info_url = SUKEBEI_BASE + a["href"]
                 break
-        # 下载链接：磁力 + .torrent 直链
+        # 下载链接：磁力 + .torrent 直链（扫全行，免受列位置影响）
         magnet, link = "", ""
-        for a in tds[2].find_all("a", href=True):
+        for a in tr.find_all("a", href=True):
             h = a["href"]
             if h.startswith("magnet:"):
                 magnet = h
@@ -180,18 +203,26 @@ def _parse_search(html: str, max_results: int) -> list[dict]:
                 link = h if h.startswith("http") else SUKEBEI_BASE + h
         if not magnet and not link:
             continue
-        size_str = tds[3].get_text(strip=True)
-        date = tds[4].get_text(strip=True)
-
-        def _int(td):
-            try:
-                return int(td.get_text(strip=True))
-            except Exception:
-                return 0
+        # 体积：整格就是「数字+单位」的那一格——精准定位，绝不取偏
+        size_str, size_bytes = "", 0
+        for td in tds:
+            t = td.get_text(strip=True)
+            if _SIZE_CELL_RE.match(t):
+                size_str, size_bytes = t, _size_to_bytes(t)
+                break
+        # 日期：带 data-timestamp 属性的那一格（nyaa 必有）
+        date = ""
+        for td in tds:
+            if td.has_attr("data-timestamp"):
+                date = td.get_text(strip=True)
+                break
+        # 种子/下载者：结果行最后三列恒为 种/下/完成
+        seeders = _int_text(tds[-3].get_text(strip=True))
+        leechers = _int_text(tds[-2].get_text(strip=True))
         out.append({
             "title": title, "magnet": magnet, "link": link, "info_url": info_url,
-            "size": size_str, "size_bytes": _size_to_bytes(size_str),
-            "seeders": _int(tds[5]), "leechers": _int(tds[6]),
+            "size": size_str, "size_bytes": size_bytes,
+            "seeders": seeders, "leechers": leechers,
             "pub_date": date[:10] if date else "", "indexer": "sukebei",
             "category": "", "quality": _infer_quality(title), "codec": _infer_codec(title),
         })
@@ -202,23 +233,75 @@ def _parse_search(html: str, max_results: int) -> list[dict]:
     return out
 
 
+def _fc2_number(code: str) -> str:
+    """从 FC2 番号取最长数字段（FC2-PPV-4927098 → 4927098）。"""
+    nums = re.findall(r"\d+", code or "")
+    return max(nums, key=len) if nums else ""
+
+
+async def _fetch_search(query: str, proxy: Optional[str], timeout: int,
+                        max_results: int) -> list[dict]:
+    """单条查询：拉一页 sukebei 搜索结果并解析（按做种数倒序）。"""
+    url = f"{SUKEBEI_BASE}/?q={quote(query.strip())}&s=seeders&o=desc"
+    async with httpx.AsyncClient(headers=_HEADERS, proxy=proxy or None,
+                                 timeout=timeout, follow_redirects=True) as client:
+        resp = await client.get(url)
+    if resp.status_code != 200 or not resp.text:
+        print(f"[sukebei] search HTTP {resp.status_code} (q={query})")
+        return []
+    return _parse_search(resp.text, max_results)
+
+
 async def search_sukebei(query: str, proxy: Optional[str] = None,
                          timeout: int = 20, max_results: int = 60) -> list[dict]:
-    """按番号在 sukebei 搜资源（按做种数倒序）。直连、不过盾。失败返回 []。"""
+    """按【原样查询词】在 sukebei 搜资源（按做种数倒序）。直连、不过盾。失败返回 []。
+    手动「搜索资源」走这条（保持用户输入的字面查询）；全自动按番号搜请用 search_sukebei_code。"""
     if proxy is None:
         proxy = _proxy()
-    url = f"{SUKEBEI_BASE}/?q={quote(query.strip())}&s=seeders&o=desc"
     try:
-        async with httpx.AsyncClient(headers=_HEADERS, proxy=proxy or None,
-                                     timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(url)
-        if resp.status_code != 200 or not resp.text:
-            print(f"[sukebei] search HTTP {resp.status_code}")
-            return []
-        return _parse_search(resp.text, max_results)
+        return await _fetch_search(query, proxy, timeout, max_results)
     except Exception as e:
         print(f"[sukebei] 搜索失败: {type(e).__name__}: {e}")
         return []
+
+
+async def search_sukebei_code(code: str, proxy: Optional[str] = None,
+                              timeout: int = 20, max_results: int = 60) -> list[dict]:
+    """按 FC2 番号搜资源——**为召回率优化**（修「后台经常搜不到」）。
+
+    sukebei 全文检索会把「FC2-PPV-4927098」拆成 FC2 / PPV / 4927098 做 AND，要求标题三词
+    俱全；而卖家发种标题五花八门（「FC2PPV 4927098」「FC2-4927098」甚至只写数字），常因
+    缺词被漏掉——这正是全自动后台经常搜不到资源的根因之一。
+
+    故优先用**最具区分度的数字段**(4927098)直搜（7 位数字几乎不撞号、召回最广），数字搜不满
+    再退回整条番号搜一次兜底；两次结果按详情页/磁力去重合并。严格番号判定交上层把关，这里
+    只管「尽量多搜出来」，让真正的大文件版本不被漏。失败返回 []。"""
+    if proxy is None:
+        proxy = _proxy()
+    num = _fc2_number(code)
+    ordered, seen_q = [], set()
+    for q in (num, (code or "").strip()):        # 数字优先，整码兜底；去重保序
+        ql = q.lower()
+        if q and ql not in seen_q:
+            seen_q.add(ql)
+            ordered.append(q)
+    merged, seen = [], set()
+    for q in ordered:
+        try:
+            rows = await _fetch_search(q, proxy, timeout, max_results)
+        except Exception as e:
+            print(f"[sukebei] 搜索失败(q={q}): {type(e).__name__}: {e}")
+            continue
+        for r in rows:
+            key = r.get("info_url") or r.get("magnet") or r.get("title")
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(r)
+        if len(merged) >= max_results:           # 已搜满则无需再兜底
+            break
+    merged.sort(key=lambda r: (0 if r["magnet"] else 1, -r["seeders"], -r["size_bytes"]))
+    return merged[:max_results]
 
 
 async def fetch_fc2_latest(proxy: Optional[str] = None, limit: int = 60,

@@ -34,7 +34,7 @@ import publish
 import downloader
 import mteam
 from scrapers import fc2 as fc2_scraper
-from scrapers._sukebei import search_sukebei
+from scrapers._sukebei import search_sukebei_code
 from jackett import search_jackett
 
 router = APIRouter(prefix="/api/autopilot")
@@ -147,33 +147,29 @@ def _dedup_keyword(code: str) -> str:
 
 
 # ── 番号工具 ──
-def _strict_code_match(candidate_title: str, target_code: str) -> bool:
-    """严格番号匹配：候选标题里【任意位置】须出现与目标完全一致的番号 token。
-
-    番号未必在标题最开头——资源标题常带前缀噪声，如：
-      「[HD 720p] FC2-PPV-4925502 ※本物アイドル…」「+++ FC2-PPV-4925502 【…】18歳…」。
-    故不能简单「剥噪声后从开头比对」（那样 HD/720p 这种【字母数字】前缀会让开头错位、漏判）。
-
-    做法：把目标番号拆成字母数字段（FC2-PPV-4925502 → FC2 / PPV / 4925502），
-    段间允许任意非字母数字噪声（空格/破折号/方括号/全角符号/中文等），
-    并要求 token 两端都是【非字母数字边界】：
-      - 前边界 (?<![a-z0-9])：杜绝 xFC2.../720pFC2... 这种字母数字粘连的误配；
-      - 后边界 (?![a-z0-9]) ：数字边界，杜绝 4925502 误配 49255021（多一位）、4925502abc。
-    满足用户口径「排除符号噪声后，番号的字母+数字+顺序完全一致才确认」。
-    """
-    title = (candidate_title or "").lower()
-    segs = re.findall(r"[a-z0-9]+", (target_code or "").lower())
-    if not title or not segs:
-        return False
-    body = r"[^a-z0-9]*".join(re.escape(s) for s in segs)
-    pattern = r"(?<![a-z0-9])" + body + r"(?![a-z0-9])"
-    return re.search(pattern, title) is not None
-
-
 def _number_of(code: str) -> int:
     """取番号里的数字主体（FC2-PPV-4925502 → 4925502）。取最长的一段数字。"""
     nums = re.findall(r"\d+", code or "")
     return max((int(n) for n in nums), default=0)
+
+
+def _fc2_match(candidate_title: str, target_code: str) -> bool:
+    """FC2 番号严格匹配（**召回友好版**，用于 sukebei/jackett 资源标题判定）。
+
+    口径：标题里须出现该番号的【数字主体】(4927098)，且两端为【非数字边界】
+      - 前 (?<!\\d)：杜绝 14927098 这类多位粘连误配；
+      - 后 (?!\\d) ：杜绝 4927098 误配 49255021、4927098 后再跟数字；
+    并要求标题含 'fc2' 词——锁定 FC2 片、排除别家撞 7 位数字的误配。
+
+    为何不要求 FC2+PPV+数字三段俱全：sukebei 上 FC2 发种标题常缺 'PPV'
+    （FC2-4927098 / FC2PPV4927098 / 只 FC2+数字），强制 PPV 会把**真正的大文件版**一并漏掉
+    ——这与用户「严格判番号、取大文件」的目标相悖。改以「FC2 + 精确数字边界」为准，
+    既严（番号一位都不能差）又不漏。"""
+    t = (candidate_title or "").lower()
+    num = _number_of(target_code)
+    if not t or num <= 0 or "fc2" not in t:
+        return False
+    return re.search(r"(?<!\d)" + str(num) + r"(?!\d)", t) is not None
 
 
 # ── 节流：成熟做种释放槽位 ──
@@ -249,7 +245,7 @@ async def _find_magnet(code: str, config: dict) -> dict:
                     indexers=(config.get("jackett_indexers") or "all"),
                     proxy=None, timeout=int(config.get("jackett_timeout", 20) or 20))
             else:
-                results = await search_sukebei(code, proxy=proxy)
+                results = await search_sukebei_code(code, proxy=proxy)
         except Exception as e:
             _log(f"[{code}] {src} 搜索异常：{e}")
             continue
@@ -259,7 +255,7 @@ async def _find_magnet(code: str, config: dict) -> dict:
             magnet = r.get("magnet") or r.get("link") or ""
             if not magnet:
                 continue
-            if _strict_code_match(r.get("title", ""), code):
+            if _fc2_match(r.get("title", ""), code):
                 matches.append({
                     "magnet": magnet, "title": r.get("title", ""), "source": src,
                     "size_bytes": int(r.get("size_bytes") or 0),
