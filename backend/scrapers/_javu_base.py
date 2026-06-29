@@ -20,6 +20,7 @@ avsox.py / avmoo.py 仅传入各自域名与来源名。
   - 详情页前端路由为 /<lang>/movies/<movieId>，故 url 以 movieId 结尾，
     fetch_detail 反向取末段作为 getMovie 的 id。
 """
+import asyncio
 import re
 from typing import Optional
 import httpx
@@ -58,6 +59,15 @@ def _headers(base: str) -> dict:
     }
 
 
+# 瞬时网络错误：avsox.click 的 host 偶发抽风（实测 5 连发里 1-2 次直接 ConnectError，
+# 隔几百毫秒重试即恢复）。这类错误重试即可，故单列出来做有限重试；JSONDecodeError(挑战页)、
+# 403(WAF)、code≠200 等属「内容/策略」类问题，重试无用，不在此列。
+_RETRYABLE = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+              httpx.WriteTimeout, httpx.PoolTimeout, httpx.RemoteProtocolError)
+_RETRIES = 2          # 额外重试次数（总尝试 = 1 + _RETRIES = 3）
+_RETRY_BACKOFF = 0.6  # 退避基数（秒）：第 n 次重试前 sleep n*backoff
+
+
 async def _api(base: str, method: str, body, proxy: Optional[str],
                source: str, timeout: float = 15.0):
     """调一次 javu JSON 接口，成功返回 data 字段，失败返回 None。
@@ -66,24 +76,42 @@ async def _api(base: str, method: str, body, proxy: Optional[str],
     （例如 search({search,lang}, pageSize, lang) → body=[{...}, 30, "cn"]）。
     用错成单个对象会被服务端忽略参数、返回默认数据（搜索表现为永远只回最新第一条），
     故 body 必须是与客户端一致的位置参数数组（仅含 File/Blob 时才转 FormData，这里用不到）。
-    """
+
+    **瞬时错误重试**（修「AVSOX 经常失效」）：avsox.click 是目前唯一返回 JSON 的可用域名，
+    但其 host 偶发 ConnectError/超时——单发即放弃会让整个 AVSOX 源频繁空手。故对连接/超时/
+    网关(502/503/504)这类瞬时错误做有限重试(总 3 次、退避 0.6/1.2s)；JSON 挑战页、403、
+    code≠200 等非瞬时问题不重试（重试无意义，交 _call 切备用域名）。"""
     url = f"{base}/javu/data/api/{method}"
-    try:
-        async with httpx.AsyncClient(proxy=proxy or None, timeout=timeout,
-                                     follow_redirects=True) as client:
-            resp = await client.post(url, json=body, headers=_headers(base))
-        if resp.status_code != 200:
-            print(f"[{source}] api {method} HTTP {resp.status_code}")
+    for attempt in range(_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(proxy=proxy or None, timeout=timeout,
+                                         follow_redirects=True) as client:
+                resp = await client.post(url, json=body, headers=_headers(base))
+            if resp.status_code in (502, 503, 504):     # 网关瞬时错误：重试
+                if attempt < _RETRIES:
+                    await asyncio.sleep(_RETRY_BACKOFF * (attempt + 1))
+                    continue
+                print(f"[{source}] api {method} HTTP {resp.status_code}")
+                return None
+            if resp.status_code != 200:
+                print(f"[{source}] api {method} HTTP {resp.status_code}")
+                return None
+            data = resp.json()
+            if not isinstance(data, dict) or data.get("code") != 200:
+                code = data.get("code") if isinstance(data, dict) else "?"
+                print(f"[{source}] api {method} code={code}")
+                return None
+            return data.get("data")
+        except _RETRYABLE as e:
+            if attempt < _RETRIES:
+                await asyncio.sleep(_RETRY_BACKOFF * (attempt + 1))
+                continue
+            print(f"[{source}] api {method} error: {type(e).__name__}: {e!r}")
             return None
-        data = resp.json()
-        if not isinstance(data, dict) or data.get("code") != 200:
-            code = data.get("code") if isinstance(data, dict) else "?"
-            print(f"[{source}] api {method} code={code}")
+        except Exception as e:        # JSONDecodeError(挑战页)等非瞬时错误：不重试
+            print(f"[{source}] api {method} error: {type(e).__name__}: {e!r}")
             return None
-        return data.get("data")
-    except Exception as e:
-        print(f"[{source}] api {method} error: {type(e).__name__}: {e!r}")
-        return None
+    return None
 
 
 async def _call(bases: list[str], method: str, body, proxy: Optional[str],
@@ -214,10 +242,15 @@ async def get_latest(base, source: str, proxy: Optional[str],
 
 async def search_list(base, source: str, query: str, mode: str,
                       proxy: Optional[str], max_results: int) -> list[dict]:
-    # search({search, lang}, pageSize, lang)：位置参数数组，按番号(movieFanHao)匹配。
+    # search([{search, page, pageSize, lang}])：按番号(movieFanHao)匹配。
+    # **2026-06 接口变更**：page/pageSize 由「位置参数」移进 search 对象内部——旧的
+    # [{search,lang}, pageSize, lang] 会让服务端拿不到数值 pageSize 而抛 PHP 错
+    # （code=2 "A non-numeric value encountered"），这正是「AVSOX 搜索失效」的根因。
+    # 新口径单对象内带 page/pageSize 即恢复正常。
     size = max(int(max_results), 30)
     data, used = await _call(_bases(base), "search",
-                             [{"search": query, "lang": LANG}, size, LANG],
+                             [{"search": query, "page": 1,
+                               "pageSize": size, "lang": LANG}],
                              proxy, source)
     if not isinstance(data, list) or not data:
         return []

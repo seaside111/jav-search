@@ -2666,6 +2666,13 @@ async function testFc2() {
         expired: '<span style="color:var(--red)">已过期 —— 请重新登录卖场后更新 Cookie</span>',
       };
       rows.push(`<div>官方卖场登录 Cookie：${map[mc.status] || '-'}</div>`);
+      // 心跳/自我续期可观测：显示最近校验与最近一次吸收到滚动 Set-Cookie 的时间。
+      // 若「最近校验」在动而「最近续期」长期不动，说明 FC2 未在本域名滚动刷新会话——
+      // 自我续期对它无效，cookie 仍会到固定有效期失效，需到期重新登录换 cookie。
+      if (mc.configured) {
+        const ago = (ts) => { ts = Number(ts||0); if (!ts) return '从未'; const s = Date.now()/1000 - ts; if (s < 90) return Math.round(s)+'秒前'; if (s < 5400) return Math.round(s/60)+'分钟前'; if (s < 172800) return Math.round(s/3600)+'小时前'; return Math.round(s/86400)+'天前'; };
+        rows.push(`<div style="color:var(--text-dim)">　心跳最近校验：${ago(mc.checked_ts)}　最近续期(吸收滚动Cookie)：${ago(mc.renewed_ts)}</div>`);
+      }
     }
     // 同步顶部预警条
     checkFc2MarketWarn();

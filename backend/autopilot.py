@@ -54,7 +54,7 @@ _BUSY = False   # 防止 worker tick 与「立即跑一轮」并发重入
 #   publish 任务表(has_any_task)登记，是另一套去重。
 # 不再有 cursor / pending 字段（旧「游标+跳号」模型已废弃）。
 _state = {
-    "pool": {},             # {code: {"num","title","cover","url","source","uncensored","checked","tries","added"}}
+    "pool": {},             # {code: {"num","title","cover","url","source","uncensored","checked","tries","small_tries","added"}}
     "done_pt": {},          # {code: {"num","ts"}}
     "stats": {
         "last_run": 0.0, "last_added": 0, "last_error": "",
@@ -94,6 +94,7 @@ def _load_state():
                 "uncensored": bool(meta.get("uncensored")),
                 "checked": bool(meta.get("checked")),
                 "tries": int(meta.get("tries", 0) or 0),
+                "small_tries": int(meta.get("small_tries", 0) or 0),
                 "added": float(meta.get("added", now) or now),
             }
         # 兼容旧版「待办池」pending / pending_retry：并入蓄种池（待查重 checked=False）
@@ -272,8 +273,11 @@ async def _find_magnet(code: str, config: dict) -> dict:
             _log(f"[{code}] {src} 严格匹配 {len(matches)} 个候选：{detail}")
 
         if prefer_largest:
-            # ① 体积下限：先在「已知体积 ≥ 下限」里挑；为空（全未知或全偏小）则放宽到全部候选兜底
-            pool = [m for m in matches if min_bytes <= 0 or m["size_bytes"] >= min_bytes]
+            # ① 体积下限：先在「已知体积 ≥ 下限 或 体积未知」里挑；为空（全是已知小文件）则放宽到全部候选兜底。
+            #    关键：体积未知(解析为0)的【不被下限剔除】——否则一个解析失败的大种子会被一个已知小文件挤掉
+            #    （这正是 docstring 承诺却被旧代码违背的「误杀大种子」通道，是「选中小文件」的根因之一）。
+            pool = [m for m in matches
+                    if min_bytes <= 0 or m["size_bytes"] <= 0 or m["size_bytes"] >= min_bytes]
             if not pool:
                 pool = matches
                 if min_bytes > 0:
@@ -369,7 +373,7 @@ async def _round(config: dict) -> dict:
                 "num": num, "title": it.get("title", ""), "cover": it.get("cover", ""),
                 "url": it.get("url", ""), "source": it.get("source", "fc2") or "fc2",
                 "uncensored": bool(it.get("uncensored_hint")),
-                "checked": False, "tries": 0, "added": now,
+                "checked": False, "tries": 0, "small_tries": 0, "added": now,
             }
             added_pool += 1
         else:
@@ -420,10 +424,17 @@ async def _round(config: dict) -> dict:
 
     # ④ 顺序发种：蓄种池里「查重通过」的号按号从小到大逐个搜磁力，限每轮搜索条数(控资源源调用量)；
     #    搜到磁力者受名额节流(slots)陆续入队。slots 仅由成功入队消耗，搜不到的不占名额。
+    #
+    #    HD 阈值门控（V1.5.1：等大文件再发）：新番上架常是 720p 小文件种子先出、高清大文件后出。
+    #    搜到的最佳种子若【已知体积 < HD 阈值】，视为「仅小文件先出」，本轮不发、留池等大文件——
+    #    每轮再搜一次，直到出现大文件即发；等满 size_wait_rounds 轮仍只有小文件，才放行发当前最佳。
+    #    体积未知(解析为0)不触发门控（无从判断、避免永久卡住），按搜到即发处理。
     find_cap = max(0, int(config.get("autopilot_find_per_round", 60) or 0))
+    hd_min_bytes = int(config.get("autopilot_publish_min_size_mb", 0) or 0) * 1024 * 1024
+    wait_rounds = max(0, int(config.get("autopilot_size_wait_rounds", 3) or 0))
     cap = _capacity(config)
     slots = cap["slots"]
-    added, nomatch = 0, 0
+    added, nomatch, deferred = 0, 0, 0
     ready = sorted((c for c in pool if pool[c]["checked"]),
                    key=lambda c: pool[c]["num"])
     searched = 0
@@ -439,6 +450,19 @@ async def _round(config: dict) -> dict:
         searched += 1
         found = await _find_magnet(code, config)
         if found.get("magnet"):
+            size_b = int(found.get("size_bytes") or 0)
+            # HD 阈值门控：已知体积且低于阈值 → 先攒轮数等大文件，等满 wait_rounds 才放行
+            if hd_min_bytes > 0 and 0 < size_b < hd_min_bytes:
+                small_tries = int(meta.get("small_tries", 0)) + 1
+                meta["small_tries"] = small_tries
+                if wait_rounds <= 0 or small_tries < wait_rounds:
+                    _log(f"[{code}] 暂不发种：当前最佳仅 {size_b / (1024**3):.2f}GB "
+                         f"< HD阈值 {hd_min_bytes // (1024*1024)}MB，留池等大文件"
+                         f"（第 {small_tries}/{wait_rounds} 轮）")
+                    deferred += 1
+                    continue               # 留池、不占 slots，下轮再搜
+                _log(f"[{code}] 已等 {small_tries} 轮仍无大文件，"
+                     f"按设置发布当前最佳 {size_b / (1024**3):.2f}GB")
             try:
                 publish.enqueue_auto(
                     code=code, download_url=found["magnet"],
@@ -464,12 +488,13 @@ async def _round(config: dict) -> dict:
         "total_evicted": _state["stats"]["total_evicted"] + evicted,
     })
     _save_state()
-    summary = {"added": added, "nomatch": nomatch, "on_pt": on_pt, "evicted": evicted,
+    summary = {"added": added, "nomatch": nomatch, "deferred": deferred,
+               "on_pt": on_pt, "evicted": evicted,
                "pool": len(pool), "pending_check": pending_check, "ready": ready_cnt,
                "done_pt": len(done_pt), "slots": cap["slots"],
                "downloading": cap["downloading"], "seeding_active": cap["seeding_active"]}
-    if added_pool or added or on_pt or evicted:
-        _log(f"本轮：补池{added_pool} 发种{added} 站点已有{on_pt} 剔除{evicted} ｜ "
+    if added_pool or added or on_pt or evicted or deferred:
+        _log(f"本轮：补池{added_pool} 发种{added} 等大文件{deferred} 站点已有{on_pt} 剔除{evicted} ｜ "
              f"蓄种池{len(pool)}(待查重{pending_check}/待发种{ready_cnt}) "
              f"PT已有库{len(done_pt)}（下载中{cap['downloading']}/做种{cap['seeding_active']}）")
     return summary

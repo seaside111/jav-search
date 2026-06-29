@@ -386,6 +386,16 @@ class ConfigUpdateRequest(BaseModel):
     autopilot_seed_settle_minutes: Optional[int] = None
     autopilot_max_new_per_round: Optional[int] = None
     autopilot_retry_rounds: Optional[int] = None
+    # 蓄种池模型新增（此前漏注册→保存时被 Pydantic 丢弃，本次补齐）
+    autopilot_check_per_round: Optional[int] = None
+    autopilot_find_per_round: Optional[int] = None
+    autopilot_pool_keep_days: Optional[int] = None
+    autopilot_discover_count: Optional[int] = None
+    autopilot_prefer_largest: Optional[bool] = None
+    autopilot_min_size_mb: Optional[int] = None
+    # V1.5.1 HD 发种阈值（低于则留池等大文件，等满轮数才发）
+    autopilot_publish_min_size_mb: Optional[int] = None
+    autopilot_size_wait_rounds: Optional[int] = None
 
 
 # ──────────────────────────────────────────────

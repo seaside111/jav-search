@@ -138,29 +138,32 @@ def _effective_cookies() -> tuple:
     return {**_AGE_COOKIES, **login}, True
 
 
-def _absorb(jar, seed: str) -> None:
+def _absorb(jar, seed: str) -> list:
     """把响应 cookie jar 里滚动更新的登录 cookie 并回 store 持久化（自我续期）。
-    seed 防并发覆盖：请求期间配置被改了就别写回旧种子。"""
+    seed 防并发覆盖：请求期间配置被改了就别写回旧种子。
+    返回本次被续期(新增/变更)的登录 cookie 名列表——上层据此判断 FC2 是否真有滚动下发
+    （列表非空＝服务端确实在滚动续期；长期为空＝FC2 未在本域名刷新会话，自我续期对它无效）。"""
+    changed_names = []
     try:
         if not seed:
-            return
+            return changed_names
         store = _load_cookie_store()
         if store.get("seed") != seed:
-            return
+            return changed_names
         cookies = dict(store.get("cookies") or {})
-        changed = False
         for name, value in jar.items():
             if not value or name in _NONLOGIN_KEYS:
                 continue
             if cookies.get(name) != value:
                 cookies[name] = value
-                changed = True
-        if changed:
+                changed_names.append(name)
+        if changed_names:
             store["cookies"] = cookies
             store["renewed_ts"] = time.time()
             _save_cookie_store(store)
     except Exception:
         pass
+    return changed_names
 
 
 def _mark_status(status: str, seed: str) -> None:
@@ -429,8 +432,22 @@ _HEARTBEAT_INTERVAL = 6 * 3600       # 6 小时一次，负担极低
 _HEARTBEAT_FIRST_DELAY = 120         # 启动后等 2 分钟再首探，避开启动高峰
 
 
+def _log_hb(msg: str) -> None:
+    """心跳日志：优先打到可见日志总线（前端日志面板可查），无则退回 print。
+    心跳本来完全静默(只在异常时 print)，导致用户无从判断「是否在跑/是否真续期」。
+    现每轮明确记一行，让自我续期是否生效【可观测】。"""
+    try:
+        import logbus
+        logbus.info("FC2心跳", msg)
+    except Exception:
+        print(f"[fc2market] {msg}", flush=True)
+
+
 async def heartbeat_once(proxy: Optional[str] = None) -> dict:
-    """主动探一次卖场登录态（仅在配了 cookie 时实际请求）。返回最新 market_cookie_status()。"""
+    """主动探一次卖场登录态（仅在配了 cookie 时实际请求）。返回最新 market_cookie_status()。
+    每轮记一行可见日志：登录态 + 本次是否吸收到滚动 Set-Cookie 续期（及续期的 cookie 名）。
+    若长期「登录态=ok 但本次无续期」，则说明 FC2 不在本域名滚动刷新会话——自我续期对它无效，
+    会话仍会在 FC2 服务端固定有效期到点后失效，只能靠到期重新登录换 cookie。"""
     cfg_cookie = _market_cookie()
     if not cfg_cookie:
         return market_cookie_status()
@@ -443,13 +460,22 @@ async def heartbeat_once(proxy: Optional[str] = None) -> dict:
                                      proxy=proxy or None, timeout=15,
                                      follow_redirects=True) as client:
             r = await client.get(f"{MARKET_BASE}/search/?sort=date&order=desc")
-            _absorb(client.cookies, seed)
+            renewed = _absorb(client.cookies, seed)
             if "id.fc2.com" in str(r.url):
                 _mark_status("expired", seed)
+                state = "已过期(被弹登录)"
             elif r.status_code == 200 and "/article/" in r.text:
                 _mark_status("ok", seed)
+                state = "有效"
+            else:
+                state = f"未知(HTTP {r.status_code})"
+            if renewed:
+                _log_hb(f"登录态={state}；本轮续期 cookie {len(renewed)} 项："
+                        f"{','.join(renewed[:6])}")
+            else:
+                _log_hb(f"登录态={state}；本轮 FC2 未滚动下发 Set-Cookie（无可续期项）")
     except Exception as e:
-        print(f"[fc2market] cookie 心跳探测失败: {type(e).__name__}: {e}")
+        _log_hb(f"心跳探测失败: {type(e).__name__}: {e}")
     return market_cookie_status()
 
 

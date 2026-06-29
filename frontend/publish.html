@@ -152,6 +152,7 @@
     <button class="tab active" data-tab="tasks" onclick="switchTab('tasks')">发种任务</button>
     <button class="tab" data-tab="monitor" onclick="switchTab('monitor')">做种监控</button>
     <button class="tab" data-tab="settings" onclick="switchTab('settings')">发种设置</button>
+    <button class="tab" data-tab="autopilot" onclick="switchTab('autopilot')">自动发布</button>
   </div>
 
   <!-- 任务 -->
@@ -261,68 +262,6 @@
       <div class="row">
         <label class="chk"><input type="checkbox" id="cfgPubAuto"> 自动发布（复查通过后直接发，不人工确认）</label>
         <span class="hint">默认关闭＝发布前需在「发种任务」点确认；开启＝全自动</span>
-      </div>
-    </div>
-
-    <div class="group">
-      <h3>FC2 全自动发种（V1.5.1）</h3>
-      <div class="row">
-        <label class="chk"><input type="checkbox" id="cfgAutoEnabled"> 启用 FC2 全自动发种</label>
-        <span class="hint">后台定时抓 FC2 最新番号→资源搜索(严格番号匹配)→自动入队→走自动发布。入队任务已预授权、无需人工确认。</span>
-      </div>
-      <div class="row">
-        <label class="lbl">资源源</label>
-        <select id="cfgAutoSource">
-          <option value="jackett">Jackett（默认·体积准·与「搜索资源」同源）</option>
-          <option value="sukebei">sukebei.nyaa.si（直连免配置·体积靠解析）</option>
-        </select>
-        <label class="chk" style="margin-left:8px"><input type="checkbox" id="cfgAutoFallback"> 无精确匹配时回退另一源</label>
-      </div>
-      <div class="row">
-        <label class="chk"><input type="checkbox" id="cfgAutoPreferLargest"> 优先下载最大文件(最清晰)版本</label>
-        <label class="lbl" style="margin-left:8px">体积下限(MB)</label>
-        <input type="number" id="cfgAutoMinSize" min="0" step="50" style="width:80px" title="已知体积低于此的种子不选(堵小样片);体积未知不受限;0=不限">
-        <label class="lbl" style="margin-left:8px">发现条数</label>
-        <input type="number" id="cfgAutoDiscover" min="1" max="200" style="width:80px">
-        <span class="hint">同番号多版本时选体积最大的种子；发现条数=每轮抓多少最新番号(越大越不易漏号，上限200)</span>
-      </div>
-      <div class="row">
-        <label class="lbl">刷新间隔(分钟)</label>
-        <input type="number" id="cfgAutoInterval" min="1" style="width:90px">
-        <label class="lbl" style="margin-left:8px">起点番号下限</label>
-        <input type="number" id="cfgAutoStartNum" min="0" placeholder="如 4925502；0=不限" style="width:160px">
-        <span class="hint">下限=号小于它的不入蓄种池；0=不限，发现窗口里的番号全部纳入</span>
-      </div>
-      <div class="row">
-        <label class="lbl">同时下载上限</label>
-        <input type="number" id="cfgAutoMaxDl" min="0" style="width:70px">
-        <label class="lbl" style="margin-left:8px">做种上限</label>
-        <input type="number" id="cfgAutoMaxSeed" min="0" style="width:70px">
-        <label class="lbl" style="margin-left:8px">做种成熟(分钟)</label>
-        <input type="number" id="cfgAutoSettle" min="0" style="width:90px">
-        <span class="hint">做种超过该分钟数即「成熟」、不再占做种名额，让流水线持续推进</span>
-      </div>
-      <div class="row">
-        <label class="lbl">每轮最多新增</label>
-        <input type="number" id="cfgAutoMaxNew" min="0" style="width:70px">
-        <label class="lbl" style="margin-left:8px">每轮查重数</label>
-        <input type="number" id="cfgAutoCheck" min="0" style="width:70px" title="每轮最多对多少个新番号做 PT 站查重(控 M-Team 调用量)">
-        <label class="lbl" style="margin-left:8px">每轮搜磁力数</label>
-        <input type="number" id="cfgAutoFind" min="0" style="width:70px" title="每轮最多对多少个查重通过的番号搜磁力(控资源源调用量)">
-        <label class="lbl" style="margin-left:8px">蓄种保留(天)</label>
-        <input type="number" id="cfgAutoKeepDays" min="0" style="width:70px" title="查重通过但持续搜不到磁力的番号，留池超此天数即剔除;0=永不剔除">
-        <span class="hint">每轮最多新增防突增；查重/搜磁力条数限调用量；蓄种保留=小号等磁力的最长天数</span>
-      </div>
-      <div class="row" style="align-items:flex-start">
-        <label class="lbl">运行状态</label>
-        <div style="flex:1">
-          <div id="autoStatus" class="hint" style="line-height:1.7">未加载</div>
-          <div style="margin-top:6px;display:flex;gap:8px">
-            <button class="btn" type="button" onclick="autoRunOnce()">立即跑一轮</button>
-            <button class="btn" type="button" onclick="autoReset()">重置起点</button>
-            <button class="btn" type="button" onclick="loadAutoStatus()">刷新状态</button>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -439,6 +378,83 @@
       <span class="msg" id="saveMsg" style="margin-top:0"></span>
     </div>
   </div>
+
+  <!-- 自动发布（FC2 全自动发种，独立设置页） -->
+  <div class="pane" id="pane-autopilot">
+    <div class="group">
+      <h3>FC2 全自动发种（V1.5.1）</h3>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="cfgAutoEnabled"> 启用 FC2 全自动发种</label>
+        <span class="hint">后台定时抓 FC2 最新番号→资源搜索(严格番号匹配)→自动入队→走自动发布。入队任务已预授权、无需人工确认。<b>发布参数/做种停止等通用项仍在「发种设置」页配置。</b></span>
+      </div>
+      <div class="row">
+        <label class="lbl">资源源</label>
+        <select id="cfgAutoSource">
+          <option value="jackett">Jackett（默认·体积准·与「搜索资源」同源）</option>
+          <option value="sukebei">sukebei.nyaa.si（直连免配置·体积靠解析）</option>
+        </select>
+        <label class="chk" style="margin-left:8px"><input type="checkbox" id="cfgAutoFallback"> 无精确匹配时回退另一源</label>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="cfgAutoPreferLargest"> 优先下载最大文件(最清晰)版本</label>
+        <label class="lbl" style="margin-left:8px">体积下限(MB)</label>
+        <input type="number" id="cfgAutoMinSize" min="0" step="50" style="width:80px" title="绝对下限:已知体积低于此的种子不选(堵小样片);体积未知不受限;0=不限">
+        <label class="lbl" style="margin-left:8px">发现条数</label>
+        <input type="number" id="cfgAutoDiscover" min="1" max="200" style="width:80px">
+        <span class="hint">同番号多版本时选体积最大的种子；发现条数=每轮抓多少最新番号(越大越不易漏号，上限200)</span>
+      </div>
+      <div class="row">
+        <label class="lbl">HD发种阈值(MB)</label>
+        <input type="number" id="cfgAutoPubMinSize" min="0" step="128" style="width:90px" title="最佳种子体积低于此则暂不发、留池等大文件(新番常小文件先出);0=不启用(找到即发)。1024≈1G">
+        <label class="lbl" style="margin-left:8px">等大文件轮数</label>
+        <input type="number" id="cfgAutoSizeWait" min="0" style="width:80px" title="仅小文件时最多等这么多轮,仍无大文件则按下限发布当前最佳;0=不等(找到即发)">
+        <span class="hint">新番常720p小文件先出、高清后出：低于HD阈值的先攒轮数等大文件，等满轮数仍只有小文件才发(受体积下限约束)</span>
+      </div>
+      <div class="row">
+        <label class="lbl">刷新间隔(分钟)</label>
+        <input type="number" id="cfgAutoInterval" min="1" style="width:90px">
+        <label class="lbl" style="margin-left:8px">起点番号下限</label>
+        <input type="number" id="cfgAutoStartNum" min="0" placeholder="如 4925502；0=不限" style="width:160px">
+        <span class="hint">下限=号小于它的不入蓄种池；0=不限，发现窗口里的番号全部纳入</span>
+      </div>
+      <div class="row">
+        <label class="lbl">同时下载上限</label>
+        <input type="number" id="cfgAutoMaxDl" min="0" style="width:70px">
+        <label class="lbl" style="margin-left:8px">做种上限</label>
+        <input type="number" id="cfgAutoMaxSeed" min="0" style="width:70px">
+        <label class="lbl" style="margin-left:8px">做种成熟(分钟)</label>
+        <input type="number" id="cfgAutoSettle" min="0" style="width:90px">
+        <span class="hint">做种超过该分钟数即「成熟」、不再占做种名额，让流水线持续推进</span>
+      </div>
+      <div class="row">
+        <label class="lbl">每轮最多新增</label>
+        <input type="number" id="cfgAutoMaxNew" min="0" style="width:70px">
+        <label class="lbl" style="margin-left:8px">每轮查重数</label>
+        <input type="number" id="cfgAutoCheck" min="0" style="width:70px" title="每轮最多对多少个新番号做 PT 站查重(控 M-Team 调用量)">
+        <label class="lbl" style="margin-left:8px">每轮搜磁力数</label>
+        <input type="number" id="cfgAutoFind" min="0" style="width:70px" title="每轮最多对多少个查重通过的番号搜磁力(控资源源调用量)">
+        <label class="lbl" style="margin-left:8px">蓄种保留(天)</label>
+        <input type="number" id="cfgAutoKeepDays" min="0" style="width:70px" title="查重通过但持续搜不到磁力的番号，留池超此天数即剔除;0=永不剔除">
+        <span class="hint">每轮最多新增防突增；查重/搜磁力条数限调用量；蓄种保留=小号等磁力的最长天数</span>
+      </div>
+      <div class="row" style="align-items:flex-start">
+        <label class="lbl">运行状态</label>
+        <div style="flex:1">
+          <div id="autoStatus" class="hint" style="line-height:1.7">未加载</div>
+          <div style="margin-top:6px;display:flex;gap:8px">
+            <button class="btn" type="button" onclick="autoRunOnce()">立即跑一轮</button>
+            <button class="btn" type="button" onclick="autoReset()">重置起点</button>
+            <button class="btn" type="button" onclick="loadAutoStatus()">刷新状态</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="save-bar">
+      <button class="btn" onclick="saveAutopilotSettings()">保存自动发布设置</button>
+      <span class="msg" id="autoSaveMsg" style="margin-top:0"></span>
+    </div>
+  </div>
 </main>
 
 <div class="toast" id="toast"></div>
@@ -468,6 +484,7 @@ function switchTab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===name));
   document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('active', p.id==='pane-'+name));
   if (name==='monitor') refreshMonitor();
+  if (name==='autopilot') loadAutoStatus();
 }
 
 // 格式化
@@ -513,6 +530,8 @@ async function loadConfig(){
     $('cfgAutoFallback').checked = c.autopilot_resource_fallback !== false;
     $('cfgAutoPreferLargest').checked = c.autopilot_prefer_largest !== false;
     $('cfgAutoMinSize').value = c.autopilot_min_size_mb ?? 300;
+    $('cfgAutoPubMinSize').value = c.autopilot_publish_min_size_mb ?? 1024;
+    $('cfgAutoSizeWait').value = c.autopilot_size_wait_rounds ?? 3;
     $('cfgAutoDiscover').value = c.autopilot_discover_count ?? 200;
     $('cfgAutoInterval').value = c.autopilot_fc2_interval_minutes ?? 30;
     $('cfgAutoStartNum').value = c.autopilot_fc2_start_number ?? 0;
@@ -573,12 +592,28 @@ async function saveSettings(){
     publish_auto: $('cfgPubAuto').checked,
     dmm_lookup_enabled: $('cfgDmmEnabled').checked,
     publish_dmm_field: $('cfgDmmField').value,
-    // FC2 全自动发种
+    // 注：FC2 全自动发种(autopilot_*)已移到独立「自动发布」页，由 saveAutopilotSettings() 单独提交
+  };
+  const msg = $('saveMsg'); msg.style.color='var(--text-dim)'; msg.textContent='保存中…';
+  try {
+    const r = await fetch(`${API}/api/config`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    const d = await safeJson(r);
+    if (d.success){ msg.style.color='var(--green)'; msg.textContent='✓ 已保存'; setTimeout(()=>msg.textContent='',3000);
+      if (payload.mteam_api_key) setTimeout(checkMteam, 300); }
+    else { msg.style.color='var(--red)'; msg.textContent='保存失败'; }
+  } catch(e){ msg.style.color='var(--red)'; msg.textContent='出错：'+e.message; }
+}
+
+// 自动发布页：只提交 autopilot_* 字段（后端 exclude_none 合并，不影响发种设置页的字段）
+async function saveAutopilotSettings(){
+  const payload = {
     autopilot_fc2_enabled: $('cfgAutoEnabled').checked,
     autopilot_resource_source: $('cfgAutoSource').value,
     autopilot_resource_fallback: $('cfgAutoFallback').checked,
     autopilot_prefer_largest: $('cfgAutoPreferLargest').checked,
     autopilot_min_size_mb: Math.max(0, parseInt($('cfgAutoMinSize').value)||0),
+    autopilot_publish_min_size_mb: Math.max(0, parseInt($('cfgAutoPubMinSize').value)||0),
+    autopilot_size_wait_rounds: Math.max(0, parseInt($('cfgAutoSizeWait').value)||0),
     autopilot_discover_count: Math.max(1, Math.min(200, parseInt($('cfgAutoDiscover').value)||200)),
     autopilot_fc2_interval_minutes: Math.max(1, parseInt($('cfgAutoInterval').value)||30),
     autopilot_fc2_start_number: Math.max(0, parseInt($('cfgAutoStartNum').value)||0),
@@ -590,14 +625,16 @@ async function saveSettings(){
     autopilot_find_per_round: Math.max(0, parseInt($('cfgAutoFind').value)||0),
     autopilot_pool_keep_days: Math.max(0, parseInt($('cfgAutoKeepDays').value)||0),
   };
-  const msg = $('saveMsg'); msg.style.color='var(--text-dim)'; msg.textContent='保存中…';
+  const msg = $('autoSaveMsg'); if (msg){ msg.style.color='var(--text-dim)'; msg.textContent='保存中…'; }
   try {
     const r = await fetch(`${API}/api/config`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     const d = await safeJson(r);
-    if (d.success){ msg.style.color='var(--green)'; msg.textContent='✓ 已保存'; setTimeout(()=>msg.textContent='',3000);
-      if (payload.mteam_api_key) setTimeout(checkMteam, 300); }
-    else { msg.style.color='var(--red)'; msg.textContent='保存失败'; }
-  } catch(e){ msg.style.color='var(--red)'; msg.textContent='出错：'+e.message; }
+    if (msg){
+      if (d.success){ msg.style.color='var(--green)'; msg.textContent='✓ 已保存'; setTimeout(()=>msg.textContent='',3000); }
+      else { msg.style.color='var(--red)'; msg.textContent='保存失败'; }
+    }
+    return d;
+  } catch(e){ if (msg){ msg.style.color='var(--red)'; msg.textContent='出错：'+e.message; } }
 }
 
 // ── FC2 全自动发种：状态/控制 ──
@@ -621,7 +658,7 @@ async function loadAutoStatus(){
 async function autoRunOnce(){
   const el = $('autoStatus'); if (el) el.textContent = '正在跑一轮…';
   try {
-    await saveSettings();   // 先存设置，确保用最新参数
+    await saveAutopilotSettings();   // 先存自动发布设置，确保用最新参数
     const r = await fetch(`${API}/api/autopilot/run-once`, {method:'POST'});
     const d = await safeJson(r);
     if (!d.success){ alert('跑一轮失败：'+(d.error||'')); }
