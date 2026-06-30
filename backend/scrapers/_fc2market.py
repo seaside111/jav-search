@@ -214,7 +214,7 @@ def _card(num: str, cover: str, title: str) -> dict:
         "code": code,
         "title": (title or "").strip() or code,
         "cover": cover or _missav.cover_url(num),   # 卖场真封面优先，无则 fourhoi 兜底
-        "url": f"https://fc2ppvdb.com/articles/{num}",  # 点开→详情(MissAV 补全)
+        "url": f"https://fc2cmadb.com/articles/{num}",  # 点开→详情(按番号走 MissAV 补全，域名仅作番号载体)
         "source": SOURCE,
         "release_date": "", "duration": "", "director": "", "studio": "",
         "label": LABEL, "series": "", "score": "", "score_count": "",

@@ -1,8 +1,9 @@
 """
 FC2-PPV 刮削器（V1.4.3 新增数据源）
 
-数据源：fc2ppvdb.com —— FC2-PPV 专用数据库，字段最规整（番号/标题/封面/女优/卖家/
-        贩卖日/收录时间/标签/马赛克有无）。
+数据源：fc2ppvdb.com（V1.5.1 起 302 迁到 fc2cmadb.com，Inertia SPA）—— FC2-PPV 专用
+        数据库。**现已退居兜底**：主力发现源是 sukebei + FC2 官方卖场（见 get_latest），
+        详情/标题/样品图走 MissAV，官图走卖场；本站仅用于「关键词搜索」与「最新兜底」。
 
 与 JavBus 系（avsox/avmoo 复用 _javbus_base）完全不同：fc2ppvdb 是 Laravel + Tailwind
 站点，且强制 Cloudflare Turnstile 人机验证——直连只能拿到验证页。因此本模块复用
@@ -27,7 +28,12 @@ from . import _fc2market
 from ._fsgate import (flaresolverr_request as _fs_request, discover_auto as _fs_discover,
                       PRIO_DETAIL, PRIO_SEARCH, PRIO_LATEST)
 
-FC2_BASE = "https://fc2ppvdb.com"
+# V1.5.1：源站 fc2ppvdb.com 已 302 迁到新站 fc2cmadb.com（Laravel + Inertia SPA）。
+# 直接指向终点域名：省去重定向、让 fc2_cookie 落到正确域、诊断/兜底都打实站。
+# 新站仍保留 /articles/{番号} 链接结构，故 _parse_list 的 DOM 解析无需改即可命中番号+标题
+# （封面在新站 SSR 是占位图，但封面本就由卖场/MissAV 那层接管，不依赖这里）。
+# 注意：新站已**禁用女优搜索**、关键词搜索参数也变（stext 失效）——见 search_list 备注。
+FC2_BASE = "https://fc2cmadb.com"
 SOURCE = "FC2"
 
 # FC2 首页最新「条数」硬上限。实测 sukebei 单源就有 300+ 唯一番号（按需翻页、直连快），
@@ -801,17 +807,15 @@ async def search_list(query: str, mode: str, proxy: Optional[str] = None,
             return [detail]
         return []
 
-    # 关键词 / 女优：站内搜索
-    from urllib.parse import quote
-    kw = quote(q)
-
-    def build(page):
-        base = f"{FC2_BASE}/search?stext={kw}"
-        return base if page == 1 else f"{base}&page={page}"
-
-    items = await _fetch_list_pages(build, proxy, max_results, max_pages=10,
-                                    priority=PRIO_SEARCH)
-    return await _enrich_list_missav(items, proxy)
+    # 关键词 / 女优：FC2 **仅支持番号搜索**（V1.5.1 实测，关键词/女优一律返回空）。
+    # 原因：FC2 关键词搜索没有轻量公开数据源——
+    #   · 旧站 fc2ppvdb 迁到 fc2cmadb(SPA) 后搜索参数变更、且禁用女优搜索；
+    #   · 卖场 /search/?q= 是登录/付费会员墙（匿名及普通登录均被弹 id.fc2.com?ref=payarticle）；
+    #   · MissAV 仅按番号取详情、无关键词搜索。
+    # FC2 为素人内容、关键词搜索价值低，主用途是番号搜索 + 最新浏览 + autopilot。
+    # 全局搜索是多源合并：关键词/女优搜索时 FC2 这一路返回空（不贡献、不报错），
+    # 其它源(JavBus/JavDB…)照常返回；FC2 番号搜索仍在上方 looks_like_code 正常参与。
+    return []
 
 
 # ──────────────────────────────────────────────
@@ -1257,7 +1261,7 @@ async def diagnose(proxy: Optional[str] = None) -> dict:
         message = ("返回的是登录页：该出口 IP 被要求登录。可在设置填入浏览器登录后导出的 "
                    "fc2ppvdb Cookie，或更换出口节点。")
     elif err:
-        message = f"请求失败：{err}。检查代理与 FlareSolverr 是否可访问 fc2ppvdb.com。"
+        message = f"请求失败：{err}。检查代理与 FlareSolverr 是否可访问 fc2cmadb.com。"
     else:
         message = "未解析到条目，页面结构可能变化或被拦截（见下方页面回显）。"
 

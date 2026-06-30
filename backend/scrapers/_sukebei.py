@@ -112,7 +112,7 @@ def _card(num: str, raw_title: str) -> dict:
         "code": code,
         "title": title or code,
         "cover": _missav.cover_url(num),          # fourhoi 确定性封面，零额外请求
-        "url": f"https://fc2ppvdb.com/articles/{num}",  # 点开→fc2ppvdb 详情(对新号按需可拉)
+        "url": f"https://fc2cmadb.com/articles/{num}",  # 点开→按番号走 MissAV 详情(域名仅作番号载体)
         "source": SOURCE,
         "release_date": "",
         "duration": "",
