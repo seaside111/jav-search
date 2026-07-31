@@ -677,14 +677,62 @@ async def _download_image(url: str, proxy: Optional[str], referer: str) -> Optio
     return None
 
 
+def _merge_actor_avatars(movie: dict, source_actors: list) -> int:
+    """Fill missing avatar URLs by actor name without replacing existing metadata."""
+    def key(value: str) -> str:
+        return re.sub(r"[\s・·._-]+", "", (value or "")).casefold()
+
+    avatars = {
+        key(actor.get("name", "")): actor.get("avatar", "").strip()
+        for actor in (source_actors or [])
+        if actor.get("name") and (actor.get("avatar") or "").startswith("http")
+    }
+    filled = 0
+    for actor in movie.get("actors") or []:
+        if (actor.get("avatar") or "").startswith("http"):
+            continue
+        avatar = avatars.get(key(actor.get("name", "")))
+        if avatar:
+            actor["avatar"] = avatar
+            filled += 1
+    return filled
+
+
+async def _fill_actor_avatars(movie: dict, code: str, config: dict,
+                              proxy: Optional[str]) -> int:
+    """Use a JavBus detail lookup when metadata has actor names but no portraits."""
+    if not config.get("scrape_actor_images_enabled", False):
+        return 0
+    actors = movie.get("actors") or []
+    if not actors or all((a.get("avatar") or "").startswith("http") for a in actors):
+        return 0
+    try:
+        from scrapers import enrich
+        candidates = await search(query=code, mode=SEARCH_MODE_CODE, proxy=proxy,
+                                  sources=["javbus"], max_results=5)
+        details = await enrich(candidates[:2], proxy=proxy) if candidates else []
+        filled = 0
+        for detail in details:
+            if detail:
+                filled += _merge_actor_avatars(movie, detail.get("actors") or [])
+        if filled:
+            _log(f"演员头像补查完成：{code}（从 JavBus 补全 {filled} 个头像地址）")
+        else:
+            _log(f"演员头像补查未找到可用头像：{code}")
+        return filled
+    except Exception as e:
+        _log(f"演员头像补查失败（继续保存现有刮削结果）：{code}: {e}")
+        return 0
+
+
 async def _save_actor_images(movie: dict, config: dict, proxy: Optional[str],
                              media_folder: Optional[Path] = None) -> int:
-    """先缓存到影片旁 .actors，再可选同步到 Emby metadata/people。"""
+    """先缓存到影片旁可见的 actors 目录，再可选同步到 Emby metadata/people。"""
     if not config.get("scrape_actor_images_enabled", False):
         return 0
     root_value = (config.get("scrape_actor_images_dir") or "").strip()
     root = Path(root_value) if root_value else None
-    local_root = media_folder / ".actors" if media_folder else None
+    local_root = media_folder / "actors" if media_folder else None
     saved = 0
     available = 0
     for actor in movie.get("actors") or []:
@@ -717,7 +765,7 @@ async def _save_actor_images(movie: dict, config: dict, proxy: Optional[str],
         except Exception as e:
             _log(f"演员头像保存失败 {name}: {e}")
     if saved:
-        where = "影片 .actors 缓存"
+        where = "影片 actors 缓存"
         if root:
             where += f"，并同步到 Emby people：{root}"
         else:
@@ -827,10 +875,21 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
 
     status = _get_file_status(path, code)
     if not overwrite and status["has_nfo"] and status["has_cover"]:
-        _log(f"已存在 NFO 和封面，跳过刮削：{code}")
         existing = _read_existing_nfo_metadata(path, code)
+        actor_images_saved = 0
+        if config.get("scrape_actor_images_enabled", False) and existing.get("actors"):
+            existing_movie = {"actors": existing["actors"]}
+            proxy = config.get("proxy") or None
+            await _fill_actor_avatars(existing_movie, code, config, proxy)
+            actor_images_saved = await _save_actor_images(
+                existing_movie, config, proxy, path.parent)
+            existing["actors"] = existing_movie["actors"]
+            _log(f"NFO 和封面已存在，已补查演员头像：{code}（保存 {actor_images_saved} 张）")
+        else:
+            _log(f"已存在 NFO 和封面，跳过刮削：{code}")
         return {"success": True, "skipped": True, "filepath": filepath, "code": code,
-                "reason": "NFO 和封面已存在", **existing}
+                "reason": "NFO 和封面已存在", "actor_images_saved": actor_images_saved,
+                **existing}
 
     proxy = config.get("proxy") or None
     provider = (config.get("scrape_translate_provider")
@@ -881,6 +940,10 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                     _log(f"详情补全完成：{code}（演员 {len(movie.get('actors') or [])} 人）")
             except Exception as e:
                 _log(f"详情补全失败 {code}: {e}")
+
+    # NFO 中已有演员姓名但缺少头像时，额外从 JavBus 详情页按姓名补齐头像。
+    # 必须在生成 NFO 前执行，这样 <thumb> 与本地 actors 缓存保持一致。
+    await _fill_actor_avatars(movie, code, config, proxy)
 
     # ── 标题/简介翻译 ──
     # 番号（字母+数字）不翻译，仅作前缀；只对真正的日文片名/简介长句翻译。
@@ -1164,15 +1227,16 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
             _log(f"归档提示：未找到附属文件 {dst_name}")
 
     # 3) 演员头像本地缓存始终随影片归档；它是保底缓存，不依赖 Emby 全局 people 映射。
-    actors_src = folder / ".actors"
-    if actors_src.is_dir():
-        actors_dst = target_dir / ".actors"
+    # 新版本使用可见的 actors；旧版 .actors 也合并进去，避免升级后丢失缓存。
+    for actors_src in (folder / "actors", folder / ".actors"):
+      if actors_src.is_dir():
+        actors_dst = target_dir / "actors"
         actors_dst.mkdir(parents=True, exist_ok=True)
         for actor_img in actors_src.iterdir():
             if not actor_img.is_file():
                 continue
             if _transfer(actor_img, actors_dst / actor_img.name, sub_mode):
-                done.append(f".actors/{actor_img.name}")
+                done.append(f"actors/{actor_img.name}")
 
     how = {"move": "移动", "copy": "复制", "hardlink": "硬链接"}.get(mode, mode)
     _log(f"归档（{how}）：{len(done)} 个文件 → {target_dir} （{', '.join(done)}）")
@@ -1251,6 +1315,59 @@ def _under_any(path: Path, roots: set) -> bool:
         if p == r or r in p.parents:
             return True
     return False
+
+
+def _path_key(value: str) -> str:
+    """下载器路径统一为小写 POSIX 形式，仅用于跨容器路径匹配。"""
+    return re.sub(r'/+', '/', (value or '').replace('\\', '/').strip('/')).lower()
+
+
+def _match_downloader_torrent(video_path: Path, watch_dir: Path,
+                              torrents: list) -> Optional[dict]:
+    """按相对路径、任务名、content_path 末级和 TR 文件清单匹配所属任务。
+
+    下载器与本容器通常使用不同的挂载前缀，因此不比较绝对路径前缀。
+    """
+    try:
+        relative = video_path.resolve().relative_to(watch_dir.resolve())
+        rel = _path_key(str(relative))
+    except Exception:
+        rel = _path_key(video_path.name)
+    if not rel:
+        return None
+    parts = rel.split('/')
+    first, filename = parts[0], parts[-1]
+    for torrent in torrents or []:
+        name = _path_key(torrent.get("name", ""))
+        content_name = _path_key(Path(torrent.get("content_path", "")).name)
+        file_names = [_path_key(f) for f in (torrent.get("files") or []) if f]
+        # 单文件任务：任务名通常就是完整文件名。
+        if name and (rel == name or (len(parts) == 1 and filename == name)):
+            return torrent
+        # 多文件任务：监控目录下第一层一般就是 torrent name/content_path 末级。
+        if len(parts) > 1 and first in {name, content_name} - {""}:
+            return torrent
+        # Transmission 可直接返回 torrent 内相对文件清单。
+        if any(rel == f or rel.endswith('/' + f) or f.endswith('/' + rel)
+               for f in file_names):
+            return torrent
+    return None
+
+
+async def _download_state_snapshot(config: dict) -> tuple[bool, list]:
+    """返回（是否可安全依赖下载器状态，任务列表）。
+
+    已配置但连接失败时返回 False：调用方必须暂停本轮，不能降级用文件大小猜测。
+    未配置下载器时返回 True, []，允许手动文件继续走静置兜底。
+    """
+    import downloader
+    if not downloader.is_configured(config):
+        return True, []
+    status = await downloader.get_status(config)
+    if not status.get("online"):
+        _log(f"下载器状态不可用，暂停本轮自动处理：{status.get('message', '连接失败')}")
+        return False, []
+    return True, await downloader.list_torrents(config)
 
 
 async def _process_completed_file(video_path: Path, config: dict) -> dict:
@@ -1372,6 +1489,14 @@ async def _scan_once(config: dict) -> int:
         pub_active = set()
         pub_paths = set()
 
+    state_ok, torrent_tasks = await _download_state_snapshot(config)
+    if not state_ok:
+        _monitor_state["message"] = "下载器状态不可用，已暂停自动处理以防提前规整"
+        return 0
+    if torrent_tasks:
+        done_count = sum(1 for task in torrent_tasks if task.get("completed"))
+        _log(f"已读取下载器任务状态：共 {len(torrent_tasks)} 个，已完成 {done_count} 个")
+
     _log(f"开始扫描监控目录：{watch}（归档目录：{out_dir or '未配置'}）")
     for vf in _iter_video_files(watch_dir):
         n_total += 1
@@ -1397,8 +1522,16 @@ async def _scan_once(config: dict) -> int:
                 n_publish += 1
                 _size_history.pop(fp, None)
                 continue
+        torrent_task = _match_downloader_torrent(vf, watch_dir, torrent_tasks)
+        if torrent_task and not torrent_task.get("completed", False):
+            n_waiting += 1
+            _size_history.pop(fp, None)
+            progress = float(torrent_task.get("progress") or 0.0) * 100
+            _log(f"下载器报告任务未完成，跳过：{vf.name}（{progress:.1f}% / "
+                 f"状态 {torrent_task.get('state', '未知')}）")
+            continue
         # 仍有 qB 未完成分片标记 → 正在下载
-        if _is_incomplete(vf):
+        if not torrent_task and _is_incomplete(vf):
             n_incomplete += 1
             _size_history.pop(fp, None)
             continue
@@ -1461,25 +1594,29 @@ async def _scan_once(config: dict) -> int:
             _log(f"文件过小忽略：{vf.name}（{round(size/1024/1024,1)}MB < {min_bytes//1024//1024}MB）")
             continue
 
-        # 完成判定（无 .!qB 前提下，满足任一即视为下载完成）：
-        #   a) 静置：mtime 已超过 settle_seconds 不再写入 → 立即处理（最快，且适配手动放入的文件）
-        #   b) 兜底：大小连续 stable_needed 次扫描不变（应对 mtime 不可靠的网络存储）
-        settled_by_mtime = age >= settle_seconds
-        hist = _size_history.get(fp)
-        if hist and hist[0] == size:
-            hist[1] += 1
+        if torrent_task:
+            # 属于下载器任务时，只认下载器 API 的 completed/progress/amount_left，
+            # 文件大小、mtime、临时后缀都不参与完成判断（兼容预分配和关闭临时后缀）。
+            reason = (f"下载器报告完成，状态 {torrent_task.get('state', '未知')}，"
+                      f"剩余 {int(torrent_task.get('amount_left') or 0)} 字节")
+            _size_history.pop(fp, None)
         else:
-            _size_history[fp] = [size, 1]
-        stable_count = _size_history[fp][1]
-        settled_by_size = stable_count >= stable_needed
-
-        if not (settled_by_mtime or settled_by_size):
-            n_waiting += 1
-            _log(f"等待下载完成：{vf.name}（{int(age)}s 前写入 < {settle_seconds}s；"
-                 f"大小稳定 {stable_count}/{stable_needed}）")
-            continue
-
-        reason = f"静置 {int(age)}s" if settled_by_mtime else f"大小稳定 {stable_count}次"
+            # 只有不属于任何下载器任务的手动文件，才允许静置/大小稳定兜底。
+            settled_by_mtime = age >= settle_seconds
+            hist = _size_history.get(fp)
+            if hist and hist[0] == size:
+                hist[1] += 1
+            else:
+                _size_history[fp] = [size, 1]
+            stable_count = _size_history[fp][1]
+            settled_by_size = stable_count >= stable_needed
+            if not (settled_by_mtime or settled_by_size):
+                n_waiting += 1
+                _log(f"等待手动文件写入完成：{vf.name}（{int(age)}s 前写入；"
+                     f"大小稳定 {stable_count}/{stable_needed}）")
+                continue
+            reason = (f"手动文件静置 {int(age)}s" if settled_by_mtime
+                      else f"手动文件大小稳定 {stable_count}次")
         _log(f"判定下载完成（{reason}），准备处理：{vf.name}（{round(size/1024/1024,1)}MB）")
         _monitor_state["message"] = f"正在刮削 {vf.name}"
         rec = None

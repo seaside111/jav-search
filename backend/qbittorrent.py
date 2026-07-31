@@ -375,6 +375,12 @@ async def get_version(qb_url: str, username: str, password: str,
             return {"online": False, "message": str(e)}
 
 
+def _torrent_completed(item: dict) -> bool:
+    """只使用 qB API 进度与剩余字节，不参考磁盘文件大小。"""
+    return (float(item.get("progress") or 0.0) >= 0.999999
+            and int(item.get("amount_left") or 0) == 0)
+
+
 async def list_torrents(qb_url: str, username: str, password: str,
                         timeout: int = 15) -> list:
     """
@@ -404,6 +410,8 @@ async def list_torrents(qb_url: str, username: str, password: str,
                 "seeding_time": int(t.get("seeding_time") or 0),
                 "progress": float(t.get("progress") or 0.0),
                 "state": t.get("state", "") or "",
+                "amount_left": int(t.get("amount_left") or 0),
+                "completed": _torrent_completed(t),
                 "category": t.get("category", "") or "",
                 "upspeed": int(t.get("upspeed") or 0),       # 上传速度 字节/s
                 "uploaded": int(t.get("uploaded") or 0),     # 累计上传 字节

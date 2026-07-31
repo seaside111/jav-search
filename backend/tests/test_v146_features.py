@@ -8,9 +8,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import library
 import qbittorrent
+import transmission
+import main
+from config_manager import DEFAULT_CONFIG
 
 
 class VideoClassificationTests(unittest.TestCase):
+    def test_download_completion_uses_client_api_fields(self):
+        # 即使磁盘已预分配到最终大小，只要下载器进度/剩余字节未完成就必须是 False。
+        self.assertFalse(qbittorrent._torrent_completed({
+            "progress": 0.35, "amount_left": 1024, "size": 10_000_000_000}))
+        self.assertTrue(qbittorrent._torrent_completed({
+            "progress": 1.0, "amount_left": 0, "size": 10_000_000_000}))
+        self.assertFalse(transmission._torrent_completed({
+            "percentDone": 0.8, "leftUntilDone": 2048, "totalSize": 10_000_000_000}))
+        self.assertTrue(transmission._torrent_completed({
+            "percentDone": 1.0, "leftUntilDone": 0, "totalSize": 10_000_000_000}))
+
+    def test_matches_downloader_task_across_mount_prefixes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw)
+            video = watch / "SAN-475" / "part1.mp4"
+            video.parent.mkdir()
+            video.write_bytes(b"x")
+            task = {"name": "SAN-475", "content_path": "/downloads/SAN-475",
+                    "completed": False}
+            self.assertIs(library._match_downloader_torrent(video, watch, [task]), task)
+            tr_task = {"name": "different", "files": ["SAN-475/part1.mp4"],
+                       "completed": False}
+            self.assertIs(library._match_downloader_torrent(video, watch, [tr_task]), tr_task)
+
     def test_keeps_unique_and_large_videos_and_drops_small_ad(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -40,6 +67,12 @@ class VideoClassificationTests(unittest.TestCase):
 
 
 class NamingAndTrackerTests(unittest.TestCase):
+    def test_sukebei_is_default_resource_source(self):
+        self.assertFalse(DEFAULT_CONFIG["jackett_enabled"])
+        paths = {route.path for route in main.app.routes}
+        self.assertIn("/api/resources/search", paths)
+        self.assertIn("/api/jackett/search", paths)
+
     def test_all_actors_folder_name(self):
         name = library._archive_folder_name(
             "ABC-123", "", "", [{"name": "ActorA"}, {"name": "ActorB"}],
@@ -71,7 +104,18 @@ class NamingAndTrackerTests(unittest.TestCase):
             finally:
                 library._download_image = original
             self.assertEqual(count, 1)
-            self.assertEqual((root / ".actors" / "ActorA.jpg").read_bytes(), b"actor-image")
+            self.assertEqual((root / "actors" / "ActorA.jpg").read_bytes(), b"actor-image")
+
+    def test_missing_actor_avatar_is_merged_by_name(self):
+        movie = {"actors": [{"name": "Actor A", "avatar": ""},
+                            {"name": "Actor B", "avatar": "https://old.test/b.jpg"}]}
+        filled = library._merge_actor_avatars(movie, [
+            {"name": "Actor-A", "avatar": "https://new.test/a.jpg"},
+            {"name": "Actor B", "avatar": "https://new.test/b.jpg"},
+        ])
+        self.assertEqual(filled, 1)
+        self.assertEqual(movie["actors"][0]["avatar"], "https://new.test/a.jpg")
+        self.assertEqual(movie["actors"][1]["avatar"], "https://old.test/b.jpg")
 
     def test_archive_includes_case_insensitive_extras_and_actor_cache(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -95,7 +139,7 @@ class NamingAndTrackerTests(unittest.TestCase):
             self.assertTrue((target / "SAN-475.nfo").exists())
             self.assertTrue((target / "SAN-475-poster.jpg").exists())
             self.assertTrue((target / "SAN-475-fanart.jpg").exists())
-            self.assertTrue((target / ".actors" / "ActorA.jpg").exists())
+            self.assertTrue((target / "actors" / "ActorA.jpg").exists())
 
 
 if __name__ == "__main__":

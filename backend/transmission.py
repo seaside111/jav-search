@@ -91,6 +91,12 @@ async def get_version(tr_url: str, username: str, password: str,
         return {"online": False, "message": f"RPC 返回：{(data or {}).get('result', '未知')}"}
 
 
+def _torrent_completed(item: dict) -> bool:
+    """只使用 Transmission RPC 进度与剩余字节，不参考磁盘文件大小。"""
+    return (float(item.get("percentDone") or 0.0) >= 0.999999
+            and int(item.get("leftUntilDone") or 0) == 0)
+
+
 async def list_torrents(tr_url: str, username: str, password: str,
                         timeout: int = 15) -> list:
     """
@@ -102,7 +108,8 @@ async def list_torrents(tr_url: str, username: str, password: str,
         return []
     fields = ["hashString", "name", "downloadDir", "uploadRatio",
               "secondsSeeding", "percentDone", "status", "labels",
-              "rateUpload", "uploadedEver", "rateDownload", "totalSize"]
+              "rateUpload", "uploadedEver", "rateDownload", "totalSize",
+              "leftUntilDone", "files"]
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         data, _sid, err = await _rpc(client, url, _auth(username, password), "",
                                      "torrent-get", {"fields": fields})
@@ -124,6 +131,10 @@ async def list_torrents(tr_url: str, username: str, password: str,
                 "seeding_time": int(t.get("secondsSeeding") or 0),
                 "progress": float(t.get("percentDone") or 0.0),
                 "state": t.get("status"),
+                "amount_left": int(t.get("leftUntilDone") or 0),
+                "completed": _torrent_completed(t),
+                "files": [f.get("name", "") for f in (t.get("files") or [])
+                          if isinstance(f, dict) and f.get("name")],
                 "category": labels[0] if labels else "",
                 "upspeed": int(t.get("rateUpload") or 0),
                 "uploaded": int(t.get("uploadedEver") or 0),

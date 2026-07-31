@@ -775,7 +775,8 @@ async def api_fc2_test():
         raise HTTPException(status_code=500, detail=f"FC2 诊断失败: {str(e)}")
 
 
-@app.post("/api/jackett/search")
+@app.post("/api/resources/search")
+@app.post("/api/jackett/search")  # 旧前端/API 兼容
 async def api_jackett_search(req: JackettSearchRequest):
     """
     资源搜索（磁力/种子）。
@@ -812,7 +813,10 @@ async def api_jackett_search(req: JackettSearchRequest):
         else:
             results = await search_sukebei(query, proxy=proxy)
             source = "sukebei"
-        return {"success": True, "total": len(results), "results": results, "source": source}
+        return {"success": True, "total": len(results), "results": results,
+                "source": source, "source_url": "https://sukebei.nyaa.si/"
+                if source.startswith("sukebei") else jackett_url,
+                "jackett_optional": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"资源搜索失败: {str(e)}")
 

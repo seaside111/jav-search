@@ -801,12 +801,17 @@
         </div>
       </div>
 
-      <!-- Jackett -->
+      <!-- 资源搜索：内置 Sukebei + 可选 Jackett -->
       <div class="settings-pane" id="pane-jackett">
         <div class="setting-group">
-          <h3>Jackett 资源搜索</h3>
+          <h3>资源搜索来源</h3>
           <div class="setting-row">
-            <label class="setting-label">启用 Jackett</label>
+            <label class="setting-label">内置默认来源</label>
+            <input class="setting-input" type="text" value="https://sukebei.nyaa.si/" readonly>
+            <span class="setting-hint"><strong>无需配置 Jackett 即可使用。</strong>点击影片的“搜索资源”时，默认直接按番号搜索 Sukebei，并返回磁力链、种子数、大小和画质信息；网络访问需要代理时复用“常规设置”里的全局代理。</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">可选增强：Jackett</label>
             <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgJackettEnabled"> 资源搜索使用 Jackett（默认关）</label>
             <span class="setting-hint"><strong>默认关闭：资源搜索直接用 sukebei.nyaa.si</strong>（免配置、磁力齐全）。开启后 Jackett 优先、Jackett 无结果或失败时自动用 sukebei 兜底</span>
           </div>
@@ -1004,7 +1009,7 @@
           <div class="setting-row">
             <label class="setting-label">静置判定（秒）</label>
             <input class="setting-input" id="cfgScrapeSettle" type="number" value="60" min="5" max="1800" step="5">
-            <span class="setting-hint">文件超过这么久没再写入即判定下载完成（手动放入的文件也据此快速识别）</span>
+            <span class="setting-hint">仅用于<b>不属于下载器任务的手动文件</b>。qBittorrent/Transmission 任务必须由下载器 API 明确报告 100% 且剩余 0 字节，预分配文件不会被提前处理。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">最小文件大小（MB）</label>
@@ -1019,12 +1024,12 @@
           <div class="setting-row">
             <label class="setting-label">演员头像（Emby）</label>
             <label class="source-chk"><input type="checkbox" id="cfgActorImagesEnabled"> 开启演员头像下载与本地缓存</label>
-            <span class="setting-hint">开启后先保存到每部影片文件夹的 <b>.actors/演员名.jpg</b>，即使下面路径留空也不会跳过。</span>
+            <span class="setting-hint">开启后会先按番号补查头像，并保存到每部影片文件夹的可见目录 <b>actors/演员名.jpg</b>；即使下面路径留空也不会跳过。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">Emby metadata/people 路径（可选）</label>
             <input class="setting-input" id="cfgActorImagesDir" type="text" placeholder="例如 /emby-metadata/people；可留空">
-            <span class="setting-hint">填写容器内路径后，会额外保存 <b>演员名/folder.jpg</b> 和 <b>portrait.jpg</b>。Docker 中需把 Emby 的 metadata/people 宿主机目录映射到这里；留空则仅保存影片内 .actors 缓存。</span>
+            <span class="setting-hint">填写容器内路径后，会额外保存 <b>演员名/folder.jpg</b> 和 <b>portrait.jpg</b>。Docker 中需把 Emby 的 metadata/people 宿主机目录映射到这里；留空则仅保存影片内 actors 缓存。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
@@ -1599,21 +1604,21 @@ async function searchJackett(idx, query, btn) {
 
   // 打开抽屉，显示加载中
   drawer.classList.add('open');
-  list.innerHTML = `<div class="drawer-msg"><span class="drawer-spinner"></span>正在通过 Jackett 搜索 <strong>${escHtml(query)}</strong>…</div>`;
+  list.innerHTML = `<div class="drawer-msg"><span class="drawer-spinner"></span>正在搜索资源 <strong>${escHtml(query)}</strong>（默认 Sukebei）…</div>`;
   filter.innerHTML = '';
   count.textContent = '…';
   btn.classList.add('loading');
   btn.innerHTML = `<svg class="sp" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="animation:spin .7s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> 搜索中…`;
 
   try {
-    const resp = await fetch(`${API}/api/jackett/search`, {
+    const resp = await fetch(`${API}/api/resources/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query }),
     });
     const data = await safeJson(resp);
 
-    if (!data.success) throw new Error(data.detail || 'Jackett 搜索失败');
+    if (!data.success) throw new Error(data.detail || '资源搜索失败');
 
     jackettCache[idx] = data.results || [];
     jackettFilters[idx] = 'all';
@@ -1622,15 +1627,15 @@ async function searchJackett(idx, query, btn) {
     const n = jackettCache[idx].length;
     btn.classList.remove('loading');
     btn.classList.add('has-results');
+    const sourceLabel = String(data.source || '').startsWith('sukebei') ? 'Sukebei' : 'Jackett';
+    btn.title = `资源来源：${sourceLabel}`;
     btn.innerHTML = `<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> ${n} 个资源`;
 
   } catch (err) {
     btn.classList.remove('loading');
     btn.innerHTML = `<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> 搜索资源`;
 
-    const msg = err.message.includes('未配置')
-      ? '请先在设置中配置 Jackett 地址和 API Key'
-      : err.message;
+    const msg = err.message;
     list.innerHTML = `<div class="drawer-msg" style="color:var(--red)">⚠ ${escHtml(msg)}</div>`;
     count.textContent = '0';
   }
