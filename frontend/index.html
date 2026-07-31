@@ -568,7 +568,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.5</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6-beta</div>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="3"/>
@@ -894,6 +894,16 @@
               <input type="checkbox" id="cfgQbPaused"> 推送后暂停（先不开始下载）
             </label>
           </div>
+          <div class="setting-row">
+            <label class="source-chk"><input type="checkbox" id="cfgTrackersAuto" checked> 自动更新公共 Tracker</label>
+            <span class="setting-hint">约 7 天刷新一次在线 best 列表；失败继续使用旧缓存或内置兜底。</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">自定义 Tracker</label>
+            <textarea class="setting-input" id="cfgTrackers" rows="3" placeholder="留空＝自动；每行一个" style="resize:vertical;font-family:monospace"></textarea>
+            <button class="jackett-test-btn" style="margin-left:0" onclick="refreshTrackers()">刷新并查看</button>
+            <span class="setting-hint" id="trackersStatus">—</span>
+          </div>
         </div>
         <div class="setting-group">
           <h3>Transmission</h3>
@@ -928,8 +938,8 @@
         <div class="setting-group">
           <h3>刮削 &amp; 归档（全局统一·所有文件通用）</h3>
           <div class="setting-hint" style="margin:-4px 0 10px;line-height:1.7">
-            只有<b>刮削</b>、<b>归档</b>两个总开关，<b>发种文件</b>和<b>你手动放进下载目录的文件</b>一视同仁、同一标准处理。<br>
-            后台会自动监控下载目录——只要刮削或归档任一开启就生效，无需单独的监控开关；两个都关＝完全不处理。
+            <b>刮削</b>、<b>规整</b>、<b>归档</b>三个独立开关。刮削写 NFO/封面；规整改名并保守清理广告；归档负责落入媒体库。<br>
+            后台会自动监控下载目录——任一开启即生效；三个都关＝完全不处理。
             （发种任务正在做种的文件会自动跳过，绝不抢。）
           </div>
           <div class="jackett-status-row">
@@ -939,9 +949,21 @@
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
-              <input type="checkbox" id="cfgScrapeMetaEnabled" checked> 刮削（改名番号 + 写 NFO/封面）
+              <input type="checkbox" id="cfgScrapeMetaEnabled" checked> 刮削（写 NFO/封面）
             </label>
-            <span class="setting-hint">开：视频改名为<b>番号</b>、标题/演员/简介写入 NFO、抓封面（手动放入的文件也自动刮削）；关：保留原文件名、不写 NFO/封面</span>
+            <span class="setting-hint">开：标题、演员、简介写入 NFO 并抓取封面；视频改名和删除广告由“规整”控制。</span>
+          </div>
+          <div class="setting-row">
+            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgScrapeOrganizeEnabled" checked> 规整（改名 + 保守清理广告/赠片）</label>
+            <span class="setting-hint">最大文件、达到保底大小、番号文件及分段文件强制保留；关闭时不删除任何视频。</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">规整后文件夹命名</label>
+            <select class="setting-input" id="cfgFolderNaming">
+              <option value="code">只用番号</option><option value="code_title">番号 + 标题</option><option value="code_actor">番号 + 演员</option>
+            </select>
+            <label class="source-chk"><input type="checkbox" id="cfgFolderTitleTranslate"> 标题用于文件夹时翻译为中文</label>
+            <select class="setting-input" id="cfgFolderActorMode"><option value="first">多人时只用第一位演员</option><option value="all">加入全部演员</option></select>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
@@ -988,6 +1010,16 @@
             <label class="setting-label">最小文件大小（MB）</label>
             <input class="setting-input" id="cfgScrapeMinSize" type="number" value="100" min="0" step="50">
             <span class="setting-hint">小于此大小的视频忽略，避免刮削样板/预告片</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">大文件保底（MB）</label>
+            <input class="setting-input" id="cfgScrapeKeepSize" type="number" value="300" min="1" step="50">
+            <span class="setting-hint">达到此大小的视频一律不作为广告删除。</span>
+          </div>
+          <div class="setting-row">
+            <label class="source-chk"><input type="checkbox" id="cfgActorImagesEnabled"> 下载演员头像到 Emby people 目录</label>
+            <input class="setting-input" id="cfgActorImagesDir" type="text" placeholder="/config/metadata/people">
+            <span class="setting-hint">需映射到 Emby 的 metadata/people；保存 folder.jpg 与 portrait.jpg。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
@@ -2176,6 +2208,8 @@ async function openSettings() {
     document.getElementById('cfgQbSavePath').value = cfg.qb_save_path || '';
     document.getElementById('cfgQbCategory').value = cfg.qb_category || '';
     document.getElementById('cfgQbPaused').checked = !!cfg.qb_paused;
+    document.getElementById('cfgTrackersAuto').checked = cfg.public_trackers_auto_update !== false;
+    document.getElementById('cfgTrackers').value = cfg.public_trackers || '';
     // V1.5 Transmission
     document.getElementById('cfgTrUrl').value      = cfg.tr_url || '';
     document.getElementById('cfgTrUser').value     = cfg.tr_username || '';
@@ -2192,12 +2226,19 @@ async function openSettings() {
     document.getElementById('cfgScrapeInterval').value    = cfg.scrape_interval || 300;
     document.getElementById('cfgScrapeSettle').value      = cfg.scrape_settle_seconds ?? 60;
     document.getElementById('cfgScrapeMinSize').value     = cfg.scrape_min_size_mb ?? 100;
+    document.getElementById('cfgScrapeKeepSize').value    = cfg.scrape_keep_size_mb ?? 300;
     document.getElementById('cfgScrapeTranslate').checked = cfg.scrape_translate_enabled !== false;
     document.getElementById('cfgScrapeMoveOnFail').checked = cfg.scrape_move_on_fail !== false;
     document.getElementById('cfgArchiveMode').value = ['hardlink','copy','move'].includes(cfg.archive_mode) ? cfg.archive_mode : 'hardlink';
     document.getElementById('cfgArchiveByMonth').checked = cfg.archive_by_month !== false;
     // 刮削/归档总开关（兼容旧 publish_* 键）
     document.getElementById('cfgScrapeMetaEnabled').checked = (cfg.scrape_meta_enabled ?? cfg.publish_scrape_enabled) !== false;
+    document.getElementById('cfgScrapeOrganizeEnabled').checked = (cfg.scrape_organize_enabled ?? cfg.scrape_meta_enabled ?? cfg.publish_scrape_enabled) !== false;
+    document.getElementById('cfgFolderNaming').value = ['code','code_title','code_actor'].includes(cfg.scrape_folder_naming) ? cfg.scrape_folder_naming : 'code';
+    document.getElementById('cfgFolderTitleTranslate').checked = !!cfg.scrape_folder_title_translate;
+    document.getElementById('cfgFolderActorMode').value = cfg.scrape_folder_actor_mode === 'all' ? 'all' : 'first';
+    document.getElementById('cfgActorImagesEnabled').checked = !!cfg.scrape_actor_images_enabled;
+    document.getElementById('cfgActorImagesDir').value = cfg.scrape_actor_images_dir || '';
     document.getElementById('cfgArchiveEnabled').checked = (cfg.archive_enabled ?? cfg.publish_archive_enabled) !== false;
     currentProvider = cfg.default_translate_provider || 'baidu';
     // 检测 Jackett 状态
@@ -2234,6 +2275,17 @@ async function checkQbStatus() {
     if (data.online) { dot.classList.add('online'); text.textContent = (data.type === 'transmission' ? '[TR] ' : '[qB] ') + (data.message || '连接正常'); }
     else { dot.classList.add('offline'); text.textContent = data.message || '连接失败'; }
   } catch (e) { dot.classList.add('offline'); text.textContent = '检测出错'; }
+}
+
+async function refreshTrackers() {
+  const el = document.getElementById('trackersStatus');
+  el.textContent = '刷新中…';
+  try {
+    const resp = await fetch(`${API}/api/trackers/refresh`, {method:'POST'});
+    const data = await safeJson(resp);
+    el.textContent = `${data.source_label || data.source} · ${data.count || 0} 个`;
+    if (data.trackers?.length) el.title = data.trackers.join('\n');
+  } catch (e) { el.textContent = '刷新失败：' + e.message; }
 }
 
 // ── 刮削监控状态 ──
@@ -2469,6 +2521,8 @@ async function saveSettings() {
     downloader_type: document.getElementById('cfgDownloaderType').value,
     magnet_upload_limit_kbps: parseInt(document.getElementById('cfgMagnetUpLimit').value, 10) || 0,
     magnet_delete_completed: document.getElementById('cfgMagnetDeleteCompleted').checked,
+    public_trackers_auto_update: document.getElementById('cfgTrackersAuto').checked,
+    public_trackers: document.getElementById('cfgTrackers').value.trim(),
     // V1.4 qBittorrent
     qb_url: document.getElementById('cfgQbUrl').value.trim(),
     qb_username: document.getElementById('cfgQbUser').value.trim(),
@@ -2490,12 +2544,19 @@ async function saveSettings() {
     scrape_interval: Math.max(30, parseInt(document.getElementById('cfgScrapeInterval').value) || 300),
     scrape_settle_seconds: Math.max(5, parseInt(document.getElementById('cfgScrapeSettle').value) || 60),
     scrape_min_size_mb: Math.max(0, parseInt(document.getElementById('cfgScrapeMinSize').value) || 0),
+    scrape_keep_size_mb: Math.max(1, parseInt(document.getElementById('cfgScrapeKeepSize').value) || 300),
     scrape_translate_enabled: document.getElementById('cfgScrapeTranslate').checked,
     scrape_move_on_fail: document.getElementById('cfgScrapeMoveOnFail').checked,
     // V1.5 统一归档（监控 & 发种共用）
     archive_mode: document.getElementById('cfgArchiveMode').value,
     archive_by_month: document.getElementById('cfgArchiveByMonth').checked,
     scrape_meta_enabled: document.getElementById('cfgScrapeMetaEnabled').checked,
+    scrape_organize_enabled: document.getElementById('cfgScrapeOrganizeEnabled').checked,
+    scrape_folder_naming: document.getElementById('cfgFolderNaming').value,
+    scrape_folder_title_translate: document.getElementById('cfgFolderTitleTranslate').checked,
+    scrape_folder_actor_mode: document.getElementById('cfgFolderActorMode').value,
+    scrape_actor_images_enabled: document.getElementById('cfgActorImagesEnabled').checked,
+    scrape_actor_images_dir: document.getElementById('cfgActorImagesDir').value.trim(),
     archive_enabled: document.getElementById('cfgArchiveEnabled').checked,
   };
   currentProvider = payload.default_translate_provider;

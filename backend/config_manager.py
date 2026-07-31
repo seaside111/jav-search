@@ -130,6 +130,7 @@ DEFAULT_CONFIG = {
     "scrape_settle_seconds": 60,         # 文件 mtime 静置超过此秒数即判定下载完成（快速通道）
     "scrape_stable_checks": 2,           # 兜底：大小连续多少次不变视为完成（mtime 不可靠时）
     "scrape_min_size_mb": 100,           # 小于此大小（MB）的视频忽略（样板/预告）
+    "scrape_keep_size_mb": 300,          # 达到此大小一律视为正片，绝不作为广告删除
     "scrape_translate_enabled": True,    # 刮削时是否翻译标题/简介；关闭则直接用日文原标题写入 NFO
     "scrape_translate_provider": "",     # 刮削翻译服务，留空用默认翻译服务
     "scrape_move_on_fail": True,         # 刮削失败也照常归档
@@ -142,6 +143,14 @@ DEFAULT_CONFIG = {
     "archive_by_month": True,            # 归档是否按年月建子目录（归档目录/YYYYMM/番号/），监控 & 发种共用
     # 刮削/归档总开关（监控 & 发种共用，全局唯一）：
     "scrape_meta_enabled": True,         # 刮削：视频改名番号 + 写 NFO/封面；关=保留原文件名、不写 NFO/封面
+    "scrape_organize_enabled": True,     # 规整：视频改名 + 保守清理广告；与刮削独立
+    "scrape_folder_naming": "code",     # code | code_title | code_actor
+    "scrape_folder_title_translate": False,
+    "scrape_folder_actor_mode": "first", # first | all
+    "scrape_actor_images_enabled": False,
+    "scrape_actor_images_dir": "",       # Emby metadata/people 路径
+    "public_trackers": "",               # 用户自定义；每行或逗号一个，非空时覆盖自动列表
+    "public_trackers_auto_update": True,  # 自动抓取在线 best 列表并缓存 7 天
     "archive_enabled": True,             # 归档：刮削/发种成品放进归档目录(供 EMBY)；关=不归档(发种仍原地做种)
 }
 
@@ -185,6 +194,9 @@ def _migrate_unify_archive(config: dict, saved: dict) -> dict:
     # 刮削/归档总开关：从旧的发种专属开关迁移
     if "scrape_meta_enabled" not in saved and "publish_scrape_enabled" in saved:
         config["scrape_meta_enabled"] = saved["publish_scrape_enabled"]
+    if "scrape_organize_enabled" not in saved:
+        config["scrape_organize_enabled"] = saved.get(
+            "scrape_meta_enabled", saved.get("publish_scrape_enabled", True))
     if "archive_enabled" not in saved and "publish_archive_enabled" in saved:
         config["archive_enabled"] = saved["publish_archive_enabled"]
     return config

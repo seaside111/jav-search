@@ -16,7 +16,7 @@ from typing import Optional
 import httpx
 
 # 复用 qbittorrent 里那套公共 tracker 补全逻辑，避免裸磁力卡在「下载元数据」。
-from qbittorrent import _augment_magnet, _fetch_torrent_bytes
+from qbittorrent import _augment_magnet, _current_trackers, _fetch_torrent_bytes
 
 _SESSION_HEADER = "X-Transmission-Session-Id"
 
@@ -145,6 +145,7 @@ async def add_torrent(
     skip_checking: bool = False,  # Transmission 不支持跳过校验，留参保持接口一致
     upload_limit_kbps: int = 0,
     reannounce: bool = True,
+    public_trackers: bool = True,
     timeout: int = 30,
 ) -> dict:
     """
@@ -168,7 +169,7 @@ async def add_torrent(
     if torrent_bytes:
         args["metainfo"] = base64.b64encode(torrent_bytes).decode("ascii")
     elif download_url and download_url.lower().startswith("magnet:"):
-        args["filename"] = _augment_magnet(download_url)
+        args["filename"] = _augment_magnet(download_url) if public_trackers else download_url
     elif download_url:
         # http(s) 种子直链：先后端代取字节，规避 TR 端无法解析 localhost/内网地址
         content = await _fetch_torrent_bytes(download_url, timeout)
@@ -198,6 +199,10 @@ async def add_torrent(
                     "hash": ih, "duplicate": True}
         added = a.get("torrent-added") or {}
         ih = (added.get("hashString") or "").lower()
+        was_magnet = bool(download_url and download_url.lower().startswith("magnet:"))
+        if public_trackers and ih and not was_magnet:
+            await _rpc(client, url, _auth(username, password), sid,
+                       "torrent-set", {"ids": [ih], "trackerAdd": _current_trackers()})
         # 强制 tracker 立即汇报，规避新加种子卡在「工作中却无 peer」。
         if reannounce and ih:
             await _rpc(client, url, _auth(username, password), sid,

@@ -11,14 +11,18 @@ from typing import Optional
 from urllib.parse import quote
 import asyncio
 import base64
+import json
+import os
 import re
+import time
+from pathlib import Path
 import httpx
 
 
 # 公共 BT tracker：JavDB 等站点的磁力链常是「只有 hash 无 tracker」的裸磁力，
 # qB 仅靠 DHT 在群晖 NAT 下常找不到节点 → 一直卡在「下载元数据」。
 # 推送前补上这批稳定的公共 tracker，显著提升找到 peer/取到元数据的成功率。
-_PUBLIC_TRACKERS = [
+_FALLBACK_TRACKERS = [
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://open.tracker.cl:1337/announce",
     "udp://open.demonii.com:1337/announce",
@@ -33,6 +37,92 @@ _PUBLIC_TRACKERS = [
     "udp://tracker-udp.gbitt.info:80/announce",
 ]
 
+_REMOTE_TRACKER_SOURCES = [
+    "https://ngosang.github.io/trackerslist/trackers_best.txt",
+    "https://cdn.jsdelivr.net/gh/ngosang/trackerslist@master/trackers_best.txt",
+    "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt",
+]
+_TRACKERS_TTL = 7 * 24 * 60 * 60
+_trackers_state = {"ts": 0.0, "list": list(_FALLBACK_TRACKERS), "source": "fallback"}
+
+
+def _trackers_file() -> Path:
+    return Path(os.getenv("CONFIG_DIR", "/config")) / "trackers_cache.json"
+
+
+def _parse_trackers(value: str) -> list:
+    found = re.findall(r'(?:udp|https?)://[^\s,]+', value or "", re.I)
+    return list(dict.fromkeys(item.rstrip() for item in found))[:50]
+
+
+def _read_trackers_file():
+    try:
+        data = json.loads(_trackers_file().read_text(encoding="utf-8"))
+        return float(data.get("ts", 0)), _parse_trackers("\n".join(data.get("trackers", [])))
+    except Exception:
+        return 0.0, []
+
+
+async def _fetch_remote_trackers(proxy: Optional[str] = None):
+    async with httpx.AsyncClient(proxy=proxy, timeout=15, follow_redirects=True) as client:
+        for url in _REMOTE_TRACKER_SOURCES:
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+                trackers = _parse_trackers(response.text)
+                if trackers:
+                    return trackers, url
+            except Exception:
+                continue
+    return [], ""
+
+
+async def ensure_trackers_fresh(config: dict, force: bool = False) -> dict:
+    override = _parse_trackers(config.get("public_trackers", ""))
+    if override:
+        _trackers_state.update(ts=time.time(), list=override, source="user")
+        return _trackers_state
+    now = time.time()
+    if (not force and _trackers_state["source"] in ("remote", "file")
+            and now - _trackers_state["ts"] < _TRACKERS_TTL):
+        return _trackers_state
+    if not config.get("public_trackers_auto_update", True):
+        _trackers_state.update(ts=now, list=list(_FALLBACK_TRACKERS), source="fallback")
+        return _trackers_state
+    file_ts, cached = _read_trackers_file()
+    if not force and cached and now - file_ts < _TRACKERS_TTL:
+        _trackers_state.update(ts=file_ts, list=cached, source="file")
+        return _trackers_state
+    trackers, remote = await _fetch_remote_trackers(config.get("proxy") or None)
+    if trackers:
+        _trackers_state.update(ts=now, list=trackers, source="remote")
+        try:
+            path = _trackers_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"ts": now, "source": remote,
+                                        "trackers": trackers}, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+        except Exception:
+            pass
+    elif cached:
+        _trackers_state.update(ts=file_ts, list=cached, source="file")
+    else:
+        _trackers_state.update(ts=now, list=list(_FALLBACK_TRACKERS), source="fallback")
+    return _trackers_state
+
+
+async def refresh_trackers(config: dict) -> dict:
+    state = await ensure_trackers_fresh(config, force=True)
+    labels = {"remote": "在线 best 列表", "file": "本地缓存",
+              "user": "用户自定义", "fallback": "内置兜底"}
+    return {"ok": bool(state["list"]), "count": len(state["list"]),
+            "source": state["source"], "source_label": labels.get(state["source"], state["source"]),
+            "trackers": state["list"]}
+
+
+def _current_trackers() -> list:
+    return _trackers_state["list"] or list(_FALLBACK_TRACKERS)
+
 
 def _augment_magnet(magnet: str) -> str:
     """给磁力链补上公共 tracker（已存在的不重复添加）。非磁力链原样返回。"""
@@ -40,7 +130,7 @@ def _augment_magnet(magnet: str) -> str:
         return magnet
     low = magnet.lower()
     parts = []
-    for tr in _PUBLIC_TRACKERS:
+    for tr in _current_trackers():
         enc = quote(tr, safe="")
         if enc.lower() in low or tr.lower() in low:
             continue
@@ -159,6 +249,17 @@ async def _reannounce(client, qb_url: str, infohash: str) -> None:
     try:
         await client.post(f"{_base(qb_url)}/api/v2/torrents/reannounce",
                           data={"hashes": infohash.lower()},
+                          headers=_headers(qb_url))
+    except Exception:
+        pass
+
+
+async def _add_trackers(client, qb_url: str, infohash: str, trackers: list) -> None:
+    if not infohash or not trackers:
+        return
+    try:
+        await client.post(f"{_base(qb_url)}/api/v2/torrents/addTrackers",
+                          data={"hash": infohash.lower(), "urls": "\n".join(trackers)},
                           headers=_headers(qb_url))
     except Exception:
         pass
@@ -326,6 +427,7 @@ async def add_torrent(
     skip_checking: bool = False,
     upload_limit_kbps: int = 0,
     reannounce: bool = True,
+    public_trackers: bool = True,
     timeout: int = 20,
 ) -> dict:
     """
@@ -376,7 +478,7 @@ async def add_torrent(
                                   "application/x-bittorrent")}
         elif download_url.lower().startswith("magnet:"):
             # 裸磁力补 tracker，避免 qB 卡在「下载元数据」
-            data["urls"] = _augment_magnet(download_url)
+            data["urls"] = _augment_magnet(download_url) if public_trackers else download_url
         else:
             content = await _fetch_torrent_bytes(download_url, timeout)
             if content:
@@ -407,6 +509,9 @@ async def add_torrent(
         # 限速回查、tracker 重新汇报、返回给上层都基于它。
         magnet_ih = _infohash_from_magnet(download_url) if download_url else ""
         real_ih = await _resolve_added_hash(client, qb_url, pre_hashes, magnet_ih)
+        was_magnet = bool(download_url and download_url.lower().startswith("magnet:"))
+        if public_trackers and real_ih and not was_magnet:
+            await _add_trackers(client, qb_url, real_ih, _current_trackers())
 
         # 单种上传限速：add 时 upLimit 对磁力常被忽略（彼时无元数据），且 qB 对未知 hash
         # 也回 200——必须 add 后显式设置并【回查确认】真正落到种子句柄上才算数。

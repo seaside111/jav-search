@@ -13,6 +13,7 @@
   - 后台监控协程 start_monitor()/stop_monitor()，由主程序在启动事件中拉起
 """
 import asyncio
+import difflib
 import json
 import os
 import re
@@ -421,6 +422,68 @@ def _is_extra_video(video_path: Path, watch_dir: str = "") -> bool:
     return False
 
 
+def _norm_stem(stem: str) -> str:
+    return re.sub(r'[^a-z0-9]', '', (stem or '').lower())
+
+
+def _name_similarity(a: str, b: str) -> float:
+    sa, sb = _norm_stem(a), _norm_stem(b)
+    return difflib.SequenceMatcher(None, sa, sb).ratio() if sa and sb else 0.0
+
+
+def _seq_order_key(stem: str, code: str = "") -> Optional[int]:
+    idx = _part_index(stem, code)
+    if idx is not None:
+        return idx
+    s = (stem or '').strip().lower()
+    m = re.search(r'(\d{1,2})\s*$', s)
+    if m:
+        return int(m.group(1))
+    m = re.search(r'(?:^|[^a-z])([a-e])\s*$', s)
+    if m:
+        return ord(m.group(1)) - ord('a') + 1
+    m = re.match(r'\s*(\d{1,2})(?:[^0-9]|$)', s)
+    return int(m.group(1)) if m else None
+
+
+def classify_videos(videos: list, watch_dir: str = "",
+                    min_bytes: int = 100 * 1024 * 1024,
+                    keep_bytes: int = 300 * 1024 * 1024,
+                    sim_threshold: float = 0.6):
+    """保守地划分正片/分段与广告；任何不确定情况优先保留。"""
+    vids = [p for p in (videos or []) if p and p.suffix.lower() in VIDEO_EXTS]
+    if len(vids) <= 1:
+        return list(vids), set()
+    sized = []
+    for p in vids:
+        try:
+            sized.append((p, p.stat().st_size))
+        except Exception:
+            sized.append((p, keep_bytes))
+    largest = max(sized, key=lambda item: item[1])[0]
+    keep, drop = [], set()
+    for p, size in sized:
+        if (p == largest or size >= keep_bytes or _code_from_name(p.stem)
+                or _has_cd_marker(p.stem)):
+            keep.append(p)
+        elif size < min_bytes:
+            drop.add(p)
+        elif _name_similarity(p.stem, largest.stem) >= sim_threshold:
+            keep.append(p)
+        else:
+            drop.add(p)
+    if not keep:
+        return list(vids), set()
+    folder_code = next((_folder_code(p, watch_dir) for p in keep
+                        if _folder_code(p, watch_dir)), "")
+    sizes = dict(sized)
+    ordered = sorted(keep, key=lambda p: (
+        _seq_order_key(p.stem, folder_code) is None,
+        _seq_order_key(p.stem, folder_code) or 999,
+        -sizes.get(p, 0), p.name.lower()))
+    return ordered, drop
+
+
 def _same_code_main_videos(video_path: Path, code: str, watch_dir: str = "") -> list:
     """同一直接父目录下、与 code 同番号的全部「正片」视频（含自身、排除广告/赠片），
     按文件名排序返回。用于多分段（CD1/CD2、A/B/C、1/2/3…）归档时确定各段顺序。
@@ -614,6 +677,60 @@ async def _download_image(url: str, proxy: Optional[str], referer: str) -> Optio
     return None
 
 
+async def _save_actor_images(movie: dict, config: dict, proxy: Optional[str]) -> int:
+    """可选写入 Emby metadata/people/<演员>/folder.jpg 与 portrait.jpg。"""
+    if not config.get("scrape_actor_images_enabled", False):
+        return 0
+    root_value = (config.get("scrape_actor_images_dir") or "").strip()
+    if not root_value:
+        _log("演员头像已开启，但未配置 Emby metadata/people 路径，已跳过")
+        return 0
+    root = Path(root_value)
+    saved = 0
+    for actor in movie.get("actors") or []:
+        name = (actor.get("name") or "").strip()
+        url = (actor.get("avatar") or "").strip()
+        if not name or not url.startswith("http"):
+            continue
+        person_dir = root / _safe_name(name)
+        folder_img = person_dir / "folder.jpg"
+        if folder_img.exists():
+            continue
+        img = await _download_image(url, proxy, _cover_referer(url))
+        if not img:
+            continue
+        try:
+            person_dir.mkdir(parents=True, exist_ok=True)
+            folder_img.write_bytes(img)
+            (person_dir / "portrait.jpg").write_bytes(img)
+            saved += 1
+        except Exception as e:
+            _log(f"演员头像保存失败 {name}: {e}")
+    if saved:
+        _log(f"已保存 {saved} 位演员头像到 Emby people 目录")
+    return saved
+
+
+def _archive_folder_name(code: str, title_original: str, title_translated: str,
+                         actors: list, config: dict) -> str:
+    """构造稳定且跨平台安全的影片文件夹名。"""
+    safe_code = _safe_name(code) if code else "unknown"
+    mode = config.get("scrape_folder_naming", "code")
+    suffix = ""
+    if mode == "code_title":
+        use_translated = config.get("scrape_folder_title_translate", False)
+        suffix = title_translated if use_translated else title_original
+    elif mode == "code_actor":
+        names = [(a.get("name") or "").strip() for a in (actors or [])]
+        names = list(dict.fromkeys(n for n in names if n))
+        if config.get("scrape_folder_actor_mode", "first") != "all":
+            names = names[:1]
+        suffix = " ".join(names)
+    suffix = _safe_name(suffix.strip()) if (suffix or "").strip() else ""
+    # 留出年月及文件名长度；缺元数据时稳定回退纯番号。
+    return (f"{safe_code} {suffix}" if suffix else safe_code)[:150].rstrip(" .")
+
+
 async def _fetch_cover(url: str, proxy: Optional[str]) -> Optional[bytes]:
     """获取封面字节。
 
@@ -641,6 +758,22 @@ def _get_file_status(video_path: Path, code: str = "") -> dict:
         "has_nfo": nfo_path.exists(),
         "has_cover": poster_path.exists() or fanart_path.exists(),
     }
+
+
+def _read_existing_nfo_metadata(video_path: Path, code: str) -> dict:
+    """已有刮削结果也可参与自定义文件夹命名，避免跳过刮削后退回纯番号。"""
+    path = video_path.parent / f"{code}.nfo"
+    try:
+        root = ET.parse(path).getroot()
+        original = (root.findtext("originaltitle") or "").strip()
+        title = _strip_code_prefix((root.findtext("title") or "").strip(), code)
+        actors = [{"name": (node.findtext("name") or "").strip(),
+                   "avatar": (node.findtext("thumb") or "").strip()}
+                  for node in root.findall("actor") if (node.findtext("name") or "").strip()]
+        return {"title_original": _strip_code_prefix(original, code),
+                "folder_title": title, "actors": actors}
+    except Exception:
+        return {"title_original": "", "folder_title": "", "actors": []}
 
 
 # ─────────────────────────────────────────
@@ -678,8 +811,9 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     status = _get_file_status(path, code)
     if not overwrite and status["has_nfo"] and status["has_cover"]:
         _log(f"已存在 NFO 和封面，跳过刮削：{code}")
+        existing = _read_existing_nfo_metadata(path, code)
         return {"success": True, "skipped": True, "filepath": filepath, "code": code,
-                "reason": "NFO 和封面已存在"}
+                "reason": "NFO 和封面已存在", **existing}
 
     proxy = config.get("proxy") or None
     provider = (config.get("scrape_translate_provider")
@@ -799,9 +933,21 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         else:
             _log(f"封面获取失败：{code}")
 
+    folder_title = name_zh
+    if (config.get("scrape_folder_naming") == "code_title"
+            and config.get("scrape_folder_title_translate", False)
+            and name_part and _has_jp(name_part) and name_zh == name_part):
+        translated = await translate(text=name_part, provider=provider, config=config)
+        if translated.get("success") and (translated.get("result") or "").strip():
+            folder_title = translated["result"].strip()
+    actor_images_saved = await _save_actor_images(movie, config, proxy)
+
     _log(f"刮削结束：{code}（NFO={'有' if saved_nfo else '无'} 封面={'有' if saved_cover else '无'}）")
     return {"success": True, "skipped": False, "filepath": filepath, "code": code,
-            "title_zh": title_for_nfo, "saved_nfo": saved_nfo, "saved_cover": saved_cover}
+            "title_zh": title_for_nfo, "title_original": name_part,
+            "folder_title": folder_title, "actors": movie.get("actors") or [],
+            "actor_images_saved": actor_images_saved,
+            "saved_nfo": saved_nfo, "saved_cover": saved_cover}
 
 
 # ─────────────────────────────────────────
@@ -846,13 +992,10 @@ def _build_archive_index(output_dir: str) -> dict:
         return idx
     out = Path(output_dir)
     try:
-        for code_dir in out.glob("*/*"):            # <归档目录>/<YYYYMM>/<番号>/
-            if not code_dir.is_dir():
-                continue
-            safe = _norm(code_dir.name)
-            for p in code_dir.iterdir():
+        for p in out.rglob("*"):
                 if not (p.is_file() and p.suffix.lower() in VIDEO_EXTS):
                     continue
+                safe = _norm(_code_from_name(p.parent.name) or _code_from_name(p.stem) or "")
                 try:
                     stt = p.stat()
                 except Exception:
@@ -932,7 +1075,8 @@ def _heal_archived_parts(target_dir: Path, safe_code: str) -> None:
 
 def _archive_file(video_path: Path, output_dir: str, code: str,
                   mode: str = "hardlink", rename: bool = True,
-                  watch_dir: str = "") -> dict:
+                  watch_dir: str = "", folder_name: str = "",
+                  by_month: bool = True) -> dict:
     """
     把视频归档到 归档目录/年月/番号/ 子目录下（Emby 单片单目录布局）。
     rename：开（刮削开）= 视频改名「番号.后缀」、随带番号命名的 NFO/封面；
@@ -944,7 +1088,15 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
     mode = (mode or "hardlink").lower()
     safe_code = _safe_name(code) if code else video_path.stem
     out = Path(output_dir)
-    target_dir = out / datetime.now().strftime("%Y%m") / safe_code
+    month_dir = out / datetime.now().strftime("%Y%m") if by_month else out
+    target_dir = month_dir / (folder_name or safe_code)
+    # 同番号已经归档时复用原目录，避免标题翻译变化制造重复影片目录。
+    try:
+        existing = next((p for p in month_dir.glob(f"{safe_code}*") if p.is_dir()), None)
+        if existing:
+            target_dir = existing
+    except Exception:
+        pass
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
@@ -986,7 +1138,8 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
             "target_dir": str(target_dir), "files": done}
 
 
-def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int):
+def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int,
+                    keep_bytes: int = 300 * 1024 * 1024):
     """
     移动走视频后清理原下载位置：
       - 若视频原本在 watch_dir 下的「子目录」里（典型 qB 单种子单目录），
@@ -1010,9 +1163,9 @@ def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int):
         remaining = [p for p in parent.rglob("*")
                      if p.is_file() and p.suffix.lower() in VIDEO_EXTS
                      and not _is_incomplete(p)
-                     and p.stat().st_size >= min_bytes
                      and str(p) not in _processed
-                     and _looks_primary(p, watch_str)]
+                     and p.stat().st_size >= min_bytes
+                     and (p.stat().st_size >= keep_bytes or _looks_primary(p, watch_str))]
     except Exception:
         remaining = []
     if remaining:
@@ -1065,6 +1218,7 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
     move_on_fail = config.get("scrape_move_on_fail", True)
     # 全局刮削/归档总开关（监控 & 发种共用）；兼容旧 publish_* 键
     scrape_meta = config.get("scrape_meta_enabled", config.get("publish_scrape_enabled", True))
+    organize_on = config.get("scrape_organize_enabled", scrape_meta)
     archive_on = config.get("archive_enabled", config.get("publish_archive_enabled", True))
 
     if scrape_meta:
@@ -1103,19 +1257,24 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
             _log(f"刮削未成功但按配置仍归档：{video_path.name}")
         watch_dir = Path(config.get("scrape_watch_dir", ""))
         min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
+        keep_bytes = int(config.get("scrape_keep_size_mb", 300)) * 1024 * 1024
         code = scrape_res.get("code", "") or await _resolve_code(video_path, config)
+        folder_name = _archive_folder_name(
+            code, scrape_res.get("title_original", ""),
+            scrape_res.get("folder_title", ""), scrape_res.get("actors", []), config)
         src_parent = video_path.parent
         # V1.5 统一：归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
         mode = (config.get("archive_mode") or "hardlink").lower()
-        mv = _archive_file(video_path, output_dir, code, mode=mode, rename=scrape_meta,
-                           watch_dir=str(watch_dir))
+        mv = _archive_file(video_path, output_dir, code, mode=mode, rename=organize_on,
+                           watch_dir=str(watch_dir), folder_name=folder_name,
+                           by_month=config.get("archive_by_month", True))
         record["moved"] = mv.get("archived", False)
         record["archive_mode"] = mode
         record["target_dir"] = mv.get("target_dir", "")
         if mv.get("moved_original"):
             # 仅 move 模式：原文件已移走，清理原下载目录（含遗留广告/样板文件，连同子目录删除）。
             # hardlink/copy 模式保留原文件（可继续做种/辅种），绝不删原目录。
-            _cleanup_source(src_parent, watch_dir, min_bytes)
+            _cleanup_source(src_parent, watch_dir, min_bytes, keep_bytes)
     elif not output_dir:
         _log(f"未配置归档目录，仅刮削未归档：{video_path.name}")
         record["note"] = "未配置归档目录，仅刮削未归档"
@@ -1147,6 +1306,9 @@ async def _scan_once(config: dict) -> int:
     stable_needed = int(config.get("scrape_stable_checks", 2))
     settle_seconds = int(config.get("scrape_settle_seconds", 60))
     min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
+    keep_bytes = int(config.get("scrape_keep_size_mb", 300)) * 1024 * 1024
+    organize_on = config.get("scrape_organize_enabled",
+                             config.get("scrape_meta_enabled", True))
     out_dir = config.get("scrape_output_dir", "").strip()
     # 以归档目录现有内容为准的兜底去重索引（签名文件缺失时仍能跳过早已归档的原文件）。
     archive_idx = _build_archive_index(out_dir)
@@ -1228,9 +1390,20 @@ async def _scan_once(config: dict) -> int:
         #   主片/分段/其它番号正片绝不删。不论 hardlink/move 归档模式都执行；必须放在「过小忽略」
         #   之前，否则小广告会先被尺寸过滤跳过、永远清不掉（用户反馈的现象）。
         #   注意：若该种子整体仍在做种，删其中文件会让该种子校验缺文件（用户已知并选择一律清理）。
-        if (not _code_from_name(vf.stem) and not _has_cd_marker(vf.stem)
-                and _has_primary_sibling(vf)
-                and (_is_extra_video(vf, watch) or size < min_bytes)):
+        drop_set = set()
+        # 监控根目录可能混放彼此无关的视频，绝不跨影片互相分类/删除；只清理下载子目录。
+        in_download_subdir = False
+        try:
+            in_download_subdir = vf.parent.resolve() != watch_dir.resolve()
+        except Exception:
+            pass
+        if organize_on and in_download_subdir and _has_primary_sibling(vf):
+            try:
+                _, drop_set = classify_videos(
+                    _sibling_videos(vf), watch, min_bytes, keep_bytes)
+            except Exception as e:
+                _log(f"广告分类失败，保守保留全部文件：{vf.parent.name} — {e}")
+        if vf in drop_set:
             try:
                 vf.unlink()
                 n_extra += 1
@@ -1300,8 +1473,9 @@ def _monitor_should_run(config: dict) -> bool:
     两者都关＝无事可做＝不监控。监控只负责非发种的下载/手动放入文件，按这两个全局
     开关统一处理（发种任务占用的文件由 active_codes/active_paths 自动跳过）。"""
     scrape_meta = config.get("scrape_meta_enabled", config.get("publish_scrape_enabled", True))
+    organize_on = config.get("scrape_organize_enabled", scrape_meta)
     archive_on = config.get("archive_enabled", config.get("publish_archive_enabled", True))
-    return bool(scrape_meta or archive_on)
+    return bool(scrape_meta or organize_on or archive_on)
 
 
 async def _monitor_loop():
@@ -1311,9 +1485,9 @@ async def _monitor_loop():
         config = load_config()
         if not _monitor_should_run(config):
             _monitor_state["enabled"] = False
-            _monitor_state["message"] = "未启用（刮削、归档都关闭）"
+            _monitor_state["message"] = "未启用（刮削、规整、归档都关闭）"
             _monitor_state["running"] = False
-            _log("检测到刮削与归档均关闭，监控协程退出")
+            _log("检测到刮削、规整与归档均关闭，监控协程退出")
             return
         _monitor_state["enabled"] = True
         _monitor_state["watch_dir"] = config.get("scrape_watch_dir", "")

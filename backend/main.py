@@ -39,7 +39,7 @@ import library
 import auth
 import logging
 
-APP_VERSION = "1.4.5"
+APP_VERSION = "1.4.6-beta"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -90,6 +90,11 @@ async def _on_startup():
         intake.start_poller(load_config)
     except Exception as e:
         print(f"[启动] 推送入库轮询启动失败: {e}", flush=True)
+    try:
+        import asyncio as _asyncio
+        _asyncio.create_task(qbittorrent.ensure_trackers_fresh(load_config()))
+    except Exception as e:
+        print(f"[启动] Tracker 列表预热失败: {e}", flush=True)
 
 # ──────────────────────────────────────────────
 # 认证：放行白名单 + Cookie 校验中间件
@@ -300,6 +305,7 @@ class ConfigUpdateRequest(BaseModel):
     scrape_settle_seconds: Optional[int] = None
     scrape_stable_checks: Optional[int] = None
     scrape_min_size_mb: Optional[int] = None
+    scrape_keep_size_mb: Optional[int] = None
     scrape_translate_enabled: Optional[bool] = None
     scrape_translate_provider: Optional[str] = None
     scrape_move_on_fail: Optional[bool] = None
@@ -307,6 +313,14 @@ class ConfigUpdateRequest(BaseModel):
     archive_mode: Optional[str] = None        # hardlink | copy | move
     archive_by_month: Optional[bool] = None
     scrape_meta_enabled: Optional[bool] = None   # 刮削总开关：改名番号+写NFO/封面
+    scrape_organize_enabled: Optional[bool] = None
+    scrape_folder_naming: Optional[str] = None
+    scrape_folder_title_translate: Optional[bool] = None
+    scrape_folder_actor_mode: Optional[str] = None
+    scrape_actor_images_enabled: Optional[bool] = None
+    scrape_actor_images_dir: Optional[str] = None
+    public_trackers: Optional[str] = None
+    public_trackers_auto_update: Optional[bool] = None
     archive_enabled: Optional[bool] = None       # 归档总开关：成品放归档目录
 
 
@@ -912,6 +926,21 @@ class QbAddRequest(BaseModel):
     code: Optional[str] = None         # 该影片番号（来自搜索结果，用于刮削时精确识别）
     title: Optional[str] = None        # 该影片标题（辅助匹配）
     meta: Optional[dict] = None        # 该影片列表/详情里已呈现的完整元数据，供下载完成后直接刮削
+
+
+@app.get("/api/trackers")
+async def api_get_trackers():
+    state = await qbittorrent.ensure_trackers_fresh(load_config())
+    labels = {"remote": "在线 best 列表", "file": "本地缓存",
+              "user": "用户自定义", "fallback": "内置兜底"}
+    return {"ok": True, "count": len(state["list"]), "source": state["source"],
+            "source_label": labels.get(state["source"], state["source"]),
+            "trackers": state["list"]}
+
+
+@app.post("/api/trackers/refresh")
+async def api_refresh_trackers():
+    return await qbittorrent.refresh_trackers(load_config())
 
 
 @app.post("/api/qbittorrent/add")

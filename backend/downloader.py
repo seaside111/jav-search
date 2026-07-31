@@ -88,6 +88,7 @@ async def add_torrent(
     skip_checking: bool = False,
     upload_limit_kbps: int = 0,
     reannounce: bool = True,
+    public_trackers: bool = True,
 ) -> dict:
     """
     向当前下载器添加种子（链接或字节）。save_path/category 为 None 时用配置默认值。
@@ -101,17 +102,21 @@ async def add_torrent(
     sp = default_save_path(config, t) if save_path is None else save_path
     cat = default_category(config, t) if category is None else category
     paused = bool(paused if paused is not None else config.get("qb_paused", False))
+    if public_trackers:
+        await qbittorrent.ensure_trackers_fresh(config)
 
     if t == TRANSMISSION:
         return await transmission.add_torrent(
             url, user, pwd, download_url=download_url, torrent_bytes=torrent_bytes,
             save_path=sp, category=cat, paused=paused, skip_checking=skip_checking,
             upload_limit_kbps=upload_limit_kbps, reannounce=reannounce,
+            public_trackers=public_trackers,
         )
     return await qbittorrent.add_torrent(
         url, user, pwd, download_url=download_url, torrent_bytes=torrent_bytes,
         save_path=sp, category=cat, paused=paused, skip_checking=skip_checking,
         upload_limit_kbps=upload_limit_kbps, reannounce=reannounce,
+        public_trackers=public_trackers,
     )
 
 
