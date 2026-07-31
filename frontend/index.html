@@ -1017,9 +1017,14 @@
             <span class="setting-hint">达到此大小的视频一律不作为广告删除。</span>
           </div>
           <div class="setting-row">
-            <label class="source-chk"><input type="checkbox" id="cfgActorImagesEnabled"> 下载演员头像到 Emby people 目录</label>
-            <input class="setting-input" id="cfgActorImagesDir" type="text" placeholder="/config/metadata/people">
-            <span class="setting-hint">需映射到 Emby 的 metadata/people；保存 folder.jpg 与 portrait.jpg。</span>
+            <label class="setting-label">演员头像（Emby）</label>
+            <label class="source-chk"><input type="checkbox" id="cfgActorImagesEnabled"> 开启演员头像下载与本地缓存</label>
+            <span class="setting-hint">开启后先保存到每部影片文件夹的 <b>.actors/演员名.jpg</b>，即使下面路径留空也不会跳过。</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">Emby metadata/people 路径（可选）</label>
+            <input class="setting-input" id="cfgActorImagesDir" type="text" placeholder="例如 /emby-metadata/people；可留空">
+            <span class="setting-hint">填写容器内路径后，会额外保存 <b>演员名/folder.jpg</b> 和 <b>portrait.jpg</b>。Docker 中需把 Emby 的 metadata/people 宿主机目录映射到这里；留空则仅保存影片内 .actors 缓存。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">

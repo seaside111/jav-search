@@ -677,37 +677,54 @@ async def _download_image(url: str, proxy: Optional[str], referer: str) -> Optio
     return None
 
 
-async def _save_actor_images(movie: dict, config: dict, proxy: Optional[str]) -> int:
-    """可选写入 Emby metadata/people/<演员>/folder.jpg 与 portrait.jpg。"""
+async def _save_actor_images(movie: dict, config: dict, proxy: Optional[str],
+                             media_folder: Optional[Path] = None) -> int:
+    """先缓存到影片旁 .actors，再可选同步到 Emby metadata/people。"""
     if not config.get("scrape_actor_images_enabled", False):
         return 0
     root_value = (config.get("scrape_actor_images_dir") or "").strip()
-    if not root_value:
-        _log("演员头像已开启，但未配置 Emby metadata/people 路径，已跳过")
-        return 0
-    root = Path(root_value)
+    root = Path(root_value) if root_value else None
+    local_root = media_folder / ".actors" if media_folder else None
     saved = 0
+    available = 0
     for actor in movie.get("actors") or []:
         name = (actor.get("name") or "").strip()
         url = (actor.get("avatar") or "").strip()
         if not name or not url.startswith("http"):
             continue
-        person_dir = root / _safe_name(name)
-        folder_img = person_dir / "folder.jpg"
-        if folder_img.exists():
-            continue
-        img = await _download_image(url, proxy, _cover_referer(url))
+        available += 1
+        safe_name = _safe_name(name)
+        local_img = local_root / f"{safe_name}.jpg" if local_root else None
+        img = local_img.read_bytes() if local_img and local_img.exists() else None
+        if not img:
+            img = await _download_image(url, proxy, _cover_referer(url))
         if not img:
             continue
         try:
-            person_dir.mkdir(parents=True, exist_ok=True)
-            folder_img.write_bytes(img)
-            (person_dir / "portrait.jpg").write_bytes(img)
+            if local_img and not local_img.exists():
+                local_img.parent.mkdir(parents=True, exist_ok=True)
+                local_img.write_bytes(img)
+            if root:
+                person_dir = root / safe_name
+                person_dir.mkdir(parents=True, exist_ok=True)
+                folder_img = person_dir / "folder.jpg"
+                portrait_img = person_dir / "portrait.jpg"
+                if not folder_img.exists():
+                    folder_img.write_bytes(img)
+                if not portrait_img.exists():
+                    portrait_img.write_bytes(img)
             saved += 1
         except Exception as e:
             _log(f"演员头像保存失败 {name}: {e}")
     if saved:
-        _log(f"已保存 {saved} 位演员头像到 Emby people 目录")
+        where = "影片 .actors 缓存"
+        if root:
+            where += f"，并同步到 Emby people：{root}"
+        else:
+            where += "（未配置 Emby people 路径，仍会随影片归档）"
+        _log(f"已缓存 {saved} 位演员头像到{where}")
+    elif not available:
+        _log("影片包含演员信息，但当前刮削源未提供可下载的头像地址")
     return saved
 
 
@@ -940,7 +957,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         translated = await translate(text=name_part, provider=provider, config=config)
         if translated.get("success") and (translated.get("result") or "").strip():
             folder_title = translated["result"].strip()
-    actor_images_saved = await _save_actor_images(movie, config, proxy)
+    actor_images_saved = await _save_actor_images(movie, config, proxy, folder)
 
     _log(f"刮削结束：{code}（NFO={'有' if saved_nfo else '无'} 封面={'有' if saved_cover else '无'}）")
     return {"success": True, "skipped": False, "filepath": filepath, "code": code,
@@ -1122,15 +1139,40 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
     if rename and code and part:
         _heal_archived_parts(target_dir, safe_code)
 
-    # 2) 以番号命名的 NFO/封面（刮削时已按番号生成）
-    for extra in (folder / f"{safe_code}.nfo",
-                  folder / f"{safe_code}-poster.jpg",
-                  folder / f"{safe_code}-fanart.jpg"):
-        if extra.exists():
-            # NFO/封面体积小：move 模式随视频一起移走；hardlink/copy 模式一律复制一份（不动原件）
-            sub_mode = "move" if mode == "move" else "copy"
-            if _transfer(extra, target_dir / extra.name, sub_mode):
-                done.append(extra.name)
+    # 2) NFO/封面：Linux 大小写敏感，按小写文件名匹配后统一用番号命名落地。
+    expected = {
+        f"{safe_code}.nfo".lower(): f"{safe_code}.nfo",
+        f"{safe_code}-poster.jpg".lower(): f"{safe_code}-poster.jpg",
+        f"{safe_code}-fanart.jpg".lower(): f"{safe_code}-fanart.jpg",
+    }
+    found_extras = {}
+    try:
+        for candidate in folder.iterdir():
+            if candidate.is_file() and candidate.name.lower() in expected:
+                found_extras[candidate.name.lower()] = candidate
+    except Exception as e:
+        _log(f"扫描刮削附属文件失败：{folder} — {e}")
+    sub_mode = "move" if mode == "move" else "copy"
+    for lower_name, dst_name in expected.items():
+        extra = found_extras.get(lower_name)
+        if extra and _transfer(extra, target_dir / dst_name, sub_mode):
+            done.append(dst_name)
+        elif (target_dir / dst_name).exists():
+            # 多分段第二段处理时，附属文件可能已随第一段归档。
+            continue
+        else:
+            _log(f"归档提示：未找到附属文件 {dst_name}")
+
+    # 3) 演员头像本地缓存始终随影片归档；它是保底缓存，不依赖 Emby 全局 people 映射。
+    actors_src = folder / ".actors"
+    if actors_src.is_dir():
+        actors_dst = target_dir / ".actors"
+        actors_dst.mkdir(parents=True, exist_ok=True)
+        for actor_img in actors_src.iterdir():
+            if not actor_img.is_file():
+                continue
+            if _transfer(actor_img, actors_dst / actor_img.name, sub_mode):
+                done.append(f".actors/{actor_img.name}")
 
     how = {"move": "移动", "copy": "复制", "hardlink": "硬链接"}.get(mode, mode)
     _log(f"归档（{how}）：{len(done)} 个文件 → {target_dir} （{', '.join(done)}）")

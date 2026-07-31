@@ -7,7 +7,8 @@
 - 将刮削、规整、归档拆分为三个独立开关。
 - 引入保守的视频分类机制：唯一视频、最大视频、达到保底大小的视频、可识别番号及分段视频一律保留。
 - 支持 `番号`、`番号 + 标题`、`番号 + 演员` 三种归档文件夹命名；标题可单独选择翻译，多演员可选第一位或全部。
-- 可选下载演员头像到 Emby `metadata/people/<演员>/folder.jpg` 与 `portrait.jpg`。
+- 演员头像先缓存到影片目录 `.actors/<演员>.jpg` 并随影片归档；配置 Emby people 路径后，再同步到 `metadata/people/<演员>/folder.jpg` 与 `portrait.jpg`。
+- 修正规整后偶发只归档视频、漏带 NFO/封面的情况；附属文件改为大小写无关匹配并明确随视频落地。
 - 自动获取公共 Tracker best 列表，缓存七天；失败沿用旧缓存或内置兜底；支持用户自定义和手动刷新。
 - qBittorrent 与 Transmission 推送磁力时自动补充不重复的 Tracker，并在加种后 reannounce。
 
