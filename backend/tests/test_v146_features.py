@@ -145,6 +145,22 @@ class NamingAndTrackerTests(unittest.TestCase):
             "actor_scrape_sources": ["javdb", "unknown", "javbus"]}),
             ["javdb", "javbus"])
 
+    def test_actor_name_lookup_skips_sources_without_portraits(self):
+        original = actor_scraper._details
+        called = []
+
+        async def fake_details(query, mode, source, proxy):
+            called.append(source)
+            return []
+
+        actor_scraper._details = fake_details
+        try:
+            asyncio.run(actor_scraper._avatar_by_name(
+                "Actor A", ["avsox", "avmoo", "javdb", "javbus"], None))
+        finally:
+            actor_scraper._details = original
+        self.assertEqual(called, ["javbus"])
+
     def test_archive_includes_case_insensitive_extras_and_actor_cache(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

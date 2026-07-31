@@ -1044,7 +1044,7 @@
           <div class="setting-row">
             <label class="setting-label">头像来源优先级</label>
             <input class="setting-input" id="cfgActorSources" type="text" placeholder="javbus,avsox,avmoo,javdb">
-            <span class="setting-hint">从左到右依次尝试；支持 javbus、avsox、avmoo、javdb。每位演员独立回退，某个来源失败不会中止任务。</span>
+            <span class="setting-hint">番号详情按顺序尝试 javbus、avsox、avmoo、javdb；AVSOX/AVMOO 不支持演员名接口，JavDB 当前不返回头像，因此逐演员姓名的最终回退只使用 JavBus，避免 HTTP 400 和批量超时。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">全局演员头像缓存（可选）</label>

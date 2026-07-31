@@ -151,6 +151,10 @@ async def _actors_by_code(code: str, sources: list[str], proxy: Optional[str]) -
 
 
 async def _avatar_by_name(name: str, sources: list[str], proxy: Optional[str]) -> tuple[str, str]:
+    # Current AVSOX/AVMOO javu endpoints only search movies/codes. JavDB actor
+    # details expose names but no portrait URL. Sending actor names to them
+    # produces HTTP/code 400 or expensive timeouts with no usable result.
+    sources = [source for source in sources if source == "javbus"]
     wanted = _key(name)
     for source in sources:
         details = await _details(name, SEARCH_MODE_ACTOR, source, proxy)
@@ -232,6 +236,17 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
     actors = [dict(a) for a in (actors or []) if a.get("name")]
     if not actors and code and config.get("actor_scrape_lookup_by_code", True):
         actors = await _actors_by_code(code, sources, proxy)
+    elif actors and code:
+        # One code lookup per source is cheaper and more accurate than searching
+        # every actor by name; AVSOX/AVMOO can provide portraits on movie details.
+        missing = [a for a in actors if not (a.get("avatar") or "").startswith("http")
+                   and _cached_image(a["name"], config) is None]
+        if missing:
+            # JavDB is useful for discovering names when the NFO has none, but
+            # its parsed actor records contain no portrait URLs.
+            code_actors = await _actors_by_code(
+                code, [source for source in sources if source != "javdb"], proxy)
+            _merge(actors, code_actors)
     saved = 0
     for actor in actors:
         local_cached = folder / "actors" / f"{_safe(actor['name'])}.jpg"
