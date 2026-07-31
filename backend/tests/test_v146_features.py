@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import library
+import actor_scraper
 import qbittorrent
 import transmission
 import main
@@ -116,6 +117,33 @@ class NamingAndTrackerTests(unittest.TestCase):
         self.assertEqual(filled, 1)
         self.assertEqual(movie["actors"][0]["avatar"], "https://new.test/a.jpg")
         self.assertEqual(movie["actors"][1]["avatar"], "https://old.test/b.jpg")
+
+    def test_actor_thumb_can_be_omitted_from_nfo(self):
+        movie = {"code": "ABC-123", "actors": [
+            {"name": "Actor A", "avatar": "https://example.test/a.jpg"}]}
+        with_thumb = library._build_nfo(movie, "ABC-123", "", True)
+        without_thumb = library._build_nfo(movie, "ABC-123", "", False)
+        self.assertIn("<thumb>https://example.test/a.jpg</thumb>", with_thumb)
+        self.assertNotIn("<thumb>", without_thumb)
+        self.assertIn("<name>Actor A</name>", without_thumb)
+
+    def test_independent_actor_scraper_adds_missing_nfo_actor(self):
+        with tempfile.TemporaryDirectory() as raw:
+            nfo = Path(raw) / "ABC-123.nfo"
+            nfo.write_text("<movie><uniqueid type='num'>ABC-123</uniqueid></movie>", encoding="utf-8")
+            tree, actors, code = actor_scraper._read_nfo(nfo)
+            self.assertEqual(code, "ABC-123")
+            self.assertEqual(actors, [])
+            actor_scraper._write_nfo(nfo, tree, [
+                {"name": "Actor A", "avatar": "https://example.test/a.jpg"}], True)
+            _, actors, _ = actor_scraper._read_nfo(nfo)
+            self.assertEqual(actors[0]["name"], "Actor A")
+            self.assertEqual(actors[0]["avatar"], "https://example.test/a.jpg")
+
+    def test_actor_source_priority_filters_unknown_sources(self):
+        self.assertEqual(actor_scraper._sources({
+            "actor_scrape_sources": ["javdb", "unknown", "javbus"]}),
+            ["javdb", "javbus"])
 
     def test_archive_includes_case_insensitive_extras_and_actor_cache(self):
         with tempfile.TemporaryDirectory() as raw:

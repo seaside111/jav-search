@@ -1032,6 +1032,35 @@
             <span class="setting-hint">填写容器内路径后，会额外保存 <b>演员名/folder.jpg</b> 和 <b>portrait.jpg</b>。Docker 中需把 Emby 的 metadata/people 宿主机目录映射到这里；留空则仅保存影片内 actors 缓存。</span>
           </div>
           <div class="setting-row">
+            <label class="source-chk"><input type="checkbox" id="cfgActorThumbInNfo" checked> 将演员头像远程地址写入 NFO</label>
+            <span class="setting-hint">写入 <b>&lt;actor&gt;&lt;thumb&gt;URL&lt;/thumb&gt;</b>，适合 Kodi、NFO 迁移及未来兼容。Emby 当前不会可靠读取此地址；即使 Emby 容器可访问外网，也建议同时启用本地头像缓存或配置 people 路径。</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">独立演员头像刮削</label>
+            <label class="source-chk"><input type="checkbox" id="cfgActorScrapeAuto" checked> 影片刮削后自动运行</label>
+            <label class="source-chk"><input type="checkbox" id="cfgActorLookupCode" checked> NFO 无演员时按番号补查</label>
+            <label class="source-chk"><input type="checkbox" id="cfgActorWriteNfo" checked> 将补全的演员信息回写 NFO</label>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">头像来源优先级</label>
+            <input class="setting-input" id="cfgActorSources" type="text" placeholder="javbus,avsox,avmoo,javdb">
+            <span class="setting-hint">从左到右依次尝试；支持 javbus、avsox、avmoo、javdb。每位演员独立回退，某个来源失败不会中止任务。</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">全局演员头像缓存（可选）</label>
+            <input class="setting-input" id="cfgActorCacheDir" type="text" placeholder="留空使用 /config/actor-cache">
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">独立任务扫描目录（可选）</label>
+            <input class="setting-input" id="actorScanRoot" type="text" placeholder="留空扫描上方规整归档目录">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="jackett-test-btn" style="margin-left:0" onclick="runActorScrape(false)">补全缺失头像</button>
+              <button class="jackett-test-btn" style="margin-left:0" onclick="runActorScrape(true)">强制重新刮削</button>
+              <button class="jackett-test-btn" style="margin-left:0" onclick="refreshActorStatus()">刷新进度</button>
+            </div>
+            <span class="setting-hint" id="actorScrapeStatus">尚未运行</span>
+          </div>
+          <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
               <input type="checkbox" id="cfgScrapeTranslate" checked> 刮削时翻译标题/简介
             </label>
@@ -2248,7 +2277,13 @@ async function openSettings() {
     document.getElementById('cfgFolderTitleTranslate').checked = !!cfg.scrape_folder_title_translate;
     document.getElementById('cfgFolderActorMode').value = cfg.scrape_folder_actor_mode === 'all' ? 'all' : 'first';
     document.getElementById('cfgActorImagesEnabled').checked = !!cfg.scrape_actor_images_enabled;
+    document.getElementById('cfgActorThumbInNfo').checked = cfg.scrape_actor_thumb_in_nfo !== false;
     document.getElementById('cfgActorImagesDir').value = cfg.scrape_actor_images_dir || '';
+    document.getElementById('cfgActorScrapeAuto').checked = cfg.actor_scrape_auto !== false;
+    document.getElementById('cfgActorLookupCode').checked = cfg.actor_scrape_lookup_by_code !== false;
+    document.getElementById('cfgActorWriteNfo').checked = cfg.actor_scrape_write_nfo !== false;
+    document.getElementById('cfgActorSources').value = (cfg.actor_scrape_sources || ['javbus','avsox','avmoo','javdb']).join(',');
+    document.getElementById('cfgActorCacheDir').value = cfg.actor_scrape_cache_dir || '';
     document.getElementById('cfgArchiveEnabled').checked = (cfg.archive_enabled ?? cfg.publish_archive_enabled) !== false;
     currentProvider = cfg.default_translate_provider || 'baidu';
     // 检测 Jackett 状态
@@ -2346,6 +2381,38 @@ async function runScrapeOnce() {
   } catch (e) {
     msg.style.color = 'var(--red)';
     msg.textContent = '扫描失败：' + e.message;
+  }
+}
+
+async function runActorScrape(overwrite) {
+  const status = document.getElementById('actorScrapeStatus');
+  status.textContent = '正在启动独立演员头像任务…';
+  try {
+    const root = document.getElementById('actorScanRoot').value.trim();
+    const resp = await fetch(`${API}/api/actors/run`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({root, overwrite: !!overwrite}),
+    });
+    const data = await safeJson(resp);
+    if (!resp.ok) throw new Error(data.detail || '任务启动失败');
+    status.textContent = `任务已启动：${data.root}`;
+    setTimeout(refreshActorStatus, 500);
+  } catch (e) {
+    status.textContent = '启动失败：' + e.message;
+  }
+}
+
+async function refreshActorStatus() {
+  const status = document.getElementById('actorScrapeStatus');
+  try {
+    const resp = await fetch(`${API}/api/actors/status`, {cache: 'no-store'});
+    const s = await safeJson(resp);
+    status.textContent = `${s.running ? '运行中' : (s.message || '未运行')}：${s.processed || 0}/${s.total || 0} 个 NFO，` +
+      `发现 ${s.actors || 0} 位演员，保存 ${s.saved || 0} 张，失败 ${s.failed || 0}` +
+      (s.current ? `；当前 ${s.current}` : '');
+    if (s.running) setTimeout(refreshActorStatus, 2000);
+  } catch (e) {
+    status.textContent = '状态获取失败：' + e.message;
   }
 }
 
@@ -2566,7 +2633,13 @@ async function saveSettings() {
     scrape_folder_title_translate: document.getElementById('cfgFolderTitleTranslate').checked,
     scrape_folder_actor_mode: document.getElementById('cfgFolderActorMode').value,
     scrape_actor_images_enabled: document.getElementById('cfgActorImagesEnabled').checked,
+    scrape_actor_thumb_in_nfo: document.getElementById('cfgActorThumbInNfo').checked,
     scrape_actor_images_dir: document.getElementById('cfgActorImagesDir').value.trim(),
+    actor_scrape_auto: document.getElementById('cfgActorScrapeAuto').checked,
+    actor_scrape_lookup_by_code: document.getElementById('cfgActorLookupCode').checked,
+    actor_scrape_write_nfo: document.getElementById('cfgActorWriteNfo').checked,
+    actor_scrape_sources: document.getElementById('cfgActorSources').value.split(',').map(v => v.trim().toLowerCase()).filter(Boolean),
+    actor_scrape_cache_dir: document.getElementById('cfgActorCacheDir').value.trim(),
     archive_enabled: document.getElementById('cfgArchiveEnabled').checked,
   };
   currentProvider = payload.default_translate_provider;

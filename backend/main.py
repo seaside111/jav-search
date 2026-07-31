@@ -36,6 +36,7 @@ import downloader
 import intake
 import logbus
 import library
+import actor_scraper
 import auth
 import logging
 
@@ -70,6 +71,7 @@ app.add_middleware(
 
 # 媒体库刮削路由（手动扫描/刮削 + 监控状态）
 app.include_router(library.router)
+app.include_router(actor_scraper.router)
 
 
 @app.on_event("startup")
@@ -318,7 +320,13 @@ class ConfigUpdateRequest(BaseModel):
     scrape_folder_title_translate: Optional[bool] = None
     scrape_folder_actor_mode: Optional[str] = None
     scrape_actor_images_enabled: Optional[bool] = None
+    scrape_actor_thumb_in_nfo: Optional[bool] = None
     scrape_actor_images_dir: Optional[str] = None
+    actor_scrape_auto: Optional[bool] = None
+    actor_scrape_lookup_by_code: Optional[bool] = None
+    actor_scrape_write_nfo: Optional[bool] = None
+    actor_scrape_sources: Optional[list[str]] = None
+    actor_scrape_cache_dir: Optional[str] = None
     public_trackers: Optional[str] = None
     public_trackers_auto_update: Optional[bool] = None
     archive_enabled: Optional[bool] = None       # 归档总开关：成品放归档目录

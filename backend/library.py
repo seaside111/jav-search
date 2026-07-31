@@ -580,7 +580,8 @@ def _parse_rating(score: str) -> str:
     return nums[0] if nums else ""
 
 
-def _build_nfo(movie: dict, title_zh: str, plot_zh: str) -> str:
+def _build_nfo(movie: dict, title_zh: str, plot_zh: str,
+               actor_thumb_in_nfo: bool = True) -> str:
     """生成 Emby/Kodi 标准 movie.nfo（标题/简介为翻译后的中文）"""
     root = ET.Element("movie")
 
@@ -637,7 +638,7 @@ def _build_nfo(movie: dict, title_zh: str, plot_zh: str) -> str:
         a_el = ET.SubElement(root, "actor")
         ET.SubElement(a_el, "name").text = name
         avatar = actor.get("avatar", "")
-        if avatar:
+        if avatar and actor_thumb_in_nfo:
             ET.SubElement(a_el, "thumb").text = avatar
         ET.SubElement(a_el, "role").text = ""
         ET.SubElement(a_el, "order").text = "0"
@@ -877,13 +878,11 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     if not overwrite and status["has_nfo"] and status["has_cover"]:
         existing = _read_existing_nfo_metadata(path, code)
         actor_images_saved = 0
-        if config.get("scrape_actor_images_enabled", False) and existing.get("actors"):
-            existing_movie = {"actors": existing["actors"]}
-            proxy = config.get("proxy") or None
-            await _fill_actor_avatars(existing_movie, code, config, proxy)
-            actor_images_saved = await _save_actor_images(
-                existing_movie, config, proxy, path.parent)
-            existing["actors"] = existing_movie["actors"]
+        if config.get("scrape_actor_images_enabled", False) and config.get("actor_scrape_auto", True):
+            import actor_scraper
+            result = await actor_scraper.process_nfo(path.parent / f"{code}.nfo", config)
+            actor_images_saved = result.get("saved", 0)
+            existing["actors"] = result.get("actors") or existing.get("actors", [])
             _log(f"NFO 和封面已存在，已补查演员头像：{code}（保存 {actor_images_saved} 张）")
         else:
             _log(f"已存在 NFO 和封面，跳过刮削：{code}")
@@ -941,10 +940,6 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             except Exception as e:
                 _log(f"详情补全失败 {code}: {e}")
 
-    # NFO 中已有演员姓名但缺少头像时，额外从 JavBus 详情页按姓名补齐头像。
-    # 必须在生成 NFO 前执行，这样 <thumb> 与本地 actors 缓存保持一致。
-    await _fill_actor_avatars(movie, code, config, proxy)
-
     # ── 标题/简介翻译 ──
     # 番号（字母+数字）不翻译，仅作前缀；只对真正的日文片名/简介长句翻译。
     raw_title = movie.get("title", "")
@@ -991,7 +986,9 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     if overwrite or not status["has_nfo"]:
         try:
             nfo_file = folder / f"{code}.nfo"
-            nfo_file.write_text(_build_nfo(movie, title_for_nfo, plot_zh), encoding="utf-8")
+            nfo_file.write_text(_build_nfo(
+                movie, title_for_nfo, plot_zh,
+                config.get("scrape_actor_thumb_in_nfo", True)), encoding="utf-8")
             saved_nfo = True
             _log(f"已写入 NFO：{nfo_file.name}")
         except Exception as e:
@@ -1020,7 +1017,16 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         translated = await translate(text=name_part, provider=provider, config=config)
         if translated.get("success") and (translated.get("result") or "").strip():
             folder_title = translated["result"].strip()
-    actor_images_saved = await _save_actor_images(movie, config, proxy, folder)
+    actor_images_saved = 0
+    if config.get("scrape_actor_images_enabled", False) and config.get("actor_scrape_auto", True):
+        try:
+            import actor_scraper
+            actor_result = await actor_scraper.process_nfo(folder / f"{code}.nfo", config)
+            actor_images_saved = actor_result.get("saved", 0)
+            if actor_result.get("actors"):
+                movie["actors"] = actor_result["actors"]
+        except Exception as e:
+            _log(f"独立演员头像任务失败（不影响影片刮削）：{code}: {e}")
 
     _log(f"刮削结束：{code}（NFO={'有' if saved_nfo else '无'} 封面={'有' if saved_cover else '无'}）")
     return {"success": True, "skipped": False, "filepath": filepath, "code": code,

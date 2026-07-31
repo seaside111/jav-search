@@ -148,7 +148,13 @@ DEFAULT_CONFIG = {
     "scrape_folder_title_translate": False,
     "scrape_folder_actor_mode": "first", # first | all
     "scrape_actor_images_enabled": False,
+    "scrape_actor_thumb_in_nfo": True,  # 在 NFO actor/thumb 中写入远程头像地址（Kodi/可移植性）
     "scrape_actor_images_dir": "",       # Emby metadata/people 路径
+    "actor_scrape_auto": True,
+    "actor_scrape_lookup_by_code": True,
+    "actor_scrape_write_nfo": True,
+    "actor_scrape_sources": ["javbus", "avsox", "avmoo", "javdb"],
+    "actor_scrape_cache_dir": "",
     "public_trackers": "",               # 用户自定义；每行或逗号一个，非空时覆盖自动列表
     "public_trackers_auto_update": True,  # 自动抓取在线 best 列表并缓存 7 天
     "archive_enabled": True,             # 归档：刮削/发种成品放进归档目录(供 EMBY)；关=不归档(发种仍原地做种)
