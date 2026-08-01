@@ -186,6 +186,13 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
         # 缓存命中即直接返回——前台预抓/点开详情/刮削回源共用这份缓存，
         # 「后台已抓过的内容刮削直接拿，没抓过才真去抓」。
         cached = _detailcache.get(url)
+        # 旧版 JavBus 解析器能读演员名却读不到头像，这种不完整结果曾被缓存 7 天。
+        # 对 JavBus 自动绕过“有演员但全部无头像”的旧缓存，升级后即可自行修复，
+        # 无需用户进入容器手工删除 /config/detailcache。
+        if (cached is not None and source == "javbus" and cached.get("actors")
+                and not any((actor.get("avatar") or "").startswith("http")
+                            for actor in cached.get("actors") or [])):
+            cached = None
         if cached is not None:
             return cached
         use_fs = source in _FLARESOLVERR_SOURCES and flaresolverr_on

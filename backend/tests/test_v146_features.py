@@ -11,11 +11,47 @@ import actor_scraper
 import qbittorrent
 import transmission
 import main
-from scrapers import _javu_base
+from scrapers import _javu_base, _javbus_base
 from config_manager import DEFAULT_CONFIG
 
 
 class VideoClassificationTests(unittest.TestCase):
+    def test_javbus_current_star_link_portrait_markup(self):
+        html = """
+        <div class="container"><h3>SDMUA-095 title</h3></div>
+        <div class="star-name">
+          <a href="https://www.javbus.com/star/s0i">優梨まいな</a>
+        </div>
+        """
+        detail = _javbus_base.parse_detail(
+            html, "https://www.javbus.com/SDMUA-095",
+            "https://www.javbus.com", "JavBus")
+        self.assertEqual(detail["actors"], [{
+            "name": "優梨まいな",
+            "avatar": "https://www.javbus.com/pics/actress/s0i_a.jpg",
+        }])
+
+    def test_actor_details_keep_already_loaded_live_result(self):
+        original_search = actor_scraper.search
+        original_enrich = actor_scraper.enrich
+
+        async def fake_search(**_kwargs):
+            return [{"code": "SDMUA-095", "detail_loaded": True,
+                     "actors": [{"name": "優梨まいな", "avatar": "https://live/a.jpg"}]}]
+
+        async def stale_enrich(*_args, **_kwargs):
+            raise AssertionError("已加载的详情不应再次读取旧缓存")
+
+        actor_scraper.search = fake_search
+        actor_scraper.enrich = stale_enrich
+        try:
+            rows = asyncio.run(actor_scraper._details(
+                "SDMUA-095", "code", "javbus", None))
+        finally:
+            actor_scraper.search = original_search
+            actor_scraper.enrich = original_enrich
+        self.assertEqual(rows[0]["actors"][0]["avatar"], "https://live/a.jpg")
+
     def test_download_completion_uses_client_api_fields(self):
         # 即使磁盘已预分配到最终大小，只要下载器进度/剩余字节未完成就必须是 False。
         self.assertFalse(qbittorrent._torrent_completed({

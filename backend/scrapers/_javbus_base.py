@@ -276,23 +276,53 @@ def parse_detail(html: str, url: str, base_url: str, source: str) -> Optional[di
         if m:
             info["code"] = m.group(1)
 
-    # 演员 + 头像
-    actor_imgs = {}
-    star_boxes = soup.select("div.star-box-item") or soup.select("div.avatar-box")
-    for box in star_boxes:
-        name_tag = box.select_one("div.star-name a") or box.select_one("span.star-name a")
-        img_tag = box.select_one("img")
-        if name_tag and img_tag:
-            name = name_tag.get_text(strip=True)
-            img = img_tag.get("src") or img_tag.get("data-src") or ""
-            actor_imgs[name] = _abs_url(img, base_url)
+    # 演员 + 头像。JavBus 当前详情页把头像链接和 star-name 拆成兄弟节点：
+    #   <a href=".../star/s0i"><img src="/pics/actress/s0i_a.jpg"></a>
+    #   <div class="star-name"><a href=".../star/s0i">演员名</a></div>
+    # 旧选择器只查 div.avatar-box，因而会出现“演员名有、头像始终为空”。
+    # 以 star URL 为稳定关联键，同时兼容旧版把姓名和图片放在同一容器的结构。
+    actor_imgs_by_href = {}
+    actor_imgs_by_name = {}
+    for link in soup.select("a[href*='/star/']"):
+        img_tag = link.select_one("img")
+        if not img_tag:
+            continue
+        img = img_tag.get("src") or img_tag.get("data-src") or ""
+        avatar = _abs_url(img, base_url)
+        if not avatar:
+            continue
+        href = _abs_url(link.get("href", ""), base_url)
+        if href:
+            actor_imgs_by_href[href.rstrip("/")] = avatar
+        image_name = (img_tag.get("title") or img_tag.get("alt") or "").strip()
+        if image_name:
+            actor_imgs_by_name[image_name] = avatar
 
+    actor_links = soup.select("div.star-name a, span.star-name a")
+    if not actor_links:
+        actor_links = soup.select("a.avatar-box[href*='/star/'], a[href*='/star/']")
     actors = []
-    for a in soup.select("div.star-name a") or soup.select("a[href*='/star/']"):
-        name = a.get_text(strip=True)
-        if name and name not in actors:
-            actors.append(name)
-    info["actors"] = [{"name": n, "avatar": actor_imgs.get(n, "")} for n in actors]
+    seen_actors = set()
+    for link in actor_links:
+        name = link.get_text(" ", strip=True)
+        if not name:
+            img_tag = link.select_one("img")
+            name = ((img_tag.get("title") or img_tag.get("alt") or "").strip()
+                    if img_tag else "")
+        href = _abs_url(link.get("href", ""), base_url).rstrip("/")
+        key = name.casefold()
+        if not name or key in seen_actors:
+            continue
+        seen_actors.add(key)
+        avatar = actor_imgs_by_href.get(href) or actor_imgs_by_name.get(name, "")
+        # 部分响应只保留 /star/{id}，不输出演员 img；JavBus 的演员图片路径
+        # 与该 id 稳定对应，可直接构造候选 URL，下载阶段仍会校验 HTTP/图片类型。
+        if not avatar:
+            star_id = re.search(r"/star/([a-z0-9]+)$", href, re.I)
+            if star_id:
+                avatar = _abs_url(f"/pics/actress/{star_id.group(1)}_a.jpg", base_url)
+        actors.append({"name": name, "avatar": avatar})
+    info["actors"] = actors
 
     tags = []
     for a in soup.select("span.genre a") or soup.select("div.genre a"):

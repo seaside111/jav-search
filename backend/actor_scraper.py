@@ -147,7 +147,21 @@ async def _details(query: str, mode: str, source: str, proxy: Optional[str]) -> 
     try:
         items = await search(query=query, mode=mode, proxy=proxy,
                              sources=[source], max_results=6)
-        results = await enrich(items[:3], proxy=proxy) if items else []
+        selected = items[:3]
+        if not selected:
+            return []
+        # JavBus 番号搜索会直接返回已加载的详情；不要再 enrich 一次，更不能让
+        # 7 天磁盘缓存里的旧空头像覆盖本次实时解析到的头像。
+        results = [None] * len(selected)
+        pending_indexes = [i for i, item in enumerate(selected)
+                           if not item.get("detail_loaded")]
+        for i, item in enumerate(selected):
+            if item.get("detail_loaded"):
+                results[i] = item
+        if pending_indexes:
+            pending = await enrich([selected[i] for i in pending_indexes], proxy=proxy)
+            for i, detail in zip(pending_indexes, pending):
+                results[i] = detail
         return [item for item in results if item]
     except Exception as exc:
         _log(f"来源 {source} 查询失败：{query}: {exc}")
@@ -192,6 +206,7 @@ async def _avatar_by_name(name: str, sources: list[str], proxy: Optional[str]) -
 
 async def _download(url: str, proxy: Optional[str]) -> Optional[bytes]:
     if not url.startswith("http"):
+        _log("头像下载跳过：来源未返回有效图片地址")
         return None
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.javbus.com/",
                "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"}
@@ -202,6 +217,8 @@ async def _download(url: str, proxy: Optional[str]) -> Optional[bytes]:
             content_type = response.headers.get("content-type", "")
             if response.status_code == 200 and content_type.startswith("image/") and len(response.content) > 1024:
                 return response.content
+            _log(f"头像下载无效：HTTP {response.status_code}，类型 {content_type or '未知'}，"
+                 f"大小 {len(response.content)} 字节（{url}）")
     except Exception as exc:
         _log(f"图片下载失败：{url}: {exc}")
     return None
@@ -278,6 +295,10 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
             code_actors = await _actors_by_code(
                 code, sources, proxy, [a["name"] for a in missing])
             _merge(actors, code_actors)
+            resolved = sum(1 for actor in missing
+                           if (actor.get("avatar") or "").startswith("http"))
+            if not resolved:
+                _log(f"演员番号补查未取得头像：{code}，转为按演员名回退查询")
     saved = 0
     for actor in actors:
         local_cached = folder / "actors" / f"{_safe(actor['name'])}.jpg"
