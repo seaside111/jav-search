@@ -68,6 +68,13 @@ class VideoClassificationTests(unittest.TestCase):
 
 
 class NamingAndTrackerTests(unittest.TestCase):
+    def test_push_buttons_use_clicked_node_and_page_unique_ids(self):
+        frontend = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
+            encoding="utf-8")
+        self.assertIn('id="qb-${idx}-${i}"', frontend)
+        self.assertIn("pushToQb('${escAttr(qbUrl)}', this,", frontend)
+        self.assertNotIn('id="qb-${i}"', frontend)
+
     def test_sukebei_is_default_resource_source(self):
         self.assertFalse(DEFAULT_CONFIG["jackett_enabled"])
         paths = {route.path for route in main.app.routes}

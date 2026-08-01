@@ -1748,7 +1748,7 @@ function renderResourceItem(r, i, idx) {
     : '';
 
   const magnetBtn = hasMagnet
-    ? `<button class="btn-magnet" id="mcopy-${i}" onclick="copyMagnet('${escAttr(r.magnet)}', 'mcopy-${i}')">
+    ? `<button class="btn-magnet" id="mcopy-${idx}-${i}" onclick="copyMagnet('${escAttr(r.magnet)}', this)">
         <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
           <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
@@ -1770,7 +1770,7 @@ function renderResourceItem(r, i, idx) {
   // 推送到 qBittorrent（优先磁力，其次种子直链；种子由后端代取上传）
   const qbUrl = r.magnet || r.link || '';
   const qbBtn = qbUrl
-    ? `<button class="btn-qb" id="qb-${i}" onclick="pushToQb('${escAttr(qbUrl)}', 'qb-${i}', ${typeof idx === 'number' ? idx : -1})" title="推送到 qBittorrent 下载器">
+    ? `<button class="btn-qb" id="qb-${idx}-${i}" onclick="pushToQb('${escAttr(qbUrl)}', this, ${typeof idx === 'number' ? idx : -1})" title="推送到 qBittorrent 下载器">
         <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/>
           <path d="M5 21h14"/>
@@ -1795,8 +1795,10 @@ function renderResourceItem(r, i, idx) {
 }
 
 // 推送磁力/种子到 qBittorrent
-async function pushToQb(downloadUrl, btnId, idx) {
-  const btn = document.getElementById(btnId);
+async function pushToQb(downloadUrl, btnOrId, idx) {
+  // 直接使用本次点击的按钮节点，避免同页多个资源抽屉曾经使用重复 id
+  // 时，getElementById 错误更新到另一张影片卡片（通常还是隐藏按钮）。
+  const btn = typeof btnOrId === 'string' ? document.getElementById(btnOrId) : btnOrId;
   if (btn) { btn.disabled = true; btn.classList.remove('failed','pushed'); }
   const orig = btn ? btn.innerHTML : '';
   if (btn) btn.innerHTML = '<span class="drawer-spinner" style="width:11px;height:11px;margin:0 4px 0 0"></span>推送中';
@@ -1845,10 +1847,10 @@ function buildThunderUrl(url) {
   }
 }
 
-async function copyMagnet(magnet, btnId) {
+async function copyMagnet(magnet, btnOrId) {
   try {
     await navigator.clipboard.writeText(magnet);
-    const btn = document.getElementById(btnId);
+    const btn = typeof btnOrId === 'string' ? document.getElementById(btnOrId) : btnOrId;
     if (btn) {
       btn.classList.add('copied');
       btn.innerHTML = `<svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> 已复制`;
@@ -1979,7 +1981,7 @@ function renderDetailExtra(m, idx) {
     if (g.subtitle) badges.push('<span class="mag-badge sub">字幕</span>');
     // 每条磁力的操作按钮：推送下载(qB) / 迅雷 / 复制磁链（复用资源条目同款函数）
     const thunderUrl = buildThunderUrl(g.link);
-    const qbBtn = `<button class="btn-qb" id="jdmag-qb-${di}-${j}" onclick="pushToQb('${escAttr(g.link)}', 'jdmag-qb-${di}-${j}', ${di})" title="推送到 qBittorrent 下载器">
+    const qbBtn = `<button class="btn-qb" id="jdmag-qb-${di}-${j}" onclick="pushToQb('${escAttr(g.link)}', this, ${di})" title="推送到 qBittorrent 下载器">
         <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M5 21h14"/></svg>
         推送下载</button>`;
     const thunderBtn = thunderUrl
@@ -1987,7 +1989,7 @@ function renderDetailExtra(m, idx) {
           <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2L4.5 13.5H11L10 22L19.5 10.5H13L13 2Z"/></svg>
           迅雷</a>`
       : '';
-    const copyBtn = `<button class="btn-magnet" id="jdmag-copy-${di}-${j}" onclick="copyMagnet('${escAttr(g.link)}', 'jdmag-copy-${di}-${j}')">
+    const copyBtn = `<button class="btn-magnet" id="jdmag-copy-${di}-${j}" onclick="copyMagnet('${escAttr(g.link)}', this)">
         <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
         磁链</button>`;
     return `<div class="detail-magnet">
