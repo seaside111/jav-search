@@ -1040,11 +1040,11 @@
               <button class="jackett-test-btn" style="margin-left:0" onclick="testEmby()">测试 Emby 连接</button>
               <span class="setting-hint" id="embyTestStatus"></span>
             </div>
-            <span class="setting-hint">使用 Emby “控制台 → 高级 → API 密钥”创建的 Key。同步时会按演员姓名精确匹配 Person，并替换 Primary 图片。</span>
+            <span class="setting-hint">使用 Emby “控制台 → 高级 → API 密钥”创建的管理员 Key。同步时会先通过 API 启动媒体库扫描、等待 NFO 中的 Person 出现，再按演员姓名匹配、上传并验证 Primary 图片；新演员首次入库可能需要约 1 分钟。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk"><input type="checkbox" id="cfgActorThumbInNfo" checked> 将演员头像远程地址写入 NFO</label>
-            <span class="setting-hint">写入 <b>&lt;actor&gt;&lt;thumb&gt;URL&lt;/thumb&gt;</b>，适合 Kodi、NFO 迁移及未来兼容。Emby 当前不会可靠读取此地址；即使 Emby 容器可访问外网，也建议同时启用本地头像缓存或配置 people 路径。</span>
+            <span class="setting-hint">写入 <b>&lt;actor&gt;&lt;thumb&gt;URL&lt;/thumb&gt;</b> 供 NFO 迁移兼容。Emby 是否下载该远程地址受本地元数据读取器和网络影响；启用上方 API 同步后不依赖此 URL，程序会直接上传 Person 主图。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">独立演员头像刮削</label>

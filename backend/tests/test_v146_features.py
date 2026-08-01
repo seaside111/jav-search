@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import library
 import actor_scraper
+import emby
 import qbittorrent
 import transmission
 import main
@@ -16,6 +17,109 @@ from config_manager import DEFAULT_CONFIG
 
 
 class VideoClassificationTests(unittest.TestCase):
+    def test_emby_batch_refreshes_waits_uploads_and_verifies_people(self):
+        class Response:
+            def __init__(self, status=200, payload=None):
+                self.status_code = status
+                self._payload = payload
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise RuntimeError(f"HTTP {self.status_code}")
+
+            def json(self):
+                return self._payload
+
+        class Client:
+            refresh_calls = 0
+            uploads = []
+            searches = {}
+
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def post(self, url, **kwargs):
+                if url.endswith("/Library/Refresh"):
+                    Client.refresh_calls += 1
+                    return Response(204)
+                if "/Images/Primary" in url:
+                    Client.uploads.append((url, kwargs.get("content")))
+                    return Response(204)
+                raise AssertionError(url)
+
+            async def get(self, url, **kwargs):
+                if url.endswith("/Persons"):
+                    name = kwargs["params"]["SearchTerm"]
+                    Client.searches[name] = Client.searches.get(name, 0) + 1
+                    items = [] if Client.searches[name] == 1 else [{"Name": name, "Id": f"id-{name}"}]
+                    return Response(200, {"Items": items})
+                if url.endswith("/Images"):
+                    return Response(200, [{"ImageType": "Primary"}])
+                raise AssertionError(url)
+
+        original_client = emby.httpx.AsyncClient
+        original_sleep = emby.asyncio.sleep
+
+        async def no_sleep(_seconds):
+            return None
+
+        emby.httpx.AsyncClient = Client
+        emby.asyncio.sleep = no_sleep
+        try:
+            result = asyncio.run(emby.sync_person_images(
+                "http://emby:8096", "admin-key", [
+                    {"name": "Actor A", "image": b"image-a"},
+                    {"name": "Actor B", "image": b"image-b"},
+                ], poll_delays=(0,)))
+        finally:
+            emby.httpx.AsyncClient = original_client
+            emby.asyncio.sleep = original_sleep
+        self.assertTrue(result["refresh_triggered"])
+        self.assertEqual(Client.refresh_calls, 1)
+        self.assertEqual(len(Client.uploads), 2)
+        self.assertTrue(all(item["updated"] for item in result["results"]))
+
+    def test_actor_nfo_is_written_before_emby_library_refresh(self):
+        original_sync = actor_scraper.emby.sync_person_images
+
+        with tempfile.TemporaryDirectory() as raw:
+            folder = Path(raw)
+            nfo = folder / "ABC-123.nfo"
+            nfo.write_text("<movie><uniqueid>ABC-123</uniqueid></movie>", encoding="utf-8")
+            tree = actor_scraper.ET.parse(nfo)
+            actor_dir = folder / "actors"
+            actor_dir.mkdir()
+            (actor_dir / "Actor A.jpg").write_bytes(b"x" * 2048)
+
+            async def fake_sync(_url, _key, portraits):
+                current = nfo.read_text(encoding="utf-8")
+                self.assertIn("Actor A", current)
+                self.assertEqual([item["name"] for item in portraits], ["Actor A"])
+                return {"refresh_triggered": True, "results": [
+                    {"name": "Actor A", "updated": True, "message": "ok"}]}
+
+            actor_scraper.emby.sync_person_images = fake_sync
+            try:
+                result = asyncio.run(actor_scraper.process_movie(
+                    folder, [{"name": "Actor A", "avatar": "https://img/a.jpg"}], "ABC-123",
+                    {"actor_scrape_sources": ["javbus"],
+                     "actor_scrape_lookup_by_code": False,
+                     "actor_scrape_write_nfo": True,
+                     "scrape_actor_thumb_in_nfo": True,
+                     "actor_scrape_cache_dir": str(folder / "cache"),
+                     "emby_actor_sync_enabled": True,
+                     "emby_url": "http://emby:8096", "emby_api_key": "key"},
+                    nfo, tree))
+            finally:
+                actor_scraper.emby.sync_person_images = original_sync
+        self.assertEqual(result["emby_updated"], 1)
+
     def test_javbus_current_star_link_portrait_markup(self):
         html = """
         <div class="container"><h3>SDMUA-095 title</h3></div>

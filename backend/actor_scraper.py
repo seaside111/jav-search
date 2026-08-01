@@ -282,14 +282,6 @@ async def _save_actor(actor: dict, folder: Path, config: dict,
             destination = person / filename
             if overwrite or not destination.exists():
                 shutil.copy2(cached, destination)
-    if config.get("emby_actor_sync_enabled", False):
-        image = cached.read_bytes()
-        result = await emby.update_person_image(
-            config.get("emby_url", ""), config.get("emby_api_key", ""), name, image)
-        actor["emby_updated"] = bool(result.get("updated"))
-        actor["emby_message"] = result.get("message", "")
-        if not result.get("updated"):
-            _log(f"Emby actor sync skipped/failed ({name}): {result.get('message', '')}")
     return True
 
 
@@ -325,8 +317,29 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
             actor["avatar"], actor["avatar_source"] = avatar, source
         if await _save_actor(actor, folder, config, proxy, overwrite):
             saved += 1
+    # 必须先把番号补查新增的演员与头像 URL 写回 NFO，再让 Emby 扫描；
+    # 否则新 Person/影片演员关系可能直到下一次手工刷新才出现。
     if nfo_path and tree is not None and actors and config.get("actor_scrape_write_nfo", True):
         _write_nfo(nfo_path, tree, actors, config.get("scrape_actor_thumb_in_nfo", True))
+    if config.get("emby_actor_sync_enabled", False) and saved:
+        portraits = []
+        for actor in actors:
+            local = folder / "actors" / f"{_safe(actor['name'])}.jpg"
+            if local.exists() and local.stat().st_size > 1024:
+                portraits.append({"name": actor["name"], "image": local.read_bytes(),
+                                  "content_type": "image/jpeg"})
+        if portraits:
+            _log(f"Emby 自动刷新媒体库并同步演员头像：{code or folder.name}（{len(portraits)} 位）")
+            batch = await emby.sync_person_images(
+                config.get("emby_url", ""), config.get("emby_api_key", ""), portraits)
+            by_name = {_key(item.get("name", "")): item
+                       for item in batch.get("results") or []}
+            for actor in actors:
+                result = by_name.get(_key(actor.get("name", "")), {})
+                actor["emby_updated"] = bool(result.get("updated"))
+                actor["emby_message"] = result.get("message", "")
+                if result and not result.get("updated"):
+                    _log(f"Emby 演员头像同步失败（{actor['name']}）：{result.get('message', '')}")
     emby_updated = sum(1 for actor in actors if actor.get("emby_updated"))
     failed = max(0, len(actors) - saved)
     _log(f"演员头像处理完成：{code or folder.name}（演员 {len(actors)}，本地可用 {saved}，"
