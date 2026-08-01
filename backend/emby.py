@@ -2,7 +2,9 @@
 import asyncio
 import base64
 import re
+import unicodedata
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -20,7 +22,12 @@ def _headers(api_key: str) -> dict[str, str]:
 
 
 def _name_key(value: str) -> str:
-    return re.sub(r"[\s・·._-]+", "", (value or "")).casefold()
+    # NFKC makes visually identical full-width/half-width Japanese names
+    # comparable (for example チーチー and ﾁｰﾁｰ). Format characters include
+    # zero-width spaces/marks that can otherwise make an exact match fail.
+    value = unicodedata.normalize("NFKC", value or "")
+    value = "".join(char for char in value if unicodedata.category(char) != "Cf")
+    return re.sub(r"[\s・·._\-‐‑‒–—―−]+", "", value).casefold()
 
 
 async def test_connection(url: str, api_key: str) -> dict:
@@ -52,6 +59,57 @@ async def _find_person(client: httpx.AsyncClient, base: str, headers: dict,
     wanted = _name_key(name)
     return next((item for item in items
                  if _name_key(item.get("Name", "")) == wanted), None)
+
+
+async def _find_people_fallback(client: httpx.AsyncClient, base: str, headers: dict,
+                                names: list[str]) -> dict[str, dict]:
+    """Bypass Emby's SearchTerm index for Unicode names it cannot tokenize."""
+    pending = {_name_key(name): name for name in names if _name_key(name)}
+    found = {}
+
+    # Emby exposes a direct person-by-name endpoint. Try it before enumerating
+    # a potentially large people library.
+    for key, name in list(pending.items()):
+        response = await client.get(
+            f"{base}/Persons/{quote(name, safe='')}", headers=headers,
+            params={"Fields": "ImageTags"})
+        if response.status_code in (401, 403):
+            response.raise_for_status()
+        if response.status_code >= 400:
+            # Older Emby versions may not support this route consistently for
+            # Unicode path segments. Continue with the paged list fallback.
+            continue
+        response.raise_for_status()
+        item = response.json()
+        if isinstance(item, dict) and item.get("Id") and _name_key(item.get("Name", "")) == key:
+            found[name] = item
+            pending.pop(key, None)
+    if not pending:
+        return found
+
+    # SearchTerm can return no rows for Japanese full-width/half-width forms.
+    # Page through people only once, after normal polling has finished.
+    start, limit = 0, 200
+    while pending:
+        response = await client.get(
+            f"{base}/Persons", headers=headers,
+            params={"Recursive": "true", "StartIndex": start, "Limit": limit,
+                    "Fields": "ImageTags"})
+        response.raise_for_status()
+        payload = response.json()
+        items = payload.get("Items", payload if isinstance(payload, list) else [])
+        for item in items or []:
+            key = _name_key(item.get("Name", ""))
+            original = pending.pop(key, None)
+            if original and item.get("Id"):
+                found[original] = item
+        total = payload.get("TotalRecordCount") if isinstance(payload, dict) else None
+        start += len(items or [])
+        if (not items or
+                (isinstance(total, int) and start >= total) or
+                (not isinstance(total, int) and len(items) < limit)):
+            break
+    return found
 
 
 async def _verify_primary(client: httpx.AsyncClient, base: str, headers: dict,
@@ -122,6 +180,13 @@ async def sync_person_images(url: str, api_key: str, portraits: list[dict],
                         pending.pop(name, None)
                 if not pending:
                     break
+
+            if pending:
+                fallback = await _find_people_fallback(
+                    client, base, headers, list(pending))
+                for name, person in fallback.items():
+                    people[name] = person
+                    pending.pop(name, None)
 
             for name, item in valid_by_name(valid).items():
                 person = people.get(name)

@@ -17,6 +17,71 @@ from config_manager import DEFAULT_CONFIG
 
 
 class VideoClassificationTests(unittest.TestCase):
+    def test_emby_name_key_normalizes_japanese_width_and_hidden_marks(self):
+        expected = emby._name_key("チーチー")
+        self.assertEqual(emby._name_key("ﾁｰﾁｰ"), expected)
+        self.assertEqual(emby._name_key("チ\u200bーチー"), expected)
+
+    def test_emby_person_fallback_matches_half_width_katakana(self):
+        class Response:
+            def __init__(self, status=200, payload=None):
+                self.status_code = status
+                self._payload = payload
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise RuntimeError(f"HTTP {self.status_code}")
+
+            def json(self):
+                return self._payload
+
+        class Client:
+            uploads = []
+
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def post(self, url, **kwargs):
+                if url.endswith("/Library/Media/Updated"):
+                    return Response(204)
+                if "/Images/Primary" in url:
+                    Client.uploads.append(url)
+                    return Response(204)
+                raise AssertionError(url)
+
+            async def get(self, url, **kwargs):
+                if url.endswith("/Persons") and "SearchTerm" in kwargs.get("params", {}):
+                    return Response(200, {"Items": [], "TotalRecordCount": 0})
+                if "/Persons/" in url:
+                    return Response(404)
+                if url.endswith("/Persons"):
+                    start = kwargs.get("params", {}).get("StartIndex", 0)
+                    item = ({"Name": "Other Person", "Id": "other"} if start == 0 else
+                            {"Name": "ﾁｰﾁｰ", "Id": "katakana-person"})
+                    return Response(200, {"Items": [item], "TotalRecordCount": 2})
+                if url.endswith("/Images"):
+                    return Response(200, [{"ImageType": "Primary"}])
+                raise AssertionError(url)
+
+        original_client = emby.httpx.AsyncClient
+        emby.httpx.AsyncClient = Client
+        try:
+            result = asyncio.run(emby.sync_person_images(
+                "http://emby:8096", "admin-key",
+                [{"name": "チーチー", "image": b"local-image"}],
+                media_paths=["/media/ABC-123"], poll_delays=()))
+        finally:
+            emby.httpx.AsyncClient = original_client
+        self.assertTrue(result["results"][0]["updated"])
+        self.assertEqual(Client.uploads, [
+            "http://emby:8096/Items/katakana-person/Images/Primary"])
+
     def test_emby_batch_notifies_only_current_media_and_verifies_people(self):
         class Response:
             def __init__(self, status=200, payload=None):
