@@ -57,6 +57,14 @@ def _code_key(value: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (value or "").upper())
 
 
+def _usable_avatar(url: str) -> bool:
+    value = (url or "").strip().lower()
+    return value.startswith("http") and not any(token in value for token in (
+        "nowprinting", "noimage", "no_image", "no-photo", "nophoto",
+        "placeholder", "/default-avatar", "/default_actor",
+    ))
+
+
 def _code_from_nfo(root: ET.Element, path: Path) -> str:
     for node in root.findall("uniqueid"):
         if (node.text or "").strip():
@@ -73,10 +81,18 @@ def _read_nfo(path: Path) -> tuple[ET.ElementTree, list, str]:
     tree = ET.parse(path)
     root = tree.getroot()
     actors = []
+    known = {}
     for node in root.findall("actor"):
         name = (node.findtext("name") or "").strip()
         if name:
-            actors.append({"name": name, "avatar": (node.findtext("thumb") or "").strip()})
+            avatar = (node.findtext("thumb") or "").strip()
+            key = _key(name)
+            if key not in known:
+                actor = {"name": name, "avatar": avatar if _usable_avatar(avatar) else ""}
+                actors.append(actor)
+                known[key] = actor
+            elif not _usable_avatar(known[key].get("avatar", "")) and _usable_avatar(avatar):
+                known[key]["avatar"] = avatar
     return tree, actors, _code_from_nfo(root, path)
 
 
@@ -95,7 +111,7 @@ def _write_nfo(path: Path, tree: ET.ElementTree, actors: list, write_thumb: bool
             ET.SubElement(node, "order").text = str(order)
         thumb = node.find("thumb")
         avatar = (actor.get("avatar") or "").strip()
-        if write_thumb and avatar.startswith("http"):
+        if write_thumb and _usable_avatar(avatar):
             if thumb is None:
                 thumb = ET.SubElement(node, "thumb")
             thumb.text = avatar
@@ -117,13 +133,14 @@ def _merge(target: list, incoming: list) -> int:
             continue
         key = _key(name)
         if key not in known:
-            actor = {"name": name, "avatar": (source.get("avatar") or "").strip()}
+            avatar = (source.get("avatar") or "").strip()
+            actor = {"name": name, "avatar": avatar if _usable_avatar(avatar) else ""}
             target.append(actor)
             known[key] = actor
             changed += 1
-        elif not (known[key].get("avatar") or "").startswith("http"):
+        elif not _usable_avatar(known[key].get("avatar", "")):
             avatar = (source.get("avatar") or "").strip()
-            if avatar.startswith("http"):
+            if _usable_avatar(avatar):
                 known[key]["avatar"] = avatar
                 changed += 1
     return changed
@@ -180,7 +197,7 @@ async def _actors_by_code(code: str, sources: list[str], proxy: Optional[str],
             _merge(actors, detail.get("actors") or [])
         if not actors:
             continue
-        found = {_key(a.get("name", "")): (a.get("avatar") or "").startswith("http")
+        found = {_key(a.get("name", "")): _usable_avatar(a.get("avatar", ""))
                  for a in actors}
         if not wanted_keys or all(found.get(key, False) for key in wanted_keys):
             _log(f"演员番号补查命中：{code}（{source}，{len(actors)} 位）")
@@ -199,13 +216,13 @@ async def _avatar_by_name(name: str, sources: list[str], proxy: Optional[str]) -
         for detail in details:
             for actor in detail.get("actors") or []:
                 avatar = (actor.get("avatar") or "").strip()
-                if _key(actor.get("name", "")) == wanted and avatar.startswith("http"):
+                if _key(actor.get("name", "")) == wanted and _usable_avatar(avatar):
                     return avatar, source
     return "", ""
 
 
 async def _download(url: str, proxy: Optional[str]) -> Optional[bytes]:
-    if not url.startswith("http"):
+    if not _usable_avatar(url):
         _log("头像下载跳过：来源未返回有效图片地址")
         return None
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.javbus.com/",
@@ -288,7 +305,7 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
     elif actors and code:
         # One code lookup per source is cheaper and more accurate than searching
         # every actor by name; AVSOX/AVMOO can provide portraits on movie details.
-        missing = [a for a in actors if not (a.get("avatar") or "").startswith("http")
+        missing = [a for a in actors if not _usable_avatar(a.get("avatar", ""))
                    and _cached_image(a["name"], config) is None]
         if missing:
             _log(f"演员头像待补全：{code}（{len(missing)} 位，先按番号逐源查询）")
@@ -296,14 +313,14 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
                 code, sources, proxy, [a["name"] for a in missing])
             _merge(actors, code_actors)
             resolved = sum(1 for actor in missing
-                           if (actor.get("avatar") or "").startswith("http"))
+                           if _usable_avatar(actor.get("avatar", "")))
             if not resolved:
                 _log(f"演员番号补查未取得头像：{code}，转为按演员名回退查询")
     saved = 0
     for actor in actors:
         local_cached = folder / "actors" / f"{_safe(actor['name'])}.jpg"
         has_cache = local_cached.exists() or _cached_image(actor["name"], config) is not None
-        if (overwrite or not has_cache) and not (actor.get("avatar") or "").startswith("http"):
+        if (overwrite or not has_cache) and not _usable_avatar(actor.get("avatar", "")):
             avatar, source = await _avatar_by_name(actor["name"], sources, proxy)
             actor["avatar"], actor["avatar_source"] = avatar, source
         if await _save_actor(actor, folder, config, proxy, overwrite):

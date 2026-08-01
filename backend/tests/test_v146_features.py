@@ -31,6 +31,40 @@ class VideoClassificationTests(unittest.TestCase):
             "avatar": "https://www.javbus.com/pics/actress/s0i_a.jpg",
         }])
 
+    def test_javbus_multi_actor_rejects_placeholder_portrait(self):
+        html = """
+        <div class="container"><h3>SAN-477 title</h3></div>
+        <a href="https://www.javbus.com/star/u3u">
+          <img src="/pics/actress/u3u_a.jpg" title="優木なお">
+        </a>
+        <div class="star-name"><a href="https://www.javbus.com/star/u3u">優木なお</a></div>
+        <a href="https://www.javbus.com/star/13vj">
+          <img src="https://pics.dmm.co.jp/mono/actjpgs/nowprinting.gif" title="尋井うみ">
+        </a>
+        <div class="star-name"><a href="https://www.javbus.com/star/13vj">尋井うみ</a></div>
+        """
+        detail = _javbus_base.parse_detail(
+            html, "https://www.javbus.com/SAN-477",
+            "https://www.javbus.com", "JavBus")
+        self.assertEqual([actor["name"] for actor in detail["actors"]],
+                         ["優木なお", "尋井うみ"])
+        self.assertTrue(detail["actors"][0]["avatar"].endswith("/u3u_a.jpg"))
+        self.assertEqual(detail["actors"][1]["avatar"], "")
+
+    def test_read_nfo_deduplicates_multi_actor_entries(self):
+        with tempfile.TemporaryDirectory() as raw:
+            nfo = Path(raw) / "ABC-123.nfo"
+            nfo.write_text("""<movie>
+              <actor><name>Actor A</name><thumb>https://img/a.jpg</thumb></actor>
+              <actor><name>Actor-A</name><thumb>https://img/duplicate.jpg</thumb></actor>
+              <actor><name>Actor B</name><thumb>https://img/nowprinting.gif</thumb></actor>
+            </movie>""", encoding="utf-8")
+            _tree, actors, _code = actor_scraper._read_nfo(nfo)
+        self.assertEqual(actors, [
+            {"name": "Actor A", "avatar": "https://img/a.jpg"},
+            {"name": "Actor B", "avatar": ""},
+        ])
+
     def test_actor_details_keep_already_loaded_live_result(self):
         original_search = actor_scraper.search
         original_enrich = actor_scraper.enrich

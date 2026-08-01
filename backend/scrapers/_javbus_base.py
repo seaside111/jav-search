@@ -34,6 +34,14 @@ def _abs_url(src: str, base_url: str) -> str:
     return base_url.rstrip("/") + src
 
 
+def _is_placeholder_avatar(url: str) -> bool:
+    value = (url or "").lower()
+    return any(token in value for token in (
+        "nowprinting", "noimage", "no_image", "no-photo", "nophoto",
+        "placeholder", "/default-avatar", "/default_actor",
+    ))
+
+
 def _hi_res_cover(thumb: str) -> str:
     """
     从列表页缩略图 URL 确定性推导「清晰大封面」URL（零额外网络请求）。
@@ -283,6 +291,7 @@ def parse_detail(html: str, url: str, base_url: str, source: str) -> Optional[di
     # 以 star URL 为稳定关联键，同时兼容旧版把姓名和图片放在同一容器的结构。
     actor_imgs_by_href = {}
     actor_imgs_by_name = {}
+    placeholder_hrefs = set()
     for link in soup.select("a[href*='/star/']"):
         img_tag = link.select_one("img")
         if not img_tag:
@@ -292,6 +301,10 @@ def parse_detail(html: str, url: str, base_url: str, source: str) -> Optional[di
         if not avatar:
             continue
         href = _abs_url(link.get("href", ""), base_url)
+        if _is_placeholder_avatar(avatar):
+            if href:
+                placeholder_hrefs.add(href.rstrip("/"))
+            continue
         if href:
             actor_imgs_by_href[href.rstrip("/")] = avatar
         image_name = (img_tag.get("title") or img_tag.get("alt") or "").strip()
@@ -317,7 +330,7 @@ def parse_detail(html: str, url: str, base_url: str, source: str) -> Optional[di
         avatar = actor_imgs_by_href.get(href) or actor_imgs_by_name.get(name, "")
         # 部分响应只保留 /star/{id}，不输出演员 img；JavBus 的演员图片路径
         # 与该 id 稳定对应，可直接构造候选 URL，下载阶段仍会校验 HTTP/图片类型。
-        if not avatar:
+        if not avatar and href not in placeholder_hrefs:
             star_id = re.search(r"/star/([a-z0-9]+)$", href, re.I)
             if star_id:
                 avatar = _abs_url(f"/pics/actress/{star_id.group(1)}_a.jpg", base_url)
