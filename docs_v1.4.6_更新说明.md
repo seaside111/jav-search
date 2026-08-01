@@ -10,6 +10,8 @@
 - 演员头像会按番号从 JavBus 详情补查，并先缓存到影片可见目录 `actors/<演员>.jpg` 后随影片归档；配置 Emby people 路径后，再同步到 `metadata/people/<演员>/folder.jpg` 与 `portrait.jpg`。旧版 `.actors` 缓存归档时会自动合并到 `actors`。
 - 演员头像现为独立任务：按“本地缓存 → NFO 头像 → 番号逐源补查 → JavBus 姓名回退”的顺序处理，补齐后立即停止后续来源；AVMOO/AVSOX 自动去重，JavDB 因不提供头像自动忽略。支持全局缓存、批量扫描、强制更新、NFO 回写和刮削后自动运行。
 - 新增 Emby API 设置、连接测试和自动同步；头像刮削成功后按姓名精确匹配 Emby Person，并上传为演员 Primary 主图。API Key 保存后脱敏显示。
+- 修复同一页面多个资源抽屉重复使用按钮 ID，导致第二个“推送下载”请求成功但 UI 更新到其他隐藏按钮的问题；现在直接更新实际点击的按钮节点。
+- 适配 AVSOX 2026-06 搜索 API 参数变更，将 `page`、`pageSize` 移入搜索对象，修复 `api search code=400` 及演员头像无法补全。
 - 修正规整后偶发只归档视频、漏带 NFO/封面的情况；附属文件改为大小写无关匹配并明确随视频落地。
 - 自动获取公共 Tracker best 列表，缓存七天；失败沿用旧缓存或内置兜底；支持用户自定义和手动刷新。
 - qBittorrent 与 Transmission 推送磁力时自动补充不重复的 Tracker，并在加种后 reannounce。
