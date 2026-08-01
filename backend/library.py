@@ -878,7 +878,8 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     if not overwrite and status["has_nfo"] and status["has_cover"]:
         existing = _read_existing_nfo_metadata(path, code)
         actor_images_saved = 0
-        if config.get("scrape_actor_images_enabled", False) and config.get("actor_scrape_auto", True):
+        if (config.get("scrape_actor_images_enabled", False)
+                or config.get("emby_actor_sync_enabled", False)) and config.get("actor_scrape_auto", True):
             import actor_scraper
             result = await actor_scraper.process_nfo(path.parent / f"{code}.nfo", config)
             actor_images_saved = result.get("saved", 0)
@@ -1018,7 +1019,8 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         if translated.get("success") and (translated.get("result") or "").strip():
             folder_title = translated["result"].strip()
     actor_images_saved = 0
-    if config.get("scrape_actor_images_enabled", False) and config.get("actor_scrape_auto", True):
+    if (config.get("scrape_actor_images_enabled", False)
+            or config.get("emby_actor_sync_enabled", False)) and config.get("actor_scrape_auto", True):
         try:
             import actor_scraper
             actor_result = await actor_scraper.process_nfo(folder / f"{code}.nfo", config)

@@ -327,6 +327,9 @@ class ConfigUpdateRequest(BaseModel):
     actor_scrape_write_nfo: Optional[bool] = None
     actor_scrape_sources: Optional[list[str]] = None
     actor_scrape_cache_dir: Optional[str] = None
+    emby_url: Optional[str] = None
+    emby_api_key: Optional[str] = None
+    emby_actor_sync_enabled: Optional[bool] = None
     public_trackers: Optional[str] = None
     public_trackers_auto_update: Optional[bool] = None
     archive_enabled: Optional[bool] = None       # 归档总开关：成品放归档目录
@@ -893,7 +896,7 @@ async def api_get_config():
     config = load_config()
     # 脱敏返回（隐藏密钥）
     safe_config = dict(config)
-    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "mteam_api_key", "javdb_cookie", "fc2_cookie", "image_imgbb_key", "image_imgchest_token", "image_freeimage_key", "image_postimage_key"]:
+    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "mteam_api_key", "javdb_cookie", "fc2_cookie", "image_imgbb_key", "image_imgchest_token", "image_freeimage_key", "image_postimage_key", "emby_api_key"]:
         if safe_config.get(key):
             v = safe_config[key]
             safe_config[key] = "***" + v[-4:] if len(v) > 4 else "****"
@@ -907,7 +910,7 @@ async def api_set_config(req: ConfigUpdateRequest):
 
     update = req.dict(exclude_none=True)
     # 如果是脱敏值则不更新
-    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "mteam_api_key", "javdb_cookie", "fc2_cookie", "image_imgbb_key", "image_imgchest_token", "image_freeimage_key", "image_postimage_key"]:
+    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "mteam_api_key", "javdb_cookie", "fc2_cookie", "image_imgbb_key", "image_imgchest_token", "image_freeimage_key", "image_postimage_key", "emby_api_key"]:
         v = update.get(key, "")
         if v and v.startswith("***"):
             update.pop(key, None)

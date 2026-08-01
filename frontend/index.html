@@ -568,7 +568,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6-beta</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6</div>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="3"/>
@@ -759,7 +759,7 @@
           <h3>系统日志</h3>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
-              <input type="checkbox" id="cfgLogVerbose" checked> 详细日志（beta 排查用）
+              <input type="checkbox" id="cfgLogVerbose" checked> 详细日志（调试排查用）
             </label>
             <span class="setting-hint">开启：后台 docker logs 记录每一步与每次 API 调用，便于测试排查。定型稳定后关闭，只显示主要动作（状态流转/成功失败）</span>
           </div>
@@ -1032,6 +1032,17 @@
             <span class="setting-hint">填写容器内路径后，会额外保存 <b>演员名/folder.jpg</b> 和 <b>portrait.jpg</b>。Docker 中需把 Emby 的 metadata/people 宿主机目录映射到这里；留空则仅保存影片内 actors 缓存。</span>
           </div>
           <div class="setting-row">
+            <label class="setting-label">Emby API 同步</label>
+            <input class="setting-input" id="cfgEmbyUrl" type="text" placeholder="例如 http://192.168.1.100:8096">
+            <input class="setting-input" id="cfgEmbyApiKey" type="password" placeholder="Emby API Key">
+            <label class="source-chk"><input type="checkbox" id="cfgEmbyActorSync"> 头像刮削成功后自动更新 Emby 演员主图</label>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="jackett-test-btn" style="margin-left:0" onclick="testEmby()">测试 Emby 连接</button>
+              <span class="setting-hint" id="embyTestStatus"></span>
+            </div>
+            <span class="setting-hint">使用 Emby “控制台 → 高级 → API 密钥”创建的 Key。同步时会按演员姓名精确匹配 Person，并替换 Primary 图片。</span>
+          </div>
+          <div class="setting-row">
             <label class="source-chk"><input type="checkbox" id="cfgActorThumbInNfo" checked> 将演员头像远程地址写入 NFO</label>
             <span class="setting-hint">写入 <b>&lt;actor&gt;&lt;thumb&gt;URL&lt;/thumb&gt;</b>，适合 Kodi、NFO 迁移及未来兼容。Emby 当前不会可靠读取此地址；即使 Emby 容器可访问外网，也建议同时启用本地头像缓存或配置 people 路径。</span>
           </div>
@@ -1043,8 +1054,8 @@
           </div>
           <div class="setting-row">
             <label class="setting-label">头像来源优先级</label>
-            <input class="setting-input" id="cfgActorSources" type="text" placeholder="javbus,avsox,avmoo,javdb">
-            <span class="setting-hint">番号详情按顺序尝试 javbus、avsox、avmoo、javdb；AVSOX/AVMOO 不支持演员名接口，JavDB 当前不返回头像，因此逐演员姓名的最终回退只使用 JavBus，避免 HTTP 400 和批量超时。</span>
+            <input class="setting-input" id="cfgActorSources" type="text" placeholder="javbus,avsox">
+            <span class="setting-hint">按顺序逐个尝试，满足当前演员头像后立即停止。推荐 javbus,avsox；AVMOO 与 AVSOX 共用后端会自动去重，JavDB 不返回头像会自动忽略。逐演员姓名的最终回退只使用 JavBus。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">全局演员头像缓存（可选）</label>
@@ -2282,8 +2293,11 @@ async function openSettings() {
     document.getElementById('cfgActorScrapeAuto').checked = cfg.actor_scrape_auto !== false;
     document.getElementById('cfgActorLookupCode').checked = cfg.actor_scrape_lookup_by_code !== false;
     document.getElementById('cfgActorWriteNfo').checked = cfg.actor_scrape_write_nfo !== false;
-    document.getElementById('cfgActorSources').value = (cfg.actor_scrape_sources || ['javbus','avsox','avmoo','javdb']).join(',');
+    document.getElementById('cfgActorSources').value = (cfg.actor_scrape_sources || ['javbus','avsox']).join(',');
     document.getElementById('cfgActorCacheDir').value = cfg.actor_scrape_cache_dir || '';
+    document.getElementById('cfgEmbyUrl').value = cfg.emby_url || '';
+    document.getElementById('cfgEmbyApiKey').value = cfg.emby_api_key || '';
+    document.getElementById('cfgEmbyActorSync').checked = cfg.emby_actor_sync_enabled === true;
     document.getElementById('cfgArchiveEnabled').checked = (cfg.archive_enabled ?? cfg.publish_archive_enabled) !== false;
     currentProvider = cfg.default_translate_provider || 'baidu';
     // 检测 Jackett 状态
@@ -2402,13 +2416,31 @@ async function runActorScrape(overwrite) {
   }
 }
 
+async function testEmby() {
+  const status = document.getElementById('embyTestStatus');
+  const url = document.getElementById('cfgEmbyUrl').value.trim();
+  const api_key = document.getElementById('cfgEmbyApiKey').value.trim();
+  if (!url || !api_key) { status.textContent = '请先填写 Emby 地址和 API Key'; return; }
+  status.textContent = '正在测试…';
+  try {
+    const resp = await fetch(`${API}/api/actors/emby/test`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url, api_key}),
+    });
+    const data = await safeJson(resp);
+    status.textContent = data.online
+      ? `连接正常：${data.server_name || 'Emby'} ${data.version || ''}`
+      : (data.message || '连接失败');
+  } catch (e) { status.textContent = '连接失败：' + e.message; }
+}
+
 async function refreshActorStatus() {
   const status = document.getElementById('actorScrapeStatus');
   try {
     const resp = await fetch(`${API}/api/actors/status`, {cache: 'no-store'});
     const s = await safeJson(resp);
     status.textContent = `${s.running ? '运行中' : (s.message || '未运行')}：${s.processed || 0}/${s.total || 0} 个 NFO，` +
-      `发现 ${s.actors || 0} 位演员，保存 ${s.saved || 0} 张，失败 ${s.failed || 0}` +
+      `发现 ${s.actors || 0} 位演员，本地可用 ${s.saved || 0} 张，失败 ${s.failed || 0}，Emby 更新 ${s.emby_updated || 0} 张` +
       (s.current ? `；当前 ${s.current}` : '');
     if (s.running) setTimeout(refreshActorStatus, 2000);
   } catch (e) {
@@ -2640,6 +2672,9 @@ async function saveSettings() {
     actor_scrape_write_nfo: document.getElementById('cfgActorWriteNfo').checked,
     actor_scrape_sources: document.getElementById('cfgActorSources').value.split(',').map(v => v.trim().toLowerCase()).filter(Boolean),
     actor_scrape_cache_dir: document.getElementById('cfgActorCacheDir').value.trim(),
+    emby_url: document.getElementById('cfgEmbyUrl').value.trim(),
+    emby_api_key: document.getElementById('cfgEmbyApiKey').value,
+    emby_actor_sync_enabled: document.getElementById('cfgEmbyActorSync').checked,
     archive_enabled: document.getElementById('cfgArchiveEnabled').checked,
   };
   currentProvider = payload.default_translate_provider;

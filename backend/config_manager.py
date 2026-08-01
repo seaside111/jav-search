@@ -153,8 +153,12 @@ DEFAULT_CONFIG = {
     "actor_scrape_auto": True,
     "actor_scrape_lookup_by_code": True,
     "actor_scrape_write_nfo": True,
-    "actor_scrape_sources": ["javbus", "avsox", "avmoo", "javdb"],
+    # AVMOO 与 AVSOX 共用后端，JavDB 不返回头像，不作为独立来源重复请求。
+    "actor_scrape_sources": ["javbus", "avsox"],
     "actor_scrape_cache_dir": "",
+    "emby_url": "",
+    "emby_api_key": "",
+    "emby_actor_sync_enabled": False,
     "public_trackers": "",               # 用户自定义；每行或逗号一个，非空时覆盖自动列表
     "public_trackers_auto_update": True,  # 自动抓取在线 best 列表并缓存 7 天
     "archive_enabled": True,             # 归档：刮削/发种成品放进归档目录(供 EMBY)；关=不归档(发种仍原地做种)

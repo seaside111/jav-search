@@ -14,12 +14,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from config_manager import CONFIG_PATH, load as load_config
+import emby
 from scrapers import search, enrich, SEARCH_MODE_ACTOR, SEARCH_MODE_CODE
 
 router = APIRouter(prefix="/api/actors")
 _task: Optional[asyncio.Task] = None
 _state = {"running": False, "root": "", "total": 0, "processed": 0,
-          "actors": 0, "saved": 0, "failed": 0, "current": "",
+          "actors": 0, "saved": 0, "failed": 0, "emby_updated": 0, "current": "",
           "started": "", "finished": "", "message": "", "recent": []}
 _image_exts = {".jpg", ".jpeg", ".png", ".webp"}
 
@@ -32,6 +33,11 @@ class ActorRunRequest(BaseModel):
 class ActorSingleRequest(BaseModel):
     folder: str
     overwrite: bool = False
+
+
+class EmbyTestRequest(BaseModel):
+    url: str
+    api_key: str
 
 
 def _log(message: str):
@@ -124,9 +130,17 @@ def _merge(target: list, incoming: list) -> int:
 
 
 def _sources(config: dict) -> list[str]:
-    raw = config.get("actor_scrape_sources") or ["javbus", "avsox", "avmoo", "javdb"]
-    allowed = {"javbus", "avsox", "avmoo", "javdb"}
-    return [s for s in raw if s in allowed] or ["javbus"]
+    raw = config.get("actor_scrape_sources") or ["javbus", "avsox"]
+    # AVMOO and AVSOX share the same javu backend. JavDB currently exposes
+    # names but no portrait URLs, so neither should cause duplicate requests.
+    aliases = {"avmoo": "avsox"}
+    allowed = {"javbus", "avsox"}
+    result = []
+    for value in raw:
+        source = aliases.get(str(value).strip().lower(), str(value).strip().lower())
+        if source in allowed and source not in result:
+            result.append(source)
+    return result or ["javbus"]
 
 
 async def _details(query: str, mode: str, source: str, proxy: Optional[str]) -> list[dict]:
@@ -140,13 +154,23 @@ async def _details(query: str, mode: str, source: str, proxy: Optional[str]) -> 
         return []
 
 
-async def _actors_by_code(code: str, sources: list[str], proxy: Optional[str]) -> list:
+async def _actors_by_code(code: str, sources: list[str], proxy: Optional[str],
+                          wanted: Optional[list[str]] = None) -> list:
+    """Resolve source-by-source and stop as soon as the request is satisfied."""
     actors = []
+    wanted_keys = {_key(name) for name in (wanted or []) if name}
     for source in sources:
         details = await _details(code, SEARCH_MODE_CODE, source, proxy)
         exact = [d for d in details if _code_key(d.get("code", "")) == _code_key(code)]
         for detail in exact or details[:1]:
             _merge(actors, detail.get("actors") or [])
+        if not actors:
+            continue
+        found = {_key(a.get("name", "")): (a.get("avatar") or "").startswith("http")
+                 for a in actors}
+        if not wanted_keys or all(found.get(key, False) for key in wanted_keys):
+            _log(f"演员番号补查命中：{code}（{source}，{len(actors)} 位）")
+            break
     return actors
 
 
@@ -224,6 +248,14 @@ async def _save_actor(actor: dict, folder: Path, config: dict,
             destination = person / filename
             if overwrite or not destination.exists():
                 shutil.copy2(cached, destination)
+    if config.get("emby_actor_sync_enabled", False):
+        image = cached.read_bytes()
+        result = await emby.update_person_image(
+            config.get("emby_url", ""), config.get("emby_api_key", ""), name, image)
+        actor["emby_updated"] = bool(result.get("updated"))
+        actor["emby_message"] = result.get("message", "")
+        if not result.get("updated"):
+            _log(f"Emby actor sync skipped/failed ({name}): {result.get('message', '')}")
     return True
 
 
@@ -242,10 +274,9 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
         missing = [a for a in actors if not (a.get("avatar") or "").startswith("http")
                    and _cached_image(a["name"], config) is None]
         if missing:
-            # JavDB is useful for discovering names when the NFO has none, but
-            # its parsed actor records contain no portrait URLs.
+            _log(f"演员头像待补全：{code}（{len(missing)} 位，先按番号逐源查询）")
             code_actors = await _actors_by_code(
-                code, [source for source in sources if source != "javdb"], proxy)
+                code, sources, proxy, [a["name"] for a in missing])
             _merge(actors, code_actors)
     saved = 0
     for actor in actors:
@@ -258,8 +289,12 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
             saved += 1
     if nfo_path and tree is not None and actors and config.get("actor_scrape_write_nfo", True):
         _write_nfo(nfo_path, tree, actors, config.get("scrape_actor_thumb_in_nfo", True))
+    emby_updated = sum(1 for actor in actors if actor.get("emby_updated"))
+    failed = max(0, len(actors) - saved)
+    _log(f"演员头像处理完成：{code or folder.name}（演员 {len(actors)}，本地可用 {saved}，"
+         f"失败 {failed}，Emby 更新 {emby_updated}）")
     return {"success": True, "code": code, "actors": actors, "saved": saved,
-            "failed": max(0, len(actors) - saved)}
+            "failed": failed, "emby_updated": emby_updated}
 
 
 async def process_nfo(path: Path, config: dict, overwrite: bool = False) -> dict:
@@ -274,7 +309,7 @@ async def _run(root: Path, config: dict, overwrite: bool):
     global _state
     nfos = sorted(root.rglob("*.nfo"))
     _state.update({"running": True, "root": str(root), "total": len(nfos), "processed": 0,
-                   "actors": 0, "saved": 0, "failed": 0, "current": "",
+                   "actors": 0, "saved": 0, "failed": 0, "emby_updated": 0, "current": "",
                    "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "finished": "",
                    "message": "正在扫描", "recent": []})
     try:
@@ -285,6 +320,7 @@ async def _run(root: Path, config: dict, overwrite: bool):
             _state["actors"] += len(result.get("actors") or [])
             _state["saved"] += result.get("saved", 0)
             _state["failed"] += result.get("failed", 0) if result.get("success") else 1
+            _state["emby_updated"] += result.get("emby_updated", 0)
             _state["recent"].insert(0, {"file": str(path), **result})
             del _state["recent"][20:]
         _state["message"] = "扫描完成"
@@ -297,6 +333,14 @@ async def _run(root: Path, config: dict, overwrite: bool):
 @router.get("/status")
 async def status():
     return dict(_state)
+
+
+@router.post("/emby/test")
+async def test_emby(req: EmbyTestRequest):
+    api_key = req.api_key.strip()
+    if api_key.startswith("***"):
+        api_key = (load_config().get("emby_api_key") or "").strip()
+    return await emby.test_connection(req.url, api_key)
 
 
 @router.post("/run")

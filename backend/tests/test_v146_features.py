@@ -143,7 +143,28 @@ class NamingAndTrackerTests(unittest.TestCase):
     def test_actor_source_priority_filters_unknown_sources(self):
         self.assertEqual(actor_scraper._sources({
             "actor_scrape_sources": ["javdb", "unknown", "javbus"]}),
-            ["javdb", "javbus"])
+            ["javbus"])
+        self.assertEqual(actor_scraper._sources({
+            "actor_scrape_sources": ["avmoo", "avsox", "javbus"]}),
+            ["avsox", "javbus"])
+
+    def test_actor_code_lookup_stops_after_complete_first_source(self):
+        original = actor_scraper._details
+        called = []
+
+        async def fake_details(query, mode, source, proxy):
+            called.append(source)
+            return [{"code": "ABC-123", "actors": [
+                {"name": "Actor A", "avatar": "https://example.test/a.jpg"}]}]
+
+        actor_scraper._details = fake_details
+        try:
+            actors = asyncio.run(actor_scraper._actors_by_code(
+                "ABC-123", ["javbus", "avsox"], None, ["Actor A"]))
+        finally:
+            actor_scraper._details = original
+        self.assertEqual(called, ["javbus"])
+        self.assertEqual(actors[0]["name"], "Actor A")
 
     def test_actor_name_lookup_skips_sources_without_portraits(self):
         original = actor_scraper._details

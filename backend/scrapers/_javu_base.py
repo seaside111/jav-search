@@ -75,7 +75,15 @@ async def _api(base: str, method: str, body, proxy: Optional[str],
         if resp.status_code != 200:
             print(f"[{source}] api {method} HTTP {resp.status_code}")
             return None
-        data = resp.json()
+        content_type = (resp.headers.get("content-type") or "").lower()
+        if "json" not in content_type:
+            print(f"[{source}] api {method} returned non-JSON response")
+            return None
+        try:
+            data = resp.json()
+        except ValueError:
+            print(f"[{source}] api {method} returned invalid JSON")
+            return None
         if not isinstance(data, dict) or data.get("code") != 200:
             code = data.get("code") if isinstance(data, dict) else "?"
             print(f"[{source}] api {method} code={code}")
