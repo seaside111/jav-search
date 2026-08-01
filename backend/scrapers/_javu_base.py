@@ -222,10 +222,12 @@ async def get_latest(base, source: str, proxy: Optional[str],
 
 async def search_list(base, source: str, query: str, mode: str,
                       proxy: Optional[str], max_results: int) -> list[dict]:
-    # search({search, lang}, pageSize, lang)：位置参数数组，按番号(movieFanHao)匹配。
+    # 2026-06 接口变更：page/pageSize 已移入 search 对象。旧格式
+    # [{search,lang}, pageSize, lang] 会触发服务端 code=400。
     size = max(int(max_results), 30)
     data, used = await _call(_bases(base), "search",
-                             [{"search": query, "lang": LANG}, size, LANG],
+                             [{"search": query, "page": 1,
+                               "pageSize": size, "lang": LANG}],
                              proxy, source)
     if not isinstance(data, list) or not data:
         return []

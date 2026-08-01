@@ -11,6 +11,7 @@ import actor_scraper
 import qbittorrent
 import transmission
 import main
+from scrapers import _javu_base
 from config_manager import DEFAULT_CONFIG
 
 
@@ -68,6 +69,24 @@ class VideoClassificationTests(unittest.TestCase):
 
 
 class NamingAndTrackerTests(unittest.TestCase):
+    def test_javu_search_uses_current_object_parameter_shape(self):
+        original = _javu_base._call
+        captured = {}
+
+        async def fake_call(bases, method, body, proxy, source):
+            captured.update(method=method, body=body)
+            return [], bases[0]
+
+        _javu_base._call = fake_call
+        try:
+            asyncio.run(_javu_base.search_list(
+                "https://example.test", "AVSOX", "LOCK-014", "code", None, 6))
+        finally:
+            _javu_base._call = original
+        self.assertEqual(captured["method"], "search")
+        self.assertEqual(captured["body"], [{
+            "search": "LOCK-014", "page": 1, "pageSize": 30, "lang": "cn"}])
+
     def test_push_buttons_use_clicked_node_and_page_unique_ids(self):
         frontend = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
             encoding="utf-8")
