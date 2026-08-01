@@ -329,6 +329,7 @@ class ConfigUpdateRequest(BaseModel):
     actor_scrape_cache_dir: Optional[str] = None
     emby_url: Optional[str] = None
     emby_api_key: Optional[str] = None
+    emby_media_root: Optional[str] = None
     emby_actor_sync_enabled: Optional[bool] = None
     public_trackers: Optional[str] = None
     public_trackers_auto_update: Optional[bool] = None

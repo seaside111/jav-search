@@ -17,7 +17,7 @@ from config_manager import DEFAULT_CONFIG
 
 
 class VideoClassificationTests(unittest.TestCase):
-    def test_emby_batch_refreshes_waits_uploads_and_verifies_people(self):
+    def test_emby_batch_notifies_only_current_media_and_verifies_people(self):
         class Response:
             def __init__(self, status=200, payload=None):
                 self.status_code = status
@@ -31,7 +31,7 @@ class VideoClassificationTests(unittest.TestCase):
                 return self._payload
 
         class Client:
-            refresh_calls = 0
+            media_updates = []
             uploads = []
             searches = {}
 
@@ -45,8 +45,8 @@ class VideoClassificationTests(unittest.TestCase):
                 return False
 
             async def post(self, url, **kwargs):
-                if url.endswith("/Library/Refresh"):
-                    Client.refresh_calls += 1
+                if url.endswith("/Library/Media/Updated"):
+                    Client.media_updates.append(kwargs.get("json"))
                     return Response(204)
                 if "/Images/Primary" in url:
                     Client.uploads.append((url, kwargs.get("content")))
@@ -76,16 +76,20 @@ class VideoClassificationTests(unittest.TestCase):
                 "http://emby:8096", "admin-key", [
                     {"name": "Actor A", "image": b"image-a"},
                     {"name": "Actor B", "image": b"image-b"},
-                ], poll_delays=(0,)))
+                ], media_paths=["/media/202608/SAN-475", "/media/202608/SAN-475/SAN-475.mp4"],
+                poll_delays=(0,)))
         finally:
             emby.httpx.AsyncClient = original_client
             emby.asyncio.sleep = original_sleep
-        self.assertTrue(result["refresh_triggered"])
-        self.assertEqual(Client.refresh_calls, 1)
+        self.assertTrue(result["media_update_triggered"])
+        self.assertEqual(Client.media_updates, [{"Updates": [
+            {"Path": "/media/202608/SAN-475", "UpdateType": "Created"},
+            {"Path": "/media/202608/SAN-475/SAN-475.mp4", "UpdateType": "Created"},
+        ]}])
         self.assertEqual(len(Client.uploads), 2)
         self.assertTrue(all(item["updated"] for item in result["results"]))
 
-    def test_actor_nfo_is_written_before_emby_library_refresh(self):
+    def test_actor_nfo_is_written_before_emby_media_notification(self):
         original_sync = actor_scraper.emby.sync_person_images
 
         with tempfile.TemporaryDirectory() as raw:
@@ -97,11 +101,12 @@ class VideoClassificationTests(unittest.TestCase):
             actor_dir.mkdir()
             (actor_dir / "Actor A.jpg").write_bytes(b"x" * 2048)
 
-            async def fake_sync(_url, _key, portraits):
+            async def fake_sync(_url, _key, portraits, media_paths=None):
                 current = nfo.read_text(encoding="utf-8")
                 self.assertIn("Actor A", current)
                 self.assertEqual([item["name"] for item in portraits], ["Actor A"])
-                return {"refresh_triggered": True, "results": [
+                self.assertIn(str(folder.resolve()), media_paths)
+                return {"media_update_triggered": True, "results": [
                     {"name": "Actor A", "updated": True, "message": "ok"}]}
 
             actor_scraper.emby.sync_person_images = fake_sync
@@ -118,6 +123,76 @@ class VideoClassificationTests(unittest.TestCase):
                     nfo, tree))
             finally:
                 actor_scraper.emby.sync_person_images = original_sync
+        self.assertEqual(result["emby_updated"], 1)
+
+    def test_emby_archive_root_maps_only_current_movie_folder(self):
+        with tempfile.TemporaryDirectory() as raw:
+            archive = Path(raw) / "archive"
+            folder = archive / "202608" / "SAN-475"
+            folder.mkdir(parents=True)
+            (folder / "SAN-475.mp4").write_bytes(b"video")
+            (folder / "SAN-475.nfo").write_text("<movie/>", encoding="utf-8")
+            (folder / "ignore.jpg").write_bytes(b"cover")
+            paths, error = actor_scraper._emby_media_paths(folder, {
+                "scrape_output_dir": str(archive),
+                "emby_media_root": "/data/av/jp",
+            })
+        self.assertEqual(error, "")
+        self.assertEqual(paths, [
+            "/data/av/jp/202608/SAN-475",
+            "/data/av/jp/202608/SAN-475/SAN-475.mp4",
+            "/data/av/jp/202608/SAN-475/SAN-475.nfo",
+        ])
+
+    def test_library_syncs_emby_only_after_archive_finishes(self):
+        original_scrape = library._scrape_one
+        original_archive = library._archive_file
+        original_sync = actor_scraper.sync_emby_folder
+        events = []
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            video = root / "downloads" / "SAN-475.mp4"
+            video.parent.mkdir()
+            video.write_bytes(b"video")
+            target = root / "archive" / "202608" / "SAN-475"
+
+            async def fake_scrape(*_args, **_kwargs):
+                events.append("scrape")
+                return {"success": True, "code": "SAN-475", "actors": [
+                    {"name": "Actor A", "avatar": "https://img/a.jpg"}],
+                    "actor_images_saved": 1, "title_original": "", "folder_title": ""}
+
+            def fake_archive(*_args, **_kwargs):
+                events.append("archive")
+                target.mkdir(parents=True)
+                (target / "SAN-475.mp4").write_bytes(b"video")
+                return {"archived": True, "moved_original": False,
+                        "target_dir": str(target), "files": ["SAN-475.mp4"]}
+
+            async def fake_sync(folder, _config, code, _actors):
+                events.append("emby")
+                self.assertEqual(folder, target)
+                self.assertEqual(code, "SAN-475")
+                self.assertTrue((folder / "SAN-475.mp4").exists())
+                return {"emby_updated": 1, "message": "ok"}
+
+            library._scrape_one = fake_scrape
+            library._archive_file = fake_archive
+            actor_scraper.sync_emby_folder = fake_sync
+            try:
+                result = asyncio.run(library._process_completed_file(video, {
+                    "scrape_output_dir": str(root / "archive"),
+                    "scrape_meta_enabled": True, "scrape_organize_enabled": True,
+                    "archive_enabled": True, "archive_mode": "hardlink",
+                    "archive_by_month": True, "scrape_move_on_fail": True,
+                    "scrape_watch_dir": str(video.parent),
+                    "emby_actor_sync_enabled": True,
+                }))
+            finally:
+                library._scrape_one = original_scrape
+                library._archive_file = original_archive
+                actor_scraper.sync_emby_folder = original_sync
+        self.assertEqual(events, ["scrape", "archive", "emby"])
         self.assertEqual(result["emby_updated"], 1)
 
     def test_javbus_current_star_link_portrait_markup(self):

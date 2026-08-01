@@ -158,6 +158,7 @@ DEFAULT_CONFIG = {
     "actor_scrape_cache_dir": "",
     "emby_url": "",
     "emby_api_key": "",
+    "emby_media_root": "",             # Emby 容器内看到的归档根路径；留空表示与本容器一致
     "emby_actor_sync_enabled": False,
     "public_trackers": "",               # 用户自定义；每行或逗号一个，非空时覆盖自动列表
     "public_trackers_auto_update": True,  # 自动抓取在线 best 列表并缓存 7 天

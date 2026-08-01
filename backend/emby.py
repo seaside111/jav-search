@@ -64,11 +64,12 @@ async def _verify_primary(client: httpx.AsyncClient, base: str, headers: dict,
 
 
 async def sync_person_images(url: str, api_key: str, portraits: list[dict],
+                             media_paths: Optional[list[str]] = None,
                              poll_delays: tuple[float, ...] = (1, 2, 3, 5, 8, 13, 20)) -> dict:
-    """Refresh the library once, wait for Persons, upload and verify Primary images.
+    """Notify Emby about only the new media paths, then upload Person images.
 
     A newly written NFO is not immediately represented by an Emby Person.  Starting
-    a library scan before lookup makes Emby import the NFO/actor association first.
+    a targeted media update before lookup makes Emby import the NFO/actor association.
     Uploading directly to the Person afterwards avoids relying on Emby downloading
     the remote NFO <thumb> URL.  We intentionally do not FullRefresh the Person after
     upload because a metadata provider could replace the image we just set.
@@ -78,7 +79,18 @@ async def sync_person_images(url: str, api_key: str, portraits: list[dict],
              if item.get("name") and isinstance(item.get("image"), (bytes, bytearray))
              and item.get("image")]
     if not base or not token or not valid:
-        return {"refresh_triggered": False, "results": [], "message": "Emby 未配置或没有头像"}
+        return {"media_update_triggered": False, "results": [], "message": "Emby 未配置或没有头像"}
+
+    paths = []
+    for value in media_paths or []:
+        path = (value or "").strip()
+        if path and path not in paths:
+            paths.append(path)
+    if not paths:
+        return {"media_update_triggered": False, "results": [{
+            "name": item["name"], "updated": False,
+            "message": "未提供 Emby 可见的当前影片路径，已拒绝全库刷新"} for item in valid],
+            "message": "缺少 Emby 当前影片路径"}
 
     headers = _headers(token)
     results = {item["name"]: {"name": item["name"], "updated": False,
@@ -86,13 +98,15 @@ async def sync_person_images(url: str, api_key: str, portraits: list[dict],
                for item in valid}
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            refresh = await client.post(f"{base}/Library/Refresh", headers=headers)
-            if refresh.status_code in (401, 403):
-                return {"refresh_triggered": False, "results": [{
+            media_update = await client.post(
+                f"{base}/Library/Media/Updated", headers={**headers, "Content-Type": "application/json"},
+                json={"Updates": [{"Path": path, "UpdateType": "Created"} for path in paths]})
+            if media_update.status_code in (401, 403):
+                return {"media_update_triggered": False, "results": [{
                     "name": item["name"], "updated": False,
-                    "message": "API Key 没有管理员权限，无法刷新媒体库"} for item in valid],
+                    "message": "API Key 没有权限通知当前影片目录"} for item in valid],
                     "message": "Emby 管理员权限不足"}
-            refresh.raise_for_status()
+            media_update.raise_for_status()
 
             pending = {item["name"]: item for item in valid}
             people = {}
@@ -128,10 +142,10 @@ async def sync_person_images(url: str, api_key: str, portraits: list[dict],
                 results[name] = {"name": name, "updated": verified,
                                  "person_id": item_id,
                                  "message": "头像已上传并验证" if verified else "头像上传后未检测到 Primary 图片"}
-            return {"refresh_triggered": True, "results": list(results.values()),
-                    "message": "媒体库已刷新，演员头像同步完成"}
+            return {"media_update_triggered": True, "results": list(results.values()),
+                    "message": "已通知当前影片目录，演员头像同步完成"}
     except Exception as exc:
-        return {"refresh_triggered": False, "results": [{
+        return {"media_update_triggered": False, "results": [{
             "name": item["name"], "updated": False,
             "message": f"Emby 更新失败：{exc}"} for item in valid],
             "message": f"Emby 更新失败：{exc}"}
@@ -150,8 +164,9 @@ def valid_by_name(items: list[dict]) -> dict[str, dict]:
 
 
 async def update_person_image(url: str, api_key: str, name: str, image: bytes,
-                              content_type: str = "image/jpeg") -> dict:
+                              content_type: str = "image/jpeg",
+                              media_paths: Optional[list[str]] = None) -> dict:
     """Backward-compatible single-person wrapper using the refresh-and-verify flow."""
     batch = await sync_person_images(url, api_key, [{
-        "name": name, "image": image, "content_type": content_type}])
+        "name": name, "image": image, "content_type": content_type}], media_paths=media_paths)
     return (batch.get("results") or [{"updated": False, "message": batch.get("message", "同步失败")}])[0]

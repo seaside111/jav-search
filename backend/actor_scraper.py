@@ -5,7 +5,7 @@ import re
 import shutil
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 from xml.dom import minidom
 
@@ -23,6 +23,7 @@ _state = {"running": False, "root": "", "total": 0, "processed": 0,
           "actors": 0, "saved": 0, "failed": 0, "emby_updated": 0, "current": "",
           "started": "", "finished": "", "message": "", "recent": []}
 _image_exts = {".jpg", ".jpeg", ".png", ".webp"}
+_video_exts = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".webm"}
 
 
 class ActorRunRequest(BaseModel):
@@ -285,9 +286,85 @@ async def _save_actor(actor: dict, folder: Path, config: dict,
     return True
 
 
+def _emby_media_paths(folder: Path, config: dict) -> tuple[list[str], str]:
+    """Map the archived folder to paths visible inside the Emby server/container."""
+    local_folder = folder.resolve()
+    local_root_value = (config.get("scrape_output_dir") or "").strip()
+    emby_root = (config.get("emby_media_root") or "").strip()
+    if emby_root:
+        if not local_root_value:
+            return [], "配置了 Emby 归档根路径，但本项目归档目录为空"
+        try:
+            relative = local_folder.relative_to(Path(local_root_value).resolve())
+        except ValueError:
+            return [], f"当前目录不在项目归档根路径内，无法映射到 Emby：{local_folder}"
+        remote_folder = str(PurePosixPath(emby_root, *relative.parts))
+    else:
+        remote_folder = str(local_folder)
+
+    paths = [remote_folder]
+    for child in sorted(folder.iterdir() if folder.is_dir() else []):
+        if child.is_file() and (child.suffix.lower() in _video_exts or child.suffix.lower() == ".nfo"):
+            if emby_root:
+                paths.append(str(PurePosixPath(remote_folder, child.name)))
+            else:
+                paths.append(str(child.resolve()))
+    return paths, ""
+
+
+async def sync_emby_folder(folder: Path, config: dict, code: str = "",
+                           actors: Optional[list] = None) -> dict:
+    """After archive completion, notify only this Emby folder and sync its portraits."""
+    if not config.get("emby_actor_sync_enabled", False):
+        return {"emby_updated": 0, "results": [], "message": "Emby 同步未启用"}
+    if actors is None:
+        nfo = next(folder.glob("*.nfo"), None) if folder.is_dir() else None
+        if not nfo:
+            return {"emby_updated": 0, "results": [], "message": "归档目录中没有 NFO"}
+        try:
+            _tree, actors, nfo_code = _read_nfo(nfo)
+            code = code or nfo_code
+        except Exception as exc:
+            return {"emby_updated": 0, "results": [], "message": f"读取归档 NFO 失败：{exc}"}
+
+    portraits = []
+    for actor in actors or []:
+        name = (actor.get("name") or "").strip()
+        local = folder / "actors" / f"{_safe(name)}.jpg"
+        if name and local.exists() and local.stat().st_size > 1024:
+            portraits.append({"name": name, "image": local.read_bytes(),
+                              "content_type": "image/jpeg"})
+    if not portraits:
+        return {"emby_updated": 0, "results": [], "message": "归档目录中没有可用演员头像"}
+
+    media_paths, path_error = _emby_media_paths(folder, config)
+    if path_error:
+        _log(f"Emby 当前影片目录映射失败：{path_error}")
+        return {"emby_updated": 0, "results": [{
+            "name": item["name"], "updated": False, "message": path_error} for item in portraits],
+            "message": path_error}
+
+    _log(f"Emby 定向通知当前影片目录并同步演员头像：{code or folder.name}"
+         f"（演员 {len(portraits)} 位，目录 {media_paths[0]}）")
+    batch = await emby.sync_person_images(
+        config.get("emby_url", ""), config.get("emby_api_key", ""), portraits,
+        media_paths=media_paths)
+    by_name = {_key(item.get("name", "")): item for item in batch.get("results") or []}
+    for actor in actors or []:
+        result = by_name.get(_key(actor.get("name", "")), {})
+        actor["emby_updated"] = bool(result.get("updated"))
+        actor["emby_message"] = result.get("message", "")
+        if result and not result.get("updated"):
+            _log(f"Emby 演员头像同步失败（{actor['name']}）：{result.get('message', '')}")
+    updated = sum(1 for actor in actors or [] if actor.get("emby_updated"))
+    _log(f"Emby 当前影片目录同步完成：{code or folder.name}"
+         f"（头像 {len(portraits)}，更新 {updated}）")
+    return {**batch, "actors": actors or [], "emby_updated": updated}
+
+
 async def process_movie(folder: Path, actors: list, code: str, config: dict,
                         nfo_path: Optional[Path] = None, tree: Optional[ET.ElementTree] = None,
-                        overwrite: bool = False) -> dict:
+                        overwrite: bool = False, sync_emby: bool = True) -> dict:
     """Resolve and save portraits for one movie independently of movie scraping."""
     proxy = config.get("proxy") or None
     sources = _sources(config)
@@ -321,37 +398,25 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
     # 否则新 Person/影片演员关系可能直到下一次手工刷新才出现。
     if nfo_path and tree is not None and actors and config.get("actor_scrape_write_nfo", True):
         _write_nfo(nfo_path, tree, actors, config.get("scrape_actor_thumb_in_nfo", True))
-    if config.get("emby_actor_sync_enabled", False) and saved:
-        portraits = []
-        for actor in actors:
-            local = folder / "actors" / f"{_safe(actor['name'])}.jpg"
-            if local.exists() and local.stat().st_size > 1024:
-                portraits.append({"name": actor["name"], "image": local.read_bytes(),
-                                  "content_type": "image/jpeg"})
-        if portraits:
-            _log(f"Emby 自动刷新媒体库并同步演员头像：{code or folder.name}（{len(portraits)} 位）")
-            batch = await emby.sync_person_images(
-                config.get("emby_url", ""), config.get("emby_api_key", ""), portraits)
-            by_name = {_key(item.get("name", "")): item
-                       for item in batch.get("results") or []}
-            for actor in actors:
-                result = by_name.get(_key(actor.get("name", "")), {})
-                actor["emby_updated"] = bool(result.get("updated"))
-                actor["emby_message"] = result.get("message", "")
-                if result and not result.get("updated"):
-                    _log(f"Emby 演员头像同步失败（{actor['name']}）：{result.get('message', '')}")
+    if sync_emby and config.get("emby_actor_sync_enabled", False) and saved:
+        await sync_emby_folder(folder, config, code, actors)
     emby_updated = sum(1 for actor in actors if actor.get("emby_updated"))
     failed = max(0, len(actors) - saved)
+    emby_status = (f"Emby 更新 {emby_updated}" if sync_emby
+                   else "Emby 待归档后定向同步")
     _log(f"演员头像处理完成：{code or folder.name}（演员 {len(actors)}，本地可用 {saved}，"
-         f"失败 {failed}，Emby 更新 {emby_updated}）")
+         f"失败 {failed}，{emby_status}）")
     return {"success": True, "code": code, "actors": actors, "saved": saved,
-            "failed": failed, "emby_updated": emby_updated}
+            "failed": failed, "emby_updated": emby_updated,
+            "emby_pending": bool(not sync_emby and config.get("emby_actor_sync_enabled", False) and saved)}
 
 
-async def process_nfo(path: Path, config: dict, overwrite: bool = False) -> dict:
+async def process_nfo(path: Path, config: dict, overwrite: bool = False,
+                      sync_emby: bool = True) -> dict:
     try:
         tree, actors, code = _read_nfo(path)
-        return await process_movie(path.parent, actors, code, config, path, tree, overwrite)
+        return await process_movie(path.parent, actors, code, config, path, tree,
+                                   overwrite, sync_emby)
     except Exception as exc:
         return {"success": False, "file": str(path), "saved": 0, "actors": [], "error": str(exc)}
 

@@ -1035,12 +1035,13 @@
             <label class="setting-label">Emby API 同步</label>
             <input class="setting-input" id="cfgEmbyUrl" type="text" placeholder="例如 http://192.168.1.100:8096">
             <input class="setting-input" id="cfgEmbyApiKey" type="password" placeholder="Emby API Key">
+            <input class="setting-input" id="cfgEmbyMediaRoot" type="text" placeholder="Emby 容器内归档根路径；路径相同可留空，例如 /media/av/jp">
             <label class="source-chk"><input type="checkbox" id="cfgEmbyActorSync"> 头像刮削成功后自动更新 Emby 演员主图</label>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="jackett-test-btn" style="margin-left:0" onclick="testEmby()">测试 Emby 连接</button>
               <span class="setting-hint" id="embyTestStatus"></span>
             </div>
-            <span class="setting-hint">使用 Emby “控制台 → 高级 → API 密钥”创建的管理员 Key。同步时会先通过 API 启动媒体库扫描、等待 NFO 中的 Person 出现，再按演员姓名匹配、上传并验证 Primary 图片；新演员首次入库可能需要约 1 分钟。</span>
+            <span class="setting-hint">使用 Emby 管理员 Key。影片归档完成后只通知当前影片目录，不再扫描其他媒体库；若本项目归档根目录与 Emby 容器内挂载路径不同，请填写上方 Emby 路径。随后等待 Person 出现、上传并验证 Primary 图片。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk"><input type="checkbox" id="cfgActorThumbInNfo" checked> 将演员头像远程地址写入 NFO</label>
@@ -2299,6 +2300,7 @@ async function openSettings() {
     document.getElementById('cfgActorCacheDir').value = cfg.actor_scrape_cache_dir || '';
     document.getElementById('cfgEmbyUrl').value = cfg.emby_url || '';
     document.getElementById('cfgEmbyApiKey').value = cfg.emby_api_key || '';
+    document.getElementById('cfgEmbyMediaRoot').value = cfg.emby_media_root || '';
     document.getElementById('cfgEmbyActorSync').checked = cfg.emby_actor_sync_enabled === true;
     document.getElementById('cfgArchiveEnabled').checked = (cfg.archive_enabled ?? cfg.publish_archive_enabled) !== false;
     currentProvider = cfg.default_translate_provider || 'baidu';
@@ -2676,6 +2678,7 @@ async function saveSettings() {
     actor_scrape_cache_dir: document.getElementById('cfgActorCacheDir').value.trim(),
     emby_url: document.getElementById('cfgEmbyUrl').value.trim(),
     emby_api_key: document.getElementById('cfgEmbyApiKey').value,
+    emby_media_root: document.getElementById('cfgEmbyMediaRoot').value.trim(),
     emby_actor_sync_enabled: document.getElementById('cfgEmbyActorSync').checked,
     archive_enabled: document.getElementById('cfgArchiveEnabled').checked,
   };

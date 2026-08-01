@@ -14,7 +14,7 @@
 - 适配 AVSOX 2026-06 搜索 API 参数变更，将 `page`、`pageSize` 移入搜索对象，修复 `api search code=400` 及演员头像无法补全。
 - 修复 JavBus 当前页面将演员名与头像拆分为兄弟节点后，旧选择器只能取得演员名、头像 URL 始终为空的问题；按演员链接关联头像并以演员 ID 路径兜底，同时自动绕过旧版留下的空头像详情缓存，无需手工清理 `/config/detailcache`。
 - 核对并强化多演员头像流程：NFO 中每个 `<actor>` 均独立下载、缓存并同步 Emby；重复演员会按规范化姓名去重，`nowprinting/noimage` 等占位图不再被误存为演员头像或计入成功数。
-- 完善 Emby 首次入库时序：先回写完整 NFO，再自动调用 `/Library/Refresh` 扫描媒体库，轮询等待新 Person 创建，批量上传 `/Items/{Id}/Images/Primary` 并查询图片列表验证结果；无需再到 Emby 后台手工扫描或刷新演员，且避免在上传后 FullRefresh 覆盖刚设置的头像。
+- 完善 Emby 首次入库时序并修复同步过早问题：头像先下载并随影片归档，归档成功后才调用 `/Library/Media/Updated` 定向通知当前影片目录，轮询等待新 Person 创建，再批量上传 `/Items/{Id}/Images/Primary` 并验证；不再调用会扫描全部媒体库的 `/Library/Refresh`。支持单独配置 Emby 容器内归档根路径，解决两个容器挂载路径不同的问题。
 - 修正规整后偶发只归档视频、漏带 NFO/封面的情况；附属文件改为大小写无关匹配并明确随视频落地。
 - 自动获取公共 Tracker best 列表，缓存七天；失败沿用旧缓存或内置兜底；支持用户自定义和手动刷新。
 - qBittorrent 与 Transmission 推送磁力时自动补充不重复的 Tracker，并在加种后 reannounce。

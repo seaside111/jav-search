@@ -881,7 +881,9 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         if (config.get("scrape_actor_images_enabled", False)
                 or config.get("emby_actor_sync_enabled", False)) and config.get("actor_scrape_auto", True):
             import actor_scraper
-            result = await actor_scraper.process_nfo(path.parent / f"{code}.nfo", config)
+            # 当前目录尚未归档到 Emby 媒体库；这里只下载/回写头像，归档成功后再定向同步。
+            result = await actor_scraper.process_nfo(
+                path.parent / f"{code}.nfo", config, sync_emby=False)
             actor_images_saved = result.get("saved", 0)
             existing["actors"] = result.get("actors") or existing.get("actors", [])
             _log(f"NFO 和封面已存在，已补查演员头像：{code}（保存 {actor_images_saved} 张）")
@@ -1023,7 +1025,9 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             or config.get("emby_actor_sync_enabled", False)) and config.get("actor_scrape_auto", True):
         try:
             import actor_scraper
-            actor_result = await actor_scraper.process_nfo(folder / f"{code}.nfo", config)
+            # 当前目录尚未归档到 Emby 媒体库；这里只下载/回写头像，归档成功后再定向同步。
+            actor_result = await actor_scraper.process_nfo(
+                folder / f"{code}.nfo", config, sync_emby=False)
             actor_images_saved = actor_result.get("saved", 0)
             if actor_result.get("actors"):
                 movie["actors"] = actor_result["actors"]
@@ -1438,6 +1442,18 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         record["moved"] = mv.get("archived", False)
         record["archive_mode"] = mode
         record["target_dir"] = mv.get("target_dir", "")
+        if (mv.get("archived") and config.get("emby_actor_sync_enabled", False)
+                and scrape_res.get("actor_images_saved", 0)):
+            try:
+                import actor_scraper
+                emby_result = await actor_scraper.sync_emby_folder(
+                    Path(mv["target_dir"]), config, code, scrape_res.get("actors") or None)
+                record["emby_updated"] = emby_result.get("emby_updated", 0)
+                record["emby_message"] = emby_result.get("message", "")
+            except Exception as e:
+                record["emby_updated"] = 0
+                record["emby_message"] = f"Emby 定向同步异常：{e}"
+                _log(record["emby_message"])
         if mv.get("moved_original"):
             # 仅 move 模式：原文件已移走，清理原下载目录（含遗留广告/样板文件，连同子目录删除）。
             # hardlink/copy 模式保留原文件（可继续做种/辅种），绝不删原目录。
