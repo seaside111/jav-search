@@ -125,6 +125,68 @@ class VideoClassificationTests(unittest.TestCase):
                 actor_scraper.emby.sync_person_images = original_sync
         self.assertEqual(result["emby_updated"], 1)
 
+    def test_cached_actor_metadata_restores_thumb_url_into_nfo(self):
+        with tempfile.TemporaryDirectory() as raw:
+            folder = Path(raw) / "movie"
+            cache = Path(raw) / "cache" / "Actor A"
+            folder.mkdir()
+            cache.mkdir(parents=True)
+            (cache / "portrait.jpg").write_bytes(b"x" * 2048)
+            (cache / "metadata.json").write_text(
+                '{"url":"https://img.test/a.jpg","source":"javbus"}', encoding="utf-8")
+            nfo = folder / "ABC-123.nfo"
+            nfo.write_text("<movie><actor><name>Actor A</name></actor></movie>", encoding="utf-8")
+            tree = actor_scraper.ET.parse(nfo)
+            result = asyncio.run(actor_scraper.process_movie(
+                folder, [{"name": "Actor A", "avatar": ""}], "ABC-123",
+                {"actor_scrape_cache_dir": str(Path(raw) / "cache"),
+                 "actor_scrape_sources": ["javbus"],
+                 "actor_scrape_lookup_by_code": True,
+                 "actor_scrape_write_nfo": True,
+                 "scrape_actor_thumb_in_nfo": True},
+                nfo, tree, sync_emby=False))
+            written = nfo.read_text(encoding="utf-8")
+        self.assertEqual(result["saved"], 1)
+        self.assertIn("<thumb>https://img.test/a.jpg</thumb>", written)
+
+    def test_local_actor_image_without_metadata_recovers_url_without_download(self):
+        original_code_lookup = actor_scraper._actors_by_code
+        original_download = actor_scraper._download
+        with tempfile.TemporaryDirectory() as raw:
+            folder = Path(raw) / "movie"
+            actors_dir = folder / "actors"
+            actors_dir.mkdir(parents=True)
+            (actors_dir / "Actor A.jpg").write_bytes(b"x" * 2048)
+            nfo = folder / "ABC-123.nfo"
+            nfo.write_text("<movie><actor><name>Actor A</name></actor></movie>", encoding="utf-8")
+            tree = actor_scraper.ET.parse(nfo)
+
+            async def fake_lookup(*_args, **_kwargs):
+                return [{"name": "Actor A", "avatar": "https://img.test/recovered.jpg"}]
+
+            async def fail_download(*_args, **_kwargs):
+                raise AssertionError("existing portrait must not be downloaded again")
+
+            actor_scraper._actors_by_code = fake_lookup
+            actor_scraper._download = fail_download
+            try:
+                result = asyncio.run(actor_scraper.process_movie(
+                    folder, [{"name": "Actor A", "avatar": ""}], "ABC-123",
+                    {"actor_scrape_cache_dir": str(Path(raw) / "cache"),
+                     "actor_scrape_sources": ["javbus"],
+                     "actor_scrape_lookup_by_code": True,
+                     "actor_scrape_write_nfo": True,
+                     "scrape_actor_thumb_in_nfo": True},
+                    nfo, tree, sync_emby=False))
+            finally:
+                actor_scraper._actors_by_code = original_code_lookup
+                actor_scraper._download = original_download
+            metadata = (Path(raw) / "cache" / "Actor A" / "metadata.json").read_text(encoding="utf-8")
+            written = nfo.read_text(encoding="utf-8")
+        self.assertEqual(result["saved"], 1)
+        self.assertIn("<thumb>https://img.test/recovered.jpg</thumb>", written)
+        self.assertIn("https://img.test/recovered.jpg", metadata)
+
     def test_emby_archive_root_maps_only_current_movie_folder(self):
         with tempfile.TemporaryDirectory() as raw:
             archive = Path(raw) / "archive"

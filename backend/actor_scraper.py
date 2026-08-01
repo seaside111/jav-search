@@ -97,9 +97,10 @@ def _read_nfo(path: Path) -> tuple[ET.ElementTree, list, str]:
     return tree, actors, _code_from_nfo(root, path)
 
 
-def _write_nfo(path: Path, tree: ET.ElementTree, actors: list, write_thumb: bool):
+def _write_nfo(path: Path, tree: ET.ElementTree, actors: list, write_thumb: bool) -> int:
     root = tree.getroot()
     nodes = {_key(n.findtext("name") or ""): n for n in root.findall("actor")}
+    written = 0
     for order, actor in enumerate(actors):
         name = (actor.get("name") or "").strip()
         if not name:
@@ -116,6 +117,7 @@ def _write_nfo(path: Path, tree: ET.ElementTree, actors: list, write_thumb: bool
             if thumb is None:
                 thumb = ET.SubElement(node, "thumb")
             thumb.text = avatar
+            written += 1
         elif not write_thumb and thumb is not None:
             node.remove(thumb)
     raw = ET.tostring(root, encoding="unicode")
@@ -123,6 +125,7 @@ def _write_nfo(path: Path, tree: ET.ElementTree, actors: list, write_thumb: bool
     lines = [line for line in pretty.splitlines() if line.strip()]
     lines[0] = '<?xml version="1.0" encoding="utf-8" standalone="yes"?>'
     path.write_text("\n".join(lines), encoding="utf-8")
+    return written
 
 
 def _merge(target: list, incoming: list) -> int:
@@ -252,25 +255,51 @@ def _cached_image(name: str, config: dict) -> Optional[Path]:
     return None
 
 
+def _cached_avatar(name: str, config: dict) -> tuple[str, str]:
+    """Restore the source URL saved alongside a cached portrait."""
+    cache = Path(config.get("actor_scrape_cache_dir") or CONFIG_PATH.parent / "actor-cache")
+    metadata = cache / _safe(name) / "metadata.json"
+    try:
+        payload = json.loads(metadata.read_text(encoding="utf-8"))
+        url = (payload.get("url") or "").strip()
+        if _usable_avatar(url):
+            return url, (payload.get("source") or "").strip()
+    except (OSError, ValueError, TypeError):
+        pass
+    return "", ""
+
+
 async def _save_actor(actor: dict, folder: Path, config: dict,
                       proxy: Optional[str], overwrite: bool) -> bool:
     name = (actor.get("name") or "").strip()
     if not name:
         return False
     local = folder / "actors" / f"{_safe(name)}.jpg"
+    cache_dir = Path(config.get("actor_scrape_cache_dir") or CONFIG_PATH.parent / "actor-cache") / _safe(name)
     cached = _cached_image(name, config)
-    if local.exists() and not overwrite:
+    if local.exists() and local.stat().st_size > 1024 and not overwrite:
         cached = local
     if cached is None or overwrite:
         image = await _download((actor.get("avatar") or "").strip(), proxy)
         if not image:
             return False
-        cache_dir = Path(config.get("actor_scrape_cache_dir") or CONFIG_PATH.parent / "actor-cache") / _safe(name)
         cache_dir.mkdir(parents=True, exist_ok=True)
         cached = cache_dir / "portrait.jpg"
         cached.write_bytes(image)
+    if cached is None:
+        return False
+    # Old releases could leave a usable movie-local image without a global
+    # portrait or metadata. Preserve it globally and persist a recovered URL.
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    global_cached = _cached_image(name, config)
+    if global_cached is None:
+        global_cached = cache_dir / "portrait.jpg"
+        if cached != global_cached:
+            shutil.copy2(cached, global_cached)
+    avatar = (actor.get("avatar") or "").strip()
+    if _usable_avatar(avatar):
         (cache_dir / "metadata.json").write_text(json.dumps({
-            "name": name, "url": actor.get("avatar", ""), "source": actor.get("avatar_source", ""),
+            "name": name, "url": avatar, "source": actor.get("avatar_source", ""),
             "updated": datetime.now().isoformat(timespec="seconds")}, ensure_ascii=False, indent=2), encoding="utf-8")
     local.parent.mkdir(parents=True, exist_ok=True)
     if overwrite or not local.exists():
@@ -369,13 +398,17 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
     proxy = config.get("proxy") or None
     sources = _sources(config)
     actors = [dict(a) for a in (actors or []) if a.get("name")]
+    for actor in actors:
+        if not _usable_avatar(actor.get("avatar", "")):
+            avatar, source = _cached_avatar(actor["name"], config)
+            if avatar:
+                actor["avatar"], actor["avatar_source"] = avatar, source
     if not actors and code and config.get("actor_scrape_lookup_by_code", True):
         actors = await _actors_by_code(code, sources, proxy)
-    elif actors and code:
+    elif actors and code and config.get("actor_scrape_lookup_by_code", True):
         # One code lookup per source is cheaper and more accurate than searching
         # every actor by name; AVSOX/AVMOO can provide portraits on movie details.
-        missing = [a for a in actors if not _usable_avatar(a.get("avatar", ""))
-                   and _cached_image(a["name"], config) is None]
+        missing = [a for a in actors if not _usable_avatar(a.get("avatar", ""))]
         if missing:
             _log(f"演员头像待补全：{code}（{len(missing)} 位，先按番号逐源查询）")
             code_actors = await _actors_by_code(
@@ -385,11 +418,16 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
                            if _usable_avatar(actor.get("avatar", "")))
             if not resolved:
                 _log(f"演员番号补查未取得头像：{code}，转为按演员名回退查询")
+    # A code lookup may discover new actors whose portrait URL is absent from
+    # the source response but already known by the persistent actor cache.
+    for actor in actors:
+        if not _usable_avatar(actor.get("avatar", "")):
+            avatar, source = _cached_avatar(actor["name"], config)
+            if avatar:
+                actor["avatar"], actor["avatar_source"] = avatar, source
     saved = 0
     for actor in actors:
-        local_cached = folder / "actors" / f"{_safe(actor['name'])}.jpg"
-        has_cache = local_cached.exists() or _cached_image(actor["name"], config) is not None
-        if (overwrite or not has_cache) and not _usable_avatar(actor.get("avatar", "")):
+        if not _usable_avatar(actor.get("avatar", "")):
             avatar, source = await _avatar_by_name(actor["name"], sources, proxy)
             actor["avatar"], actor["avatar_source"] = avatar, source
         if await _save_actor(actor, folder, config, proxy, overwrite):
@@ -397,7 +435,10 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
     # 必须先把番号补查新增的演员与头像 URL 写回 NFO，再让 Emby 扫描；
     # 否则新 Person/影片演员关系可能直到下一次手工刷新才出现。
     if nfo_path and tree is not None and actors and config.get("actor_scrape_write_nfo", True):
-        _write_nfo(nfo_path, tree, actors, config.get("scrape_actor_thumb_in_nfo", True))
+        write_thumb = config.get("scrape_actor_thumb_in_nfo", True)
+        written = _write_nfo(nfo_path, tree, actors, write_thumb)
+        if write_thumb:
+            _log(f"NFO 演员头像 URL 已写入：{code or folder.name}（{written}/{len(actors)} 位）")
     if sync_emby and config.get("emby_actor_sync_enabled", False) and saved:
         await sync_emby_folder(folder, config, code, actors)
     emby_updated = sum(1 for actor in actors if actor.get("emby_updated"))
