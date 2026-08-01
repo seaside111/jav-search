@@ -9,6 +9,8 @@ name: 构建并推送镜像到 GHCR
 #   - 正式 tag（如 V1.4.3）        → 镜像打 :V1.4.3 和 :latest
 on:
   push:
+    branches:
+      - main
     tags:
       - 'V*'
       - 'v*'
@@ -61,6 +63,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
+            type=sha,prefix=sha-
             type=raw,value=beta,enable=${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'Beta') }}
             type=raw,value=latest,enable=${{ !(contains(github.ref_name, 'beta') || contains(github.ref_name, 'Beta')) }}
 
