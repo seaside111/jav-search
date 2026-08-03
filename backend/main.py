@@ -40,7 +40,7 @@ import actor_scraper
 import auth
 import logging
 
-APP_VERSION = "1.4.6"
+APP_VERSION = "1.4.6.1"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -316,6 +316,7 @@ class ConfigUpdateRequest(BaseModel):
     archive_by_month: Optional[bool] = None
     scrape_meta_enabled: Optional[bool] = None   # 刮削总开关：改名番号+写NFO/封面
     scrape_organize_enabled: Optional[bool] = None
+    scrape_delete_extras: Optional[bool] = None
     scrape_folder_naming: Optional[str] = None
     scrape_folder_title_translate: Optional[bool] = None
     scrape_folder_actor_mode: Optional[str] = None

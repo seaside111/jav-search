@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -481,6 +482,305 @@ class NamingAndTrackerTests(unittest.TestCase):
             "ABC-123", "", "", [{"name": "ActorA"}, {"name": "ActorB"}],
             {"scrape_folder_naming": "code_actor", "scrape_folder_actor_mode": "all"})
         self.assertEqual(name, "ABC-123 ActorA ActorB")
+
+    def test_title_and_actor_folder_name(self):
+        name = library._archive_folder_name(
+            "ABC-123", "A Title", "中文标题", [{"name": "ActorA"}],
+            {"scrape_folder_naming": "code_title_actor",
+             "scrape_folder_title_translate": True,
+             "scrape_folder_actor_mode": "first"})
+        self.assertEqual(name, "ABC-123 中文标题 ActorA")
+
+    def test_title_translation_never_changes_japanese_actor_name(self):
+        name = library._archive_folder_name(
+            "ABC-123", "元のタイトル", "中文标题", [{"name": "葵つかさ"}],
+            {"scrape_folder_naming": "code_title_actor",
+             "scrape_folder_title_translate": True,
+             "scrape_folder_actor_mode": "first"})
+        self.assertEqual(name, "ABC-123 中文标题 葵つかさ")
+        self.assertIn("葵つかさ", name)
+
+    def test_archive_transfer_same_path_never_deletes_movie(self):
+        with tempfile.TemporaryDirectory() as raw:
+            movie = Path(raw) / "ABC-123.mp4"
+            movie.write_bytes(b"movie")
+            self.assertTrue(library._transfer(movie, movie, "move"))
+            self.assertEqual(movie.read_bytes(), b"movie")
+
+    def test_transfer_modes_preserve_expected_source_state(self):
+        for mode in ("hardlink", "copy", "move"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                src = root / "source.mp4"
+                dst = root / "archive" / "movie.mp4"
+                dst.parent.mkdir()
+                src.write_bytes(b"complete movie bytes")
+                self.assertTrue(library._transfer(src, dst, mode))
+                self.assertEqual(dst.read_bytes(), b"complete movie bytes")
+                self.assertEqual(src.exists(), mode != "move")
+                if mode == "hardlink":
+                    self.assertEqual(src.stat().st_ino, dst.stat().st_ino)
+
+    def test_transfer_never_overwrites_existing_target(self):
+        for mode in ("hardlink", "copy", "move"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                src = root / "source.mp4"
+                dst = root / "archive.mp4"
+                src.write_bytes(b"new movie")
+                dst.write_bytes(b"existing movie")
+                self.assertFalse(library._transfer(src, dst, mode))
+                self.assertEqual(src.read_bytes(), b"new movie")
+                self.assertEqual(dst.read_bytes(), b"existing movie")
+
+    def test_archive_modes_only_rename_destination_and_move_only_removes_source(self):
+        for mode in ("hardlink", "copy", "move"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                source = root / "downloads" / "torrent"
+                output = root / "archive"
+                source.mkdir(parents=True)
+                original = source / "site-ad.ABC-123.1080P.MKV"
+                original.write_bytes(b"movie data")
+                result = library._archive_file(
+                    original, str(output), "ABC-123", mode=mode, rename=True,
+                    watch_dir=str(root / "downloads"), folder_name="ABC-123",
+                    by_month=False)
+                archived = output / "ABC-123" / "ABC-123.mkv"
+                self.assertTrue(result["archived"])
+                self.assertEqual(archived.read_bytes(), b"movie data")
+                self.assertEqual(original.exists(), mode != "move")
+                self.assertEqual(result["moved_original"], mode == "move")
+
+    def test_organize_off_preserves_original_filename_in_archive(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "downloads"
+            source.mkdir()
+            original = source / "Original Name [ABC-123].MP4"
+            original.write_bytes(b"movie")
+            result = library._archive_file(
+                original, str(root / "archive"), "ABC-123", mode="copy",
+                rename=False, folder_name="ABC-123", by_month=False)
+            self.assertTrue(result["archived"])
+            self.assertTrue((root / "archive" / "ABC-123" / original.name).exists())
+            self.assertEqual(original.name, "Original Name [ABC-123].MP4")
+
+    def test_failed_copy_cleans_partial_target_and_preserves_source(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            src = root / "source.mp4"
+            dst = root / "archive.mp4"
+            src.write_bytes(b"complete movie")
+
+            def partial_then_fail(_src, tmp):
+                Path(tmp).write_bytes(b"partial")
+                raise OSError("disk full")
+
+            with mock.patch.object(library.shutil, "copy2", side_effect=partial_then_fail):
+                self.assertFalse(library._transfer(src, dst, "copy"))
+            self.assertEqual(src.read_bytes(), b"complete movie")
+            self.assertFalse(dst.exists())
+            self.assertEqual(list(root.glob("*.tmp")), [])
+
+    def test_move_cross_volume_fallback_lands_before_removing_source(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            src = root / "source.mp4"
+            dst = root / "archive.mp4"
+            src.write_bytes(b"cross-volume movie")
+            original_link = library.os.link
+            calls = 0
+
+            def fail_first_link(source, target):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise OSError("cross-device link")
+                return original_link(source, target)
+
+            with mock.patch.object(library.os, "link", side_effect=fail_first_link):
+                self.assertTrue(library._transfer(src, dst, "move"))
+            self.assertFalse(src.exists())
+            self.assertEqual(dst.read_bytes(), b"cross-volume movie")
+
+    def test_move_source_unlink_failure_rolls_back_target_and_keeps_source(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            src = root / "source.mp4"
+            dst = root / "archive.mp4"
+            src.write_bytes(b"movie")
+            original_unlink = library.Path.unlink
+
+            locked = PermissionError(13, "file is being used", str(src))
+            locked.winerror = 32
+
+            def deny_source_unlink(path, *args, **kwargs):
+                if path == src:
+                    raise locked
+                return original_unlink(path, *args, **kwargs)
+
+            logs = []
+            with (mock.patch.object(library.Path, "unlink", autospec=True,
+                                    side_effect=deny_source_unlink),
+                  mock.patch.object(library, "_log", side_effect=logs.append)):
+                self.assertFalse(library._transfer(src, dst, "move"))
+            self.assertEqual(src.read_bytes(), b"movie")
+            self.assertFalse(dst.exists())
+            message = "\n".join(logs)
+            self.assertIn("文件被其他程序占用或锁定", message)
+            self.assertIn("下载器校验/做种占用", message)
+            self.assertIn("winerror=32", message)
+
+    def test_remove_error_diagnosis_distinguishes_readonly_mount(self):
+        error = OSError(library.errno.EROFS, "read-only file system")
+        reason, action = library._diagnose_source_remove_error(Path("movie.mp4"), error)
+        self.assertIn("只读文件系统", reason)
+        self.assertIn(":ro", action)
+
+    def test_linux_remove_error_diagnosis_distinguishes_busy_and_stale_nfs(self):
+        with mock.patch.object(library.sys, "platform", "linux"):
+            reason, action = library._diagnose_source_remove_error(
+                Path("movie.mp4"), OSError(library.errno.EBUSY, "busy"))
+            self.assertIn("挂载点正忙", reason)
+            self.assertIn("NFS/CIFS", action)
+
+            stale = getattr(library.errno, "ESTALE", 116)
+            reason, action = library._diagnose_source_remove_error(
+                Path("movie.mp4"), OSError(stale, "stale file handle"))
+            self.assertIn("句柄已失效", reason)
+            self.assertIn("重新挂载", action)
+
+    def test_move_collision_preserves_source_and_existing_archive(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "downloads" / "ABC-123"
+            target = root / "archive" / "ABC-123"
+            source.mkdir(parents=True)
+            target.mkdir(parents=True)
+            incoming = source / "ABC-123-CD1.mp4"
+            existing = target / "ABC-123-cd1.mp4"
+            incoming.write_bytes(b"incoming")
+            existing.write_bytes(b"existing")
+            result = library._archive_file(
+                incoming, str(root / "archive"), "ABC-123", mode="move",
+                rename=True, watch_dir=str(root / "downloads"),
+                folder_name="ABC-123", by_month=False)
+            self.assertFalse(result["archived"])
+            self.assertEqual(incoming.read_bytes(), b"incoming")
+            self.assertEqual(existing.read_bytes(), b"existing")
+
+    def test_move_multipart_cleanup_waits_until_every_video_is_archived(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            watch = root / "downloads"
+            source = watch / "ABC-123"
+            output = root / "archive"
+            source.mkdir(parents=True)
+            cd1 = source / "ABC-123-CD1.mp4"
+            cd2 = source / "ABC-123-CD2.mp4"
+            cd1.write_bytes(b"part one")
+            cd2.write_bytes(b"part two")
+
+            first = library._archive_file(
+                cd1, str(output), "ABC-123", mode="move", rename=True,
+                watch_dir=str(watch), folder_name="ABC-123", by_month=False)
+            self.assertTrue(first["moved_original"])
+            library._cleanup_source(source, watch, 1)
+            self.assertTrue(source.exists())
+            self.assertEqual(cd2.read_bytes(), b"part two")
+
+            second = library._archive_file(
+                cd2, str(output), "ABC-123", mode="move", rename=True,
+                watch_dir=str(watch), folder_name="ABC-123", by_month=False)
+            self.assertTrue(second["moved_original"])
+            library._cleanup_source(source, watch, 1)
+            self.assertFalse(source.exists())
+            self.assertEqual((output / "ABC-123" / "ABC-123-cd1.mp4").read_bytes(), b"part one")
+            self.assertEqual((output / "ABC-123" / "ABC-123-cd2.mp4").read_bytes(), b"part two")
+
+    def test_move_with_organize_off_keeps_original_archive_name(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "downloads"
+            source.mkdir()
+            original = source / "Original.Name.ABC-123.MP4"
+            original.write_bytes(b"movie")
+            result = library._archive_file(
+                original, str(root / "archive"), "ABC-123", mode="move",
+                rename=False, folder_name="ABC-123", by_month=False)
+            self.assertTrue(result["moved_original"])
+            self.assertFalse(original.exists())
+            self.assertEqual(
+                (root / "archive" / "ABC-123" / "Original.Name.ABC-123.MP4").read_bytes(),
+                b"movie")
+
+    def test_same_path_move_is_not_reported_as_source_removed(self):
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw)
+            target = output / "ABC-123"
+            target.mkdir()
+            movie = target / "ABC-123.mp4"
+            movie.write_bytes(b"movie")
+            result = library._archive_file(
+                movie, str(output), "ABC-123", mode="move", rename=True,
+                folder_name="ABC-123", by_month=False)
+            self.assertTrue(result["archived"])
+            self.assertFalse(result["moved_original"])
+            self.assertEqual(movie.read_bytes(), b"movie")
+
+    def test_similar_code_folder_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (output / "ABC-1234 Existing").mkdir(parents=True)
+            video = source / "ABC-123.mp4"
+            video.write_bytes(b"movie")
+            result = library._archive_file(
+                video, str(output), "ABC-123", mode="copy", rename=True,
+                folder_name="ABC-123 New", by_month=False)
+            self.assertTrue(result["archived"])
+            self.assertEqual(Path(result["target_dir"]).name, "ABC-123 New")
+            self.assertTrue((output / "ABC-123 New" / "ABC-123.mp4").exists())
+
+    def test_cleanup_scan_error_preserves_entire_source_folder(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw) / "watch"
+            folder = watch / "torrent"
+            folder.mkdir(parents=True)
+            marker = folder / "important.txt"
+            marker.write_text("keep", encoding="utf-8")
+            with mock.patch.object(library.Path, "rglob", side_effect=PermissionError("denied")):
+                library._cleanup_source(folder, watch, 1)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+
+    def test_cleanup_preserves_folder_when_any_small_video_remains(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw) / "watch"
+            folder = watch / "torrent"
+            folder.mkdir(parents=True)
+            short_video = folder / "unknown-short.mp4"
+            short_video.write_bytes(b"x")
+            library._cleanup_source(
+                folder, watch, min_bytes=100 * 1024 * 1024,
+                keep_bytes=300 * 1024 * 1024)
+            self.assertEqual(short_video.read_bytes(), b"x")
+
+    def test_destructive_extra_cleanup_defaults_on_but_is_independent(self):
+        self.assertTrue(DEFAULT_CONFIG["scrape_delete_extras"])
+
+    def test_archive_subtree_is_excluded_from_watch_scan(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw)
+            incoming = watch / "incoming.mp4"
+            archived = watch / "jav" / "202608" / "ABC-123" / "ABC-123.mp4"
+            incoming.write_bytes(b"incoming")
+            archived.parent.mkdir(parents=True)
+            archived.write_bytes(b"archived")
+            found = list(library._iter_video_files(watch, {watch / "jav"}))
+            self.assertEqual(found, [incoming])
 
     def test_custom_trackers_are_deduplicated(self):
         state = asyncio.run(qbittorrent.ensure_trackers_fresh({

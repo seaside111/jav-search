@@ -143,8 +143,9 @@ DEFAULT_CONFIG = {
     "archive_by_month": True,            # 归档是否按年月建子目录（归档目录/YYYYMM/番号/），监控 & 发种共用
     # 刮削/归档总开关（监控 & 发种共用，全局唯一）：
     "scrape_meta_enabled": True,         # 刮削：视频改名番号 + 写 NFO/封面；关=保留原文件名、不写 NFO/封面
-    "scrape_organize_enabled": True,     # 规整：视频改名 + 保守清理广告；与刮削独立
-    "scrape_folder_naming": "code",     # code | code_title | code_actor
+    "scrape_organize_enabled": True,     # 规整：视频改名；与刮削独立
+    "scrape_delete_extras": True,        # 独立控制删除判定为广告/赠片的视频；默认开启，可手动关闭
+    "scrape_folder_naming": "code",      # code | code_title | code_actor | code_title_actor
     "scrape_folder_title_translate": False,
     "scrape_folder_actor_mode": "first", # first | all
     "scrape_actor_images_enabled": False,

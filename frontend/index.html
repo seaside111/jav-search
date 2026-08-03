@@ -568,7 +568,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.1</div>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="3"/>
@@ -956,16 +956,20 @@
             <label class="source-chk" style="font-size:13px">
               <input type="checkbox" id="cfgScrapeMetaEnabled" checked> 刮削（写 NFO/封面）
             </label>
-            <span class="setting-hint">开：标题、演员、简介写入 NFO 并抓取封面；视频改名和删除广告由“规整”控制。</span>
+            <span class="setting-hint">开：标题、演员、简介写入 NFO 并抓取封面；视频改名由“规整”控制，广告删除有独立开关。</span>
           </div>
           <div class="setting-row">
-            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgScrapeOrganizeEnabled" checked> 规整（改名 + 保守清理广告/赠片）</label>
-            <span class="setting-hint">最大文件、达到保底大小、番号文件及分段文件强制保留；关闭时不删除任何视频。</span>
+            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgScrapeOrganizeEnabled" checked> 规整（按设置改名）</label>
+            <span class="setting-hint">只负责归档文件命名；是否删除广告/赠片由下面的独立开关控制。</span>
+          </div>
+          <div class="setting-row">
+            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgScrapeDeleteExtras" checked> 删除识别出的广告/赠片视频（默认开启）</label>
+            <span class="setting-hint">这是独立的破坏性开关；关闭时规整只改名，不会自动删除任何视频。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">规整后文件夹命名</label>
             <select class="setting-input" id="cfgFolderNaming">
-              <option value="code">只用番号</option><option value="code_title">番号 + 标题</option><option value="code_actor">番号 + 演员</option>
+              <option value="code">只用番号</option><option value="code_title">番号 + 标题</option><option value="code_actor">番号 + 演员</option><option value="code_title_actor">番号 + 标题 + 演员</option>
             </select>
             <label class="source-chk"><input type="checkbox" id="cfgFolderTitleTranslate"> 标题用于文件夹时翻译为中文</label>
             <select class="setting-input" id="cfgFolderActorMode"><option value="first">多人时只用第一位演员</option><option value="all">加入全部演员</option></select>
@@ -1535,6 +1539,12 @@ function cardBodyInner(m, idx) {
   const tags = (m.tags || []).slice(0, 8).map(t =>
     `<span class="tag" onclick="searchTag('${escAttr(t)}')">${escHtml(t)}</span>`).join('');
 
+  const normalizedTags = (m.tags || []).map(t => String(t).trim());
+  const isSolo = normalizedTags.some(t => t === '单体作品' || t === '單體作品');
+  const workType = m.detail_loaded && (m.actors || []).length
+    ? `<span class="tag" title="依据 JavDB 详情标签和演员数区分">${isSolo || (m.actors || []).length === 1 ? '单体作品' : '多人作品'}</span>`
+    : '';
+
   const metaRows = [
     ['发行', m.release_date], ['时长', m.duration], ['导演', m.director],
     ['出品', m.studio], ['发行商', m.label], ['系列', m.series],
@@ -1551,7 +1561,7 @@ function cardBodyInner(m, idx) {
     <div class="card-title" onclick="openDetail(${idx})" title="点击查看详情">${escHtml(m.title || '')}</div>
     ${metaRows ? `<div class="card-meta">${metaRows}</div>` : ''}
     ${actors ? `<div class="actors-row">${actors}</div>` : ''}
-    ${tags ? `<div class="tags-row">${tags}</div>` : ''}
+    ${tags || workType ? `<div class="tags-row">${workType}${tags}</div>` : ''}
     ${desc}`;
 }
 
@@ -2287,7 +2297,8 @@ async function openSettings() {
     // 刮削/归档总开关（兼容旧 publish_* 键）
     document.getElementById('cfgScrapeMetaEnabled').checked = (cfg.scrape_meta_enabled ?? cfg.publish_scrape_enabled) !== false;
     document.getElementById('cfgScrapeOrganizeEnabled').checked = (cfg.scrape_organize_enabled ?? cfg.scrape_meta_enabled ?? cfg.publish_scrape_enabled) !== false;
-    document.getElementById('cfgFolderNaming').value = ['code','code_title','code_actor'].includes(cfg.scrape_folder_naming) ? cfg.scrape_folder_naming : 'code';
+    document.getElementById('cfgScrapeDeleteExtras').checked = cfg.scrape_delete_extras !== false;
+    document.getElementById('cfgFolderNaming').value = ['code','code_title','code_actor','code_title_actor'].includes(cfg.scrape_folder_naming) ? cfg.scrape_folder_naming : 'code';
     document.getElementById('cfgFolderTitleTranslate').checked = !!cfg.scrape_folder_title_translate;
     document.getElementById('cfgFolderActorMode').value = cfg.scrape_folder_actor_mode === 'all' ? 'all' : 'first';
     document.getElementById('cfgActorImagesEnabled').checked = !!cfg.scrape_actor_images_enabled;
@@ -2665,6 +2676,7 @@ async function saveSettings() {
     archive_by_month: document.getElementById('cfgArchiveByMonth').checked,
     scrape_meta_enabled: document.getElementById('cfgScrapeMetaEnabled').checked,
     scrape_organize_enabled: document.getElementById('cfgScrapeOrganizeEnabled').checked,
+    scrape_delete_extras: document.getElementById('cfgScrapeDeleteExtras').checked,
     scrape_folder_naming: document.getElementById('cfgFolderNaming').value,
     scrape_folder_title_translate: document.getElementById('cfgFolderTitleTranslate').checked,
     scrape_folder_actor_mode: document.getElementById('cfgFolderActorMode').value,

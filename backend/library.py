@@ -13,11 +13,14 @@
   - 后台监控协程 start_monitor()/stop_monitor()，由主程序在启动事件中拉起
 """
 import asyncio
+import array
 import difflib
+import errno
 import json
 import os
 import re
 import shutil
+import stat
 import sys
 import time
 import uuid
@@ -786,6 +789,14 @@ def _archive_folder_name(code: str, title_original: str, title_translated: str,
     if mode == "code_title":
         use_translated = config.get("scrape_folder_title_translate", False)
         suffix = title_translated if use_translated else title_original
+    elif mode == "code_title_actor":
+        use_translated = config.get("scrape_folder_title_translate", False)
+        title = title_translated if use_translated else title_original
+        names = [(a.get("name") or "").strip() for a in (actors or [])]
+        names = list(dict.fromkeys(n for n in names if n))
+        if config.get("scrape_folder_actor_mode", "first") != "all":
+            names = names[:1]
+        suffix = " ".join(part for part in [title, " ".join(names)] if (part or "").strip())
     elif mode == "code_actor":
         names = [(a.get("name") or "").strip() for a in (actors or [])]
         names = list(dict.fromkeys(n for n in names if n))
@@ -1014,7 +1025,9 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             _log(f"封面获取失败：{code}")
 
     folder_title = name_zh
-    if (config.get("scrape_folder_naming") == "code_title"
+    # 文件夹标题单独开启翻译时，只把 name_part（纯标题）交给翻译器；演员列表始终保持源站原名，
+    # 之后才由 _archive_folder_name 分字段拼接，禁止把“标题 + 演员”整体翻译。
+    if (config.get("scrape_folder_naming") in {"code_title", "code_title_actor"}
             and config.get("scrape_folder_title_translate", False)
             and name_part and _has_jp(name_part) and name_zh == name_part):
         translated = await translate(text=name_part, provider=provider, config=config)
@@ -1048,27 +1061,270 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
 #   与发种流水线共用同一归档目录与按年月结构。
 # ─────────────────────────────────────────
 
-def _transfer(src: Path, dst: Path, mode: str) -> bool:
-    """按归档模式把 src 落到 dst：move=移动；hardlink=硬链接(跨卷自动退化为复制)；copy=复制。"""
+def _commit_temp_without_overwrite(tmp: Path, dst: Path) -> None:
+    """把目标侧临时文件提交为 dst，并保证目标已存在时绝不覆盖。"""
     try:
-        if dst.exists():
-            dst.unlink()
+        # tmp 与 dst 在同一目录/文件系统；link 是原子的，且目标存在时必定失败。
+        os.link(str(tmp), str(dst))
+        tmp.unlink()
+        return
+    except FileExistsError:
+        raise
+    except OSError:
+        pass
+
+    # 不支持硬链接的目标文件系统（部分 NAS/网络卷）：用独占创建，仍不覆盖已有目标。
+    created = False
+    try:
+        with tmp.open("rb") as inp, dst.open("xb") as out:
+            created = True
+            shutil.copyfileobj(inp, out, length=4 * 1024 * 1024)
+            out.flush()
+            os.fsync(out.fileno())
+        shutil.copystat(str(tmp), str(dst))
+        tmp.unlink()
+    except Exception:
+        if created:
+            try:
+                dst.unlink()
+            except Exception:
+                pass
+        raise
+
+
+def _diagnose_source_remove_error(path: Path, error: Exception) -> tuple[str, str]:
+    """把删除源文件的系统异常转成用户可操作的原因与建议；不尝试强制解锁。"""
+    winerror = getattr(error, "winerror", None)
+    err_no = getattr(error, "errno", None)
+    readonly = False
+    try:
+        readonly = not bool(path.stat().st_mode & stat.S_IWUSR)
     except Exception:
         pass
+
+    is_linux = sys.platform.startswith("linux")
+
+    if is_linux and err_no == errno.EBUSY:
+        return ("文件或所在挂载点正忙（Linux EBUSY）",
+                "请检查该路径是否为活动挂载点、套娃挂载、NFS/CIFS 正在重连，或被系统服务占用")
+    if is_linux and err_no == getattr(errno, "ESTALE", -1):
+        return ("NFS/CIFS 文件句柄已失效（ESTALE）",
+                "请确认 NAS 网络与远端共享正常，重新挂载共享后再扫描；不要直接删除当前目录")
+    if is_linux and err_no in {
+            errno.EIO, getattr(errno, "EREMOTEIO", -1),
+            getattr(errno, "ENOTCONN", -1), errno.ETIMEDOUT}:
+        return ("NAS/网络文件系统 I/O 或连接异常",
+                "请检查群晖存储池、磁盘健康、NFS/CIFS 连接和远端服务器日志，恢复后重试")
+    if is_linux and err_no == getattr(errno, "ETXTBSY", -1):
+        return ("文件作为正在运行的程序映像被系统占用（ETXTBSY）",
+                "请停止对应进程或容器后重试")
+    if winerror in {32, 33} or (not is_linux and err_no == errno.EBUSY):
+        return ("文件被其他程序占用或锁定",
+                "请停止下载器校验/做种占用、播放器、Emby 扫描或安全软件实时扫描后重试")
+    if winerror == 5 or err_no in {errno.EACCES, errno.EPERM}:
+        if readonly:
+            return ("源文件带只读属性",
+                    "请取消文件只读属性，并确认容器挂载不是只读后重试")
+        return ("当前进程权限不足，或被安全软件/ACL 拒绝",
+                "请检查源文件及父目录权限、Docker 挂载读写权限和安全软件拦截记录")
+    if err_no == errno.EROFS:
+        return ("源目录位于只读文件系统或只读挂载",
+                "请将下载目录改为可写挂载（Docker 卷不要使用 :ro）后重试")
+    if err_no == errno.ENOENT:
+        return ("源文件在删除前已被外部程序移动或删除",
+                "请刷新下载器与监控目录状态后重新扫描")
+    codes = []
+    if winerror is not None:
+        codes.append(f"winerror={winerror}")
+    if err_no is not None:
+        codes.append(f"errno={err_no}")
+    suffix = f"（{', '.join(codes)}）" if codes else ""
+    return (f"其他文件系统错误{suffix}",
+            "请根据下方系统错误检查磁盘、文件系统、挂载状态和容器日志")
+
+
+def _linux_remove_context(path: Path) -> str:
+    """采集群晖/Linux 删除失败上下文；所有检测均只读，失败时静默降级。"""
+    if not sys.platform.startswith("linux"):
+        return ""
+    facts = []
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+
+    # 删除权限取决于父目录的写入+执行权限，而不是视频文件本身是否可写。
+    try:
+        parent = resolved.parent
+        st = parent.stat()
+        can_delete = os.access(str(parent), os.W_OK | os.X_OK)
+        facts.append(
+            f"父目录权限={'可写入/遍历' if can_delete else '不可写入或不可遍历'}"
+            f"(mode={stat.filemode(st.st_mode)}, uid={st.st_uid}, gid={st.st_gid}, "
+            f"进程uid={os.geteuid()}, gid={os.getegid()})")
+    except Exception as e:
+        facts.append(f"父目录权限检测失败:{type(e).__name__}")
+
+    # statvfs 能直接反映当前容器视角是否为只读挂载。
+    try:
+        vfs = os.statvfs(str(resolved.parent))
+        readonly_flag = getattr(os, "ST_RDONLY", 1)
+        facts.append(f"挂载状态={'只读' if vfs.f_flag & readonly_flag else '可写'}")
+    except Exception as e:
+        facts.append(f"挂载状态检测失败:{type(e).__name__}")
+
+    # Linux ext/btrfs 等文件系统的 immutable/append-only 属性会让 root 也无法 unlink。
+    try:
+        import fcntl
+        flags = array.array("I", [0])
+        fd = os.open(str(resolved), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        try:
+            fcntl.ioctl(fd, 0x80086601, flags, True)  # FS_IOC_GETFLAGS
+        finally:
+            os.close(fd)
+        attrs = []
+        if flags[0] & 0x10:
+            attrs.append("immutable(+i)")
+        if flags[0] & 0x20:
+            attrs.append("append-only(+a)")
+        if attrs:
+            facts.append("文件属性=" + ",".join(attrs))
+    except Exception:
+        pass
+
+    # /proc/locks 只包含 POSIX/flock 等建议锁；锁通常不阻止 Linux unlink，但可提示相关 PID。
+    lock_pids = set()
+    try:
+        st = resolved.stat()
+        wanted = (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
+        for line in Path("/proc/locks").read_text(encoding="utf-8", errors="replace").splitlines():
+            fields = line.split()
+            if len(fields) < 6:
+                continue
+            dev_inode = fields[5].split(":")
+            if len(dev_inode) != 3:
+                continue
+            try:
+                current = (int(dev_inode[0], 16), int(dev_inode[1], 16), int(dev_inode[2]))
+            except ValueError:
+                continue
+            if current == wanted:
+                lock_pids.add(fields[4])
+        if lock_pids:
+            facts.append(f"检测到Linux建议锁PID={','.join(sorted(lock_pids))}（建议锁通常不阻止unlink）")
+    except Exception:
+        pass
+
+    # 找可见的本机进程句柄；容器权限不足或 /proc 隔离时只能看到部分进程。
+    holders = []
+    try:
+        wanted = str(resolved)
+        for proc in Path("/proc").iterdir():
+            if not proc.name.isdigit():
+                continue
+            fd_dir = proc / "fd"
+            try:
+                matched = any(str(fd.resolve()) == wanted for fd in fd_dir.iterdir())
+            except Exception:
+                continue
+            if not matched:
+                continue
+            try:
+                name = (proc / "comm").read_text(encoding="utf-8", errors="replace").strip()
+            except Exception:
+                name = "unknown"
+            holders.append(f"{proc.name}:{name}")
+            if len(holders) >= 8:
+                break
+        if holders:
+            facts.append("可见打开句柄=" + ",".join(holders)
+                         + "（Linux普通打开句柄通常不阻止删除）")
+    except Exception:
+        pass
+    return "；".join(facts)
+
+
+def _transfer(src: Path, dst: Path, mode: str) -> bool:
+    """安全地把 src 落到 dst；绝不覆盖已有的不同文件。
+
+    move 优先用同卷硬链接+删除源文件，跨卷才先复制到目标侧临时文件；只有目标完整落地后
+    才删除源文件。copy 也先写临时文件再原子落位，避免失败时留下半个成片。
+    """
+    mode = mode if mode in {"move", "copy", "hardlink"} else "hardlink"
+    # 归档目录位于监控目录内时，旧版本会再次扫到归档成品。src/dst 若为同一文件，
+    # 绝不能先 unlink(dst)，否则影片会被自身归档流程删除。
+    try:
+        if src.resolve() == dst.resolve() or (dst.exists() and os.path.samefile(src, dst)):
+            _log(f"跳过同路径归档：{src}")
+            return True
+    except (OSError, ValueError):
+        pass
+
+    # 已有目标一律保留。视频重名会由上层按分段命名避让；NFO/封面/头像冲突则保留先到版本。
+    if dst.exists():
+        _log(f"归档目标已存在，拒绝覆盖：{dst}")
+        return False
+
+    tmp = dst.with_name(f".{dst.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    move_target_created = False
+    move_phase = ""
     try:
         if mode == "move":
-            shutil.move(str(src), str(dst))
+            try:
+                # 同卷：建立目标硬链接成功后再删源，任何一步失败都至少保留一份完整数据。
+                os.link(str(src), str(dst))
+                move_target_created = True
+            except OSError:
+                # 跨卷：先完整复制到目标侧临时文件，再落位；源文件最后才删除。
+                shutil.copy2(str(src), str(tmp))
+                _commit_temp_without_overwrite(tmp, dst)
+                move_target_created = True
+            if not dst.exists() or dst.stat().st_size != src.stat().st_size:
+                raise OSError("归档目标校验失败，保留源文件")
+            move_phase = "remove_source"
+            src.unlink()
         elif mode == "copy":
-            shutil.copy2(str(src), str(dst))
+            shutil.copy2(str(src), str(tmp))
+            _commit_temp_without_overwrite(tmp, dst)
         else:  # hardlink（默认）
             try:
                 os.link(str(src), str(dst))
             except OSError:
-                shutil.copy2(str(src), str(dst))   # 跨卷无法硬链 → 复制
+                shutil.copy2(str(src), str(tmp))   # 跨卷无法硬链 → 安全复制
+                _commit_temp_without_overwrite(tmp, dst)
         return True
     except Exception as e:
-        _log(f"归档落地失败 {src.name}（{mode}）: {e}")
+        # move 的最后一步（校验/删除源）失败时撤销本次新建目标，恢复成可安全重试的原状态。
+        # 如果回滚本身失败也仍至少保留源文件，不会继续做目录清理。
+        rollback = "未创建目标，无需回滚"
+        if mode == "move" and move_target_created and src.exists():
+            try:
+                dst.unlink()
+                rollback = "已撤销本次新建的归档目标，源文件保持原样"
+            except Exception as rollback_error:
+                rollback = f"目标回滚失败，但源文件仍保留：{rollback_error}"
+                _log(f"移动失败后目标回滚失败（源文件仍保留）：{dst} — {rollback_error}")
+        if mode == "move" and move_phase == "remove_source":
+            reason, action = _diagnose_source_remove_error(src, e)
+            linux_context = _linux_remove_context(src)
+            error_codes = ", ".join(
+                part for part in [
+                    f"winerror={getattr(e, 'winerror', None)}" if getattr(e, "winerror", None) is not None else "",
+                    f"errno={getattr(e, 'errno', None)}" if getattr(e, "errno", None) is not None else "",
+                ] if part) or "无错误码"
+            _log(f"移动未完成：无法删除源文件 {src}；原因判断：{reason}；"
+                 f"建议：{action}；安全处理：{rollback}；"
+                 f"系统错误：{type(e).__name__}: {e}（{error_codes}）"
+                 + (f"；Linux现场检测：{linux_context}" if linux_context else ""))
+        else:
+            _log(f"归档落地失败 {src.name}（{mode}）: {type(e).__name__}: {e}")
         return False
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
 
 
 def _build_archive_index(output_dir: str) -> dict:
@@ -1184,11 +1440,18 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
     target_dir = month_dir / (folder_name or safe_code)
     # 同番号已经归档时复用原目录，避免标题翻译变化制造重复影片目录。
     try:
-        existing = next((p for p in month_dir.glob(f"{safe_code}*") if p.is_dir()), None)
+        safe_low = safe_code.lower()
+        existing = next((p for p in month_dir.iterdir()
+                         if p.is_dir() and (p.name.lower() == safe_low
+                                            or p.name.lower().startswith(safe_low + " "))), None)
         if existing:
             target_dir = existing
-    except Exception:
+    except FileNotFoundError:
         pass
+    except Exception as e:
+        _log(f"检查已有归档目录失败，停止归档以免落入错误目录：{e}")
+        return {"archived": False, "moved_original": False,
+                "error": f"检查已有归档目录失败: {e}"}
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
@@ -1197,6 +1460,16 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
 
     folder = video_path.parent
     done = []
+
+    # 文件已经位于最终归档目录时视为完成，绝不再次推导分段号或改名。
+    # 否则它会把自身计入 archived_before，错误地从 CODE.mp4 改成 CODE-cd1.mp4。
+    try:
+        if folder.resolve() == target_dir.resolve():
+            _log(f"影片已在最终归档目录，跳过移动和改名：{video_path}")
+            return {"archived": video_path.exists(), "moved_original": False,
+                    "target_dir": str(target_dir), "files": [video_path.name]}
+    except Exception:
+        pass
 
     # 1) 视频本体 → 番号[-cdN].后缀（刮削关则保留原文件名）
     #    多分段时加 -cd1/-cd2… 堆叠后缀，确保 A/B/C、1/2/3、CD1/CD2 等全部归档不互相覆盖。
@@ -1209,6 +1482,7 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
     if not _transfer(video_path, video_dst, mode):
         return {"archived": False, "moved_original": False,
                 "error": "视频归档失败", "target_dir": str(target_dir)}
+    video_source_removed = mode == "move" and not video_path.exists() and video_dst.exists()
     done.append(video_dst.name)
     # 本次落地的是某个 -cdN 分集时，纠正同番号中先到、曾被命名成无后缀的分集（补齐缺失号）。
     if rename and code and part:
@@ -1252,7 +1526,7 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
 
     how = {"move": "移动", "copy": "复制", "hardlink": "硬链接"}.get(mode, mode)
     _log(f"归档（{how}）：{len(done)} 个文件 → {target_dir} （{', '.join(done)}）")
-    return {"archived": bool(done), "moved_original": (mode == "move"),
+    return {"archived": bool(done), "moved_original": video_source_removed,
             "target_dir": str(target_dir), "files": done}
 
 
@@ -1273,21 +1547,17 @@ def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int,
     if parent == watch_dir or watch_dir not in parent.parents:
         # 视频直接在根目录，或父目录不在监控目录内：不做整目录删除
         return
-    # 找出该子目录内（递归）剩余的、仍待处理的「正片」视频。
-    # 广告/赠片（_looks_primary 为假）不计入，否则真片归档后会被它们长期挡住、
-    # 导致原目录连同广告一直残留。
-    watch_str = str(watch_dir)
+    # 只要还存在任何视频就保留整个目录，不按大小、命名或“广告”推断删除。
+    # 自动清理可以少做，但不能把短片、命名异常影片或未完成文件随目录误删。
     try:
         remaining = [p for p in parent.rglob("*")
-                     if p.is_file() and p.suffix.lower() in VIDEO_EXTS
-                     and not _is_incomplete(p)
-                     and str(p) not in _processed
-                     and p.stat().st_size >= min_bytes
-                     and (p.stat().st_size >= keep_bytes or _looks_primary(p, watch_str))]
-    except Exception:
-        remaining = []
+                     if p.is_file() and p.suffix.lower() in VIDEO_EXTS]
+    except Exception as e:
+        # 无法证明目录已经没有正片时，绝不能执行整目录删除。
+        _log(f"检查原目录剩余文件失败，取消清理并保留目录：{parent} — {e}")
+        return
     if remaining:
-        _log(f"原目录仍有 {len(remaining)} 个待处理正片，暂不删除：{parent.name}")
+        _log(f"原目录仍有 {len(remaining)} 个视频，安全保留整个目录：{parent.name}")
         return
     try:
         shutil.rmtree(parent)
@@ -1305,10 +1575,12 @@ def _is_incomplete(video_path: Path) -> bool:
     return (video_path.parent / (video_path.name + ".!qB")).exists()
 
 
-def _iter_video_files(watch_dir: Path):
+def _iter_video_files(watch_dir: Path, excluded_roots=None):
+    excluded = set(excluded_roots or ())
     try:
         for p in watch_dir.rglob("*"):
-            if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
+            if (p.is_file() and p.suffix.lower() in VIDEO_EXTS
+                    and not _under_any(p, excluded)):
                 yield p
     except Exception as e:
         _log(f"遍历监控目录失败: {e}")
@@ -1492,7 +1764,19 @@ async def _scan_once(config: dict) -> int:
     keep_bytes = int(config.get("scrape_keep_size_mb", 300)) * 1024 * 1024
     organize_on = config.get("scrape_organize_enabled",
                              config.get("scrape_meta_enabled", True))
+    delete_extras = bool(config.get("scrape_delete_extras", False))
     out_dir = config.get("scrape_output_dir", "").strip()
+    excluded_roots = set()
+    if out_dir:
+        try:
+            output_root = Path(out_dir).resolve()
+            watch_root = watch_dir.resolve()
+            if output_root == watch_root or watch_root in output_root.parents:
+                excluded_roots.add(output_root)
+                _log(f"归档目录位于监控目录内，扫描时已排除归档子树：{output_root}")
+        except Exception as e:
+            _log(f"归档目录排除检查失败，保守跳过本轮扫描：{e}")
+            return 0
     # 以归档目录现有内容为准的兜底去重索引（签名文件缺失时仍能跳过早已归档的原文件）。
     archive_idx = _build_archive_index(out_dir)
     now = time.time()
@@ -1522,7 +1806,7 @@ async def _scan_once(config: dict) -> int:
         _log(f"已读取下载器任务状态：共 {len(torrent_tasks)} 个，已完成 {done_count} 个")
 
     _log(f"开始扫描监控目录：{watch}（归档目录：{out_dir or '未配置'}）")
-    for vf in _iter_video_files(watch_dir):
+    for vf in _iter_video_files(watch_dir, excluded_roots):
         n_total += 1
         fp = str(vf)
         if fp in _processed:
@@ -1596,7 +1880,7 @@ async def _scan_once(config: dict) -> int:
             in_download_subdir = vf.parent.resolve() != watch_dir.resolve()
         except Exception:
             pass
-        if organize_on and in_download_subdir and _has_primary_sibling(vf):
+        if organize_on and delete_extras and in_download_subdir and _has_primary_sibling(vf):
             try:
                 _, drop_set = classify_videos(
                     _sibling_videos(vf), watch, min_bytes, keep_bytes)
@@ -1800,7 +2084,21 @@ async def api_scrape_single(req: ScrapeRequest):
     if not result.get("success"):
         raise HTTPException(status_code=422, detail=result.get("error", "刮削失败"))
     if req.move and config.get("scrape_output_dir"):
-        mv = _archive_file(Path(req.filepath), config["scrape_output_dir"])
-        result["moved"] = mv.get("moved", False)
+        video_path = Path(req.filepath)
+        code = result.get("code", "") or await _resolve_code(video_path, config)
+        folder_name = _archive_folder_name(
+            code, result.get("title_original", ""), result.get("folder_title", ""),
+            result.get("actors", []), config)
+        mv = _archive_file(
+            video_path, config["scrape_output_dir"], code,
+            mode=(config.get("archive_mode") or "hardlink").lower(),
+            rename=config.get("scrape_organize_enabled", True),
+            watch_dir=config.get("scrape_watch_dir", ""),
+            folder_name=folder_name,
+            by_month=config.get("archive_by_month", True))
+        result["moved"] = mv.get("archived", False)
+        result["moved_original"] = mv.get("moved_original", False)
         result["target_dir"] = mv.get("target_dir", "")
+        if not mv.get("archived"):
+            result["archive_error"] = mv.get("error", "归档失败，源文件已保留")
     return result
