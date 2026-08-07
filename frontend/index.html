@@ -568,7 +568,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.5</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.6</div>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="3"/>
@@ -662,7 +662,7 @@
         </div>
 
         <div class="setting-group">
-          <h3>JavDB 反爬（1.4.2）</h3>
+          <h3>JavDB 反爬</h3>
           <div class="setting-row">
             <label class="setting-label">FlareSolverr 地址</label>
             <input class="setting-input" id="cfgJavdbFlare" type="text" placeholder="留空＝自动探测；也可手填 http://192.168.1.100:8191 或 https://fs.你的域名.com">
@@ -692,7 +692,7 @@
         </div>
 
         <div class="setting-group">
-          <h3>FC2 数据源（1.4.3）</h3>
+          <h3>FC2 数据源</h3>
           <div class="setting-row">
             <label class="setting-label">FlareSolverr 地址</label>
             <input class="setting-input" id="cfgFc2Flare" type="text" placeholder="留空＝复用 JavDB 的 / 自动探测">
@@ -719,12 +719,12 @@
             <span class="setting-hint">MissAV 域名常变。可填多个镜像（逗号分隔）做兜底，如 https://missav.ws,https://missav123.com</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label">最新优先用 sukebei（1.4.4）</label>
+            <label class="setting-label">最新优先用 sukebei</label>
             <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgFc2Sukebei" checked> 用 sukebei 发现最新 FC2 番号</label>
             <span class="setting-hint">默认开，<strong>强烈建议保持</strong>。fc2ppvdb 的最新列表封顶、够不到市面最新号；sukebei 种子站按 id 倒序＝最新、<strong>直连不过盾、最快</strong>，能拿到更新的番号。开启后首页最新优先走 sukebei，够量就跳过较慢的 fc2ppvdb 首页；卡片标题/封面较朴素（种子标题 + fourhoi 封面），点开详情时再由 fc2ppvdb/MissAV 补全完整信息。下载仍按番号走 Jackett/sukebei</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label">后台预抓样品图（1.4.4）</label>
+            <label class="setting-label">后台预抓样品图</label>
             <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgFc2Prefetch" checked> 后台慢慢补全 FC2 最新的标题/封面/样品图</label>
             <span class="setting-hint">默认开、<strong>低负担</strong>。开启后程序在后台<strong>串行+节流+直连 MissAV</strong>（不过盾）慢慢抓最新片的真标题/封面/样品图灌进缓存：刷新后列表卡标题/封面变干净、点开详情<strong>样品图秒出</strong>。女优/标签仍点开才走 fc2ppvdb（按你的选择不预抓，避免 FlareSolverr 负担）</span>
           </div>
@@ -732,11 +732,6 @@
             <label class="setting-label">预抓条数</label>
             <input class="setting-input" id="cfgFc2PrefetchCount" type="number" value="20" min="0" max="60" step="5">
             <span class="setting-hint">后台预抓最新多少条（0＝关闭）。直连 MissAV、每条间隔 0.5 秒，20 条约十几秒抓完且只抓一次（已缓存不重抓），日常几乎无感。最多 60</span>
-          </div>
-          <div class="setting-row">
-            <label class="setting-label">fc2ppvdb 抓取页数（1.4.4）</label>
-            <input class="setting-input" id="cfgFc2LatestPages" type="number" value="1" min="1" max="3" step="1">
-            <span class="setting-hint">仅当上面关掉 sukebei、或 sukebei 数量不足时，才回退抓 fc2ppvdb 首页补充。实测其首页<strong>不支持翻页</strong>（page=2=page=1）、忽略 per_page，一次约 100 条混排，本程序按番号降序取最新 N 条，故<strong>默认 1 页即可</strong>，多设无益反而每页多过一次盾变慢</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">连通测试</label>
@@ -963,8 +958,8 @@
         <div class="setting-group">
           <h3>刮削 &amp; 归档（全局统一·所有文件通用）</h3>
           <div class="setting-hint" style="margin:-4px 0 10px;line-height:1.7">
-            <b>刮削</b>、<b>规整</b>、<b>归档</b>三个独立开关。刮削写 NFO/封面；规整改名并保守清理广告；归档负责落入媒体库。<br>
-            后台会自动监控下载目录——任一开启即生效；三个都关＝完全不处理。
+            <b>刮削</b>负责 NFO 与图片，<b>规整</b>控制归档命名，<b>归档</b>负责落入媒体库；视频改名、封套裁图和广告清理另有独立选项。<br>
+            后台会自动监控下载目录——刮削、规整、归档任一开启即运行；三项都关时停止监控。
             （发种任务正在做种的文件会自动跳过，绝不抢。）
           </div>
           <div class="jackett-status-row">
@@ -980,19 +975,27 @@
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgScrapeOrganizeEnabled" checked> 规整（按设置改名）</label>
-            <span class="setting-hint">只负责归档文件命名；是否删除广告/赠片由下面的独立开关控制。</span>
+            <span class="setting-hint">归档命名规则的总开关；视频是否改名还由下一项控制，广告/赠片删除另有独立开关。</span>
+          </div>
+          <div class="setting-row">
+            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgVideoRenameEnabled" checked> 归档时重命名视频文件</label>
+            <span class="setting-hint">关闭后视频保留下载时的原文件名；文件夹命名、NFO、poster、fanart、演员头像和归档规则仍照常执行。</span>
+          </div>
+          <div class="setting-row">
+            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgJacketArtworkEnabled" checked> 用完整封套同时生成 poster 和 fanart</label>
+            <span class="setting-hint">开启后 poster 从横向封套中缝左侧少量位置裁取右侧正面，fanart 保存完整横向封套；关闭后不裁切封套，fanart 使用独立样品/宣传图。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgScrapeDeleteExtras" checked> 删除识别出的广告/赠片视频（默认开启）</label>
-            <span class="setting-hint">这是独立的破坏性开关；关闭时规整只改名，不会自动删除任何视频。</span>
+            <span class="setting-hint">这是独立的破坏性开关；关闭后不会自动删除广告/赠片，不影响刮削、命名或归档。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">规整后文件夹命名</label>
             <select class="setting-input" id="cfgFolderNaming">
-              <option value="code">只用番号</option><option value="code_title">番号 + 标题</option><option value="code_actor">番号 + 演员</option><option value="code_title_actor">番号 + 标题 + 演员</option>
+              <option value="code">只用番号</option><option value="actor">只用演员</option><option value="code_title">番号 + 标题</option><option value="code_actor">番号 + 演员</option><option value="code_title_actor">番号 + 标题 + 演员</option>
             </select>
             <label class="source-chk"><input type="checkbox" id="cfgFolderTitleTranslate"> 标题用于文件夹时翻译为中文</label>
-            <select class="setting-input" id="cfgFolderActorMode"><option value="first">多人时只用第一位演员</option><option value="all">加入全部演员</option></select>
+            <select class="setting-input" id="cfgFolderActorMode"><option value="first">多人时只用第一位演员</option><option value="all">加入全部演员（最多前 7 位）</option></select>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
@@ -1008,7 +1011,7 @@
           <div class="setting-row">
             <label class="setting-label">归档目录（监控 &amp; 发种共用，供 EMBY 扫）</label>
             <input class="setting-input" id="cfgScrapeOutput" type="text" placeholder="/data/media/emby">
-            <span class="setting-hint">刮削/发种后把番号文件夹放到此目录。硬链接需与下载目录<b>同一卷</b>（跨卷自动退化为复制）</span>
+            <span class="setting-hint">刮削/发种后按所选文件夹命名规则在此生成目录。硬链接需与下载目录<b>同一卷</b>（跨卷自动退化为复制）</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">归档方式</label>
@@ -1021,9 +1024,9 @@
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
-              <input type="checkbox" id="cfgArchiveByMonth" checked> 按年月建子目录（归档目录/YYYYMM/番号/）
+              <input type="checkbox" id="cfgArchiveByMonth" checked> 按年月建子目录（归档目录/YYYYMM/所选文件夹名/）
             </label>
-            <span class="setting-hint">关闭则直接 归档目录/番号/。监控与发种共用此结构</span>
+            <span class="setting-hint">关闭后直接写入 归档目录/所选文件夹名/。监控与发种共用此结构</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">轮询间隔（秒）</label>
@@ -1065,7 +1068,7 @@
               <button class="jackett-test-btn" style="margin-left:0" onclick="testEmby()">测试 Emby 连接</button>
               <span class="setting-hint" id="embyTestStatus"></span>
             </div>
-            <span class="setting-hint">使用 Emby 管理员 Key。影片归档完成后只通知当前影片目录，不再扫描其他媒体库；若本项目归档根目录与 Emby 容器内挂载路径不同，请填写上方 Emby 路径。随后等待 Person 出现、上传并验证 Primary 图片。</span>
+            <span class="setting-hint">使用 Emby 管理员 Key。影片归档完成后只通知当前影片目录，不扫描其他媒体库；若两端归档根路径不同，请填写上方 Emby 路径。同步时优先查找 Person，找不到则从当前影片的 People 关联中定位，并上传本地 actors 图片后验证 Primary 图片。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk"><input type="checkbox" id="cfgActorThumbInNfo" checked> 将演员头像远程地址写入 NFO</label>
@@ -1074,17 +1077,28 @@
           <div class="setting-row">
             <label class="setting-label">独立演员头像刮削</label>
             <label class="source-chk"><input type="checkbox" id="cfgActorScrapeAuto" checked> 影片刮削后自动运行</label>
-            <label class="source-chk"><input type="checkbox" id="cfgActorLookupCode" checked> NFO 无演员时按番号补查</label>
+            <label class="source-chk"><input type="checkbox" id="cfgActorLookupCode" checked> 按番号补查演员或缺失头像</label>
             <label class="source-chk"><input type="checkbox" id="cfgActorWriteNfo" checked> 将补全的演员信息回写 NFO</label>
           </div>
           <div class="setting-row">
             <label class="setting-label">头像来源优先级</label>
             <input class="setting-input" id="cfgActorSources" type="text" placeholder="javbus,avsox">
-            <span class="setting-hint">按顺序逐个尝试，满足当前演员头像后立即停止。推荐 javbus,avsox；AVMOO 与 AVSOX 共用后端会自动去重，JavDB 不返回头像会自动忽略。逐演员姓名的最终回退只使用 JavBus。</span>
+            <span class="setting-hint">按顺序逐个尝试，满足当前演员头像后立即停止。推荐 javbus,avsox；AVMOO 与 AVSOX 共用后端会自动去重。影片首轮头像任务不请求需要过盾的 JavDB，逐演员姓名的最终回退只使用 JavBus；未命中者交给下面的低频目录任务。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">全局演员头像缓存（可选）</label>
             <input class="setting-input" id="cfgActorCacheDir" type="text" placeholder="留空使用 /config/actor-cache">
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">演员刮削请求间隔（秒）</label>
+            <input class="setting-input" id="cfgActorInterval" type="number" value="2" min="0" max="60" step="0.5">
+            <span class="setting-hint">手动批量任务会在影片之间、同片需联网的演员之间冷却。默认 2 秒；过盾或代理性能较弱时建议 3–5 秒。</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">JavDB 演员目录低频补全</label>
+            <label class="source-chk"><input type="checkbox" id="cfgActorJavdbDirectory" checked> 后台补全首轮未取得头像的演员</label>
+            <input class="setting-input" id="cfgActorJavdbDirectoryHours" type="number" value="12" min="1" max="168" step="1">
+            <span class="setting-hint">单位：小时。首轮 JavBus/AVSOX 已取得头像即结束；失败演员进入待补队列。后台每轮只读取一次 JavDB 演员目录，只下载匹配到的待补头像，再更新 actor-cache、关联影片 actors 文件和 Emby Person 主图。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">独立任务扫描目录（可选）</label>
@@ -2336,7 +2350,6 @@ async function openSettings() {
     document.getElementById('cfgFc2Sukebei').checked = cfg.fc2_latest_use_sukebei !== false;
     document.getElementById('cfgFc2Prefetch').checked = cfg.fc2_prefetch_missav !== false;
     document.getElementById('cfgFc2PrefetchCount').value = (cfg.fc2_prefetch_count != null ? cfg.fc2_prefetch_count : 20);
-    document.getElementById('cfgFc2LatestPages').value = cfg.fc2_latest_pages || 1;
     document.getElementById('cfgMaxResults').value = cfg.max_results || 300;
     document.getElementById('cfgShowLatest').checked = cfg.show_latest !== false;
     const ll = cfg.latest_limits || {};
@@ -2390,8 +2403,10 @@ async function openSettings() {
     // 刮削/归档总开关（兼容旧 publish_* 键）
     document.getElementById('cfgScrapeMetaEnabled').checked = (cfg.scrape_meta_enabled ?? cfg.publish_scrape_enabled) !== false;
     document.getElementById('cfgScrapeOrganizeEnabled').checked = (cfg.scrape_organize_enabled ?? cfg.scrape_meta_enabled ?? cfg.publish_scrape_enabled) !== false;
+    document.getElementById('cfgVideoRenameEnabled').checked = cfg.scrape_video_rename_enabled !== false;
+    document.getElementById('cfgJacketArtworkEnabled').checked = cfg.scrape_jacket_artwork_enabled !== false;
     document.getElementById('cfgScrapeDeleteExtras').checked = cfg.scrape_delete_extras !== false;
-    document.getElementById('cfgFolderNaming').value = ['code','code_title','code_actor','code_title_actor'].includes(cfg.scrape_folder_naming) ? cfg.scrape_folder_naming : 'code';
+    document.getElementById('cfgFolderNaming').value = ['code','actor','code_title','code_actor','code_title_actor'].includes(cfg.scrape_folder_naming) ? cfg.scrape_folder_naming : 'code';
     document.getElementById('cfgFolderTitleTranslate').checked = !!cfg.scrape_folder_title_translate;
     document.getElementById('cfgFolderActorMode').value = cfg.scrape_folder_actor_mode === 'all' ? 'all' : 'first';
     document.getElementById('cfgActorImagesEnabled').checked = !!cfg.scrape_actor_images_enabled;
@@ -2402,6 +2417,9 @@ async function openSettings() {
     document.getElementById('cfgActorWriteNfo').checked = cfg.actor_scrape_write_nfo !== false;
     document.getElementById('cfgActorSources').value = (cfg.actor_scrape_sources || ['javbus','avsox']).join(',');
     document.getElementById('cfgActorCacheDir').value = cfg.actor_scrape_cache_dir || '';
+    document.getElementById('cfgActorInterval').value = cfg.actor_scrape_interval_seconds ?? 2;
+    document.getElementById('cfgActorJavdbDirectory').checked = cfg.actor_javdb_directory_enabled !== false;
+    document.getElementById('cfgActorJavdbDirectoryHours').value = cfg.actor_javdb_directory_interval_hours ?? 12;
     document.getElementById('cfgEmbyUrl').value = cfg.emby_url || '';
     document.getElementById('cfgEmbyApiKey').value = cfg.emby_api_key || '';
     document.getElementById('cfgEmbyMediaRoot').value = cfg.emby_media_root || '';
@@ -2703,7 +2721,6 @@ async function saveSettings() {
   const latJb = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestJavbus').value) || 100, 300));
   const latAv = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestAvsox').value) || 40, 200));
   const latFc2 = Math.max(12, Math.min(parseInt(document.getElementById('cfgLatestFc2').value) || 60, 100));
-  const fc2Pages = Math.max(1, Math.min(parseInt(document.getElementById('cfgFc2LatestPages').value) || 1, 3));
   const fc2PrefetchCount = Math.max(0, Math.min(parseInt(document.getElementById('cfgFc2PrefetchCount').value) || 0, 60));
   const payload = {
     proxy: document.getElementById('cfgProxy').value.trim(),
@@ -2724,7 +2741,6 @@ async function saveSettings() {
     fc2_latest_use_sukebei: document.getElementById('cfgFc2Sukebei').checked,
     fc2_prefetch_missav: document.getElementById('cfgFc2Prefetch').checked,
     fc2_prefetch_count: fc2PrefetchCount,
-    fc2_latest_pages: fc2Pages,
     max_results: maxResults,
     show_latest: document.getElementById('cfgShowLatest').checked,
     latest_sources: sources,
@@ -2774,6 +2790,8 @@ async function saveSettings() {
     archive_by_month: document.getElementById('cfgArchiveByMonth').checked,
     scrape_meta_enabled: document.getElementById('cfgScrapeMetaEnabled').checked,
     scrape_organize_enabled: document.getElementById('cfgScrapeOrganizeEnabled').checked,
+    scrape_video_rename_enabled: document.getElementById('cfgVideoRenameEnabled').checked,
+    scrape_jacket_artwork_enabled: document.getElementById('cfgJacketArtworkEnabled').checked,
     scrape_delete_extras: document.getElementById('cfgScrapeDeleteExtras').checked,
     scrape_folder_naming: document.getElementById('cfgFolderNaming').value,
     scrape_folder_title_translate: document.getElementById('cfgFolderTitleTranslate').checked,
@@ -2786,6 +2804,9 @@ async function saveSettings() {
     actor_scrape_write_nfo: document.getElementById('cfgActorWriteNfo').checked,
     actor_scrape_sources: document.getElementById('cfgActorSources').value.split(',').map(v => v.trim().toLowerCase()).filter(Boolean),
     actor_scrape_cache_dir: document.getElementById('cfgActorCacheDir').value.trim(),
+    actor_scrape_interval_seconds: Math.max(0, Math.min(60, parseFloat(document.getElementById('cfgActorInterval').value) || 0)),
+    actor_javdb_directory_enabled: document.getElementById('cfgActorJavdbDirectory').checked,
+    actor_javdb_directory_interval_hours: Math.max(1, Math.min(168, parseFloat(document.getElementById('cfgActorJavdbDirectoryHours').value) || 12)),
     emby_url: document.getElementById('cfgEmbyUrl').value.trim(),
     emby_api_key: document.getElementById('cfgEmbyApiKey').value,
     emby_media_root: document.getElementById('cfgEmbyMediaRoot').value.trim(),
@@ -3057,7 +3078,7 @@ async function checkVersion() {
   try {
     const resp = await fetch(`${API}/api/version`, { cache: 'no-store' });
     const d = await safeJson(resp);
-    chip.textContent = 'v' + (d.current || '1.4.4');
+    chip.textContent = 'v' + (d.current || '1.4.6.6');
     if (d.update_available && d.latest) {
       chip.classList.add('has-update', 'clickable');
       chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;

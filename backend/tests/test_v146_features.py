@@ -966,6 +966,32 @@ class VideoClassificationTests(unittest.TestCase):
 
 
 class NamingAndTrackerTests(unittest.TestCase):
+    def test_javdb_actor_directory_parser_handles_lazy_and_background_images(self):
+        html = '''
+        <a class="actor-box" href="/actors/abc" title="演员甲">
+          <img data-src="//c0.jdbstatic.com/actors/a.jpg" alt="演员甲">
+        </a>
+        <a href="/actors/def" aria-label="演员乙">
+          <span style="background-image:url('/actors/b.webp')"></span>
+        </a>'''
+        actors = actor_scraper._parse_javdb_actor_directory(html)
+        by_name = {item["name"]: item["avatar"] for item in actors}
+        self.assertEqual(by_name["演员甲"], "https://c0.jdbstatic.com/actors/a.jpg")
+        self.assertEqual(by_name["演员乙"], "https://javdb.com/actors/b.webp")
+
+    def test_only_missing_movie_portrait_enters_javdb_pending_queue(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            movie = root / "movie"
+            (movie / "actors").mkdir(parents=True)
+            (movie / "actors" / "已有演员.jpg").write_bytes(b"x" * 2048)
+            config = {"actor_scrape_cache_dir": str(root / "cache"),
+                      "actor_javdb_directory_enabled": True}
+            asyncio.run(actor_scraper._queue_javdb_pending(
+                [{"name": "已有演员"}, {"name": "缺失演员"}], movie, config))
+            pending = actor_scraper._load_pending(config)
+        self.assertEqual([item["name"] for item in pending.values()], ["缺失演员"])
+
     def test_javu_search_uses_current_object_parameter_shape(self):
         original = _javu_base._call
         captured = {}
@@ -991,6 +1017,20 @@ class NamingAndTrackerTests(unittest.TestCase):
         self.assertIn("pushToQb('${escAttr(qbUrl)}', this,", frontend)
         self.assertNotIn('id="qb-${i}"', frontend)
 
+    def test_settings_hide_ineffective_fc2_page_count_but_keep_compat_default(self):
+        frontend = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
+            encoding="utf-8")
+        self.assertNotIn('id="cfgFc2LatestPages"', frontend)
+        self.assertNotIn("getElementById('cfgFc2LatestPages')", frontend)
+        self.assertEqual(DEFAULT_CONFIG["fc2_latest_pages"], 1)
+
+    def test_settings_describe_current_archive_and_actor_sync_behavior(self):
+        frontend = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
+            encoding="utf-8")
+        self.assertIn("归档目录/YYYYMM/所选文件夹名/", frontend)
+        self.assertIn("从当前影片的 People 关联中定位", frontend)
+        self.assertIn("影片首轮头像任务不请求需要过盾的 JavDB", frontend)
+
     def test_sukebei_is_default_resource_source(self):
         self.assertFalse(DEFAULT_CONFIG["jackett_enabled"])
         paths = {route.path for route in main.app.routes}
@@ -1002,6 +1042,30 @@ class NamingAndTrackerTests(unittest.TestCase):
             "ABC-123", "", "", [{"name": "ActorA"}, {"name": "ActorB"}],
             {"scrape_folder_naming": "code_actor", "scrape_folder_actor_mode": "all"})
         self.assertEqual(name, "ABC-123 ActorA ActorB")
+
+    def test_actor_only_folder_name_caps_all_actors_at_seven(self):
+        actors = [{"name": f"Actor{i}"} for i in range(1, 10)]
+        name = library._archive_folder_name(
+            "ABC-123", "", "", actors,
+            {"scrape_folder_naming": "actor", "scrape_folder_actor_mode": "all"})
+        self.assertEqual(name, "Actor1 Actor2 Actor3 Actor4 Actor5 Actor6 Actor7")
+        self.assertNotIn("Actor8", name)
+
+    def test_actor_only_folder_name_falls_back_to_code_when_cast_missing(self):
+        name = library._archive_folder_name(
+            "ABC-123", "", "", [], {"scrape_folder_naming": "actor"})
+        self.assertEqual(name, "ABC-123")
+
+    def test_jacket_artwork_mode_requires_confirmed_horizontal_cover(self):
+        movie = {
+            "source": "JavBus",
+            "cover": "https://img.example/pics/cover/abc_b.jpg",
+            "samples": [],
+        }
+        self.assertTrue(library._use_jacket_artwork(
+            {"scrape_jacket_artwork_enabled": True}, movie, movie["cover"]))
+        self.assertFalse(library._use_jacket_artwork(
+            {"scrape_jacket_artwork_enabled": False}, movie, movie["cover"]))
 
     def test_title_and_actor_folder_name(self):
         name = library._archive_folder_name(
@@ -1369,6 +1433,15 @@ class NamingAndTrackerTests(unittest.TestCase):
         self.assertEqual(actor_scraper._sources({
             "actor_scrape_sources": ["avmoo", "avsox", "javbus"]}),
             ["avsox", "javbus"])
+
+    def test_actor_request_interval_is_bounded_and_has_safe_default(self):
+        self.assertEqual(actor_scraper._request_interval({}), 2.0)
+        self.assertEqual(actor_scraper._request_interval({
+            "actor_scrape_interval_seconds": "3.5"}), 3.5)
+        self.assertEqual(actor_scraper._request_interval({
+            "actor_scrape_interval_seconds": -1}), 0.0)
+        self.assertEqual(actor_scraper._request_interval({
+            "actor_scrape_interval_seconds": 120}), 60.0)
 
     def test_actor_code_lookup_stops_after_complete_first_source(self):
         original = actor_scraper._details

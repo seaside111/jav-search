@@ -40,7 +40,7 @@ import actor_scraper
 import auth
 import logging
 
-APP_VERSION = "1.4.6.5"
+APP_VERSION = "1.4.6.6"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -87,6 +87,10 @@ async def _on_startup():
         library.start_monitor()
     except Exception as e:
         print(f"[启动] 刮削监控启动失败: {e}", flush=True)
+    try:
+        actor_scraper.start_directory_monitor()
+    except Exception as e:
+        print(f"[启动] JavDB 演员目录低频任务启动失败: {e}", flush=True)
     # 推送入库轮询：磁力下完即删（保留文件）+ 给在库种子补记内容名供刮削按名匹配
     try:
         intake.start_poller(load_config)
@@ -325,10 +329,12 @@ class ConfigUpdateRequest(BaseModel):
     archive_by_month: Optional[bool] = None
     scrape_meta_enabled: Optional[bool] = None   # 刮削总开关：改名番号+写NFO/封面
     scrape_organize_enabled: Optional[bool] = None
+    scrape_video_rename_enabled: Optional[bool] = None
     scrape_delete_extras: Optional[bool] = None
     scrape_folder_naming: Optional[str] = None
     scrape_folder_title_translate: Optional[bool] = None
     scrape_folder_actor_mode: Optional[str] = None
+    scrape_jacket_artwork_enabled: Optional[bool] = None
     scrape_actor_images_enabled: Optional[bool] = None
     scrape_actor_thumb_in_nfo: Optional[bool] = None
     scrape_actor_images_dir: Optional[str] = None
@@ -337,6 +343,9 @@ class ConfigUpdateRequest(BaseModel):
     actor_scrape_write_nfo: Optional[bool] = None
     actor_scrape_sources: Optional[list[str]] = None
     actor_scrape_cache_dir: Optional[str] = None
+    actor_scrape_interval_seconds: Optional[float] = None
+    actor_javdb_directory_enabled: Optional[bool] = None
+    actor_javdb_directory_interval_hours: Optional[float] = None
     emby_url: Optional[str] = None
     emby_api_key: Optional[str] = None
     emby_media_root: Optional[str] = None

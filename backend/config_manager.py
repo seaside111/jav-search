@@ -143,23 +143,28 @@ DEFAULT_CONFIG = {
     "archive_mode": "hardlink",          # hardlink | copy | move —— 监控孤儿下载的归档方式：
                                          #   hardlink/copy 保留原文件；move 移动并清理原下载目录。
                                          #   发种文件因需原地做种，恒按 hardlink/copy（选 move 自动降级为 hardlink）
-    "archive_by_month": True,            # 归档是否按年月建子目录（归档目录/YYYYMM/番号/），监控 & 发种共用
+    "archive_by_month": True,            # 归档是否按年月建子目录（归档目录/YYYYMM/所选文件夹名/），监控 & 发种共用
     # 刮削/归档总开关（监控 & 发种共用，全局唯一）：
-    "scrape_meta_enabled": True,         # 刮削：视频改名番号 + 写 NFO/封面；关=保留原文件名、不写 NFO/封面
-    "scrape_organize_enabled": True,     # 规整：视频改名；与刮削独立
+    "scrape_meta_enabled": True,         # 刮削：写 NFO/封面；视频是否改名由独立开关控制
+    "scrape_organize_enabled": True,     # 规整命名总开关；与刮削、广告删除独立
+    "scrape_video_rename_enabled": True, # 关闭时归档仍执行，但视频保留原文件名
     "scrape_delete_extras": True,        # 独立控制删除判定为广告/赠片的视频；默认开启，可手动关闭
-    "scrape_folder_naming": "code",      # code | code_title | code_actor | code_title_actor
+    "scrape_folder_naming": "code",      # code | actor | code_title | code_actor | code_title_actor
     "scrape_folder_title_translate": False,
     "scrape_folder_actor_mode": "first", # first | all
+    "scrape_jacket_artwork_enabled": True, # 封套同时生成裁切 poster 与完整横向 fanart；关闭则不裁切
     "scrape_actor_images_enabled": False,
     "scrape_actor_thumb_in_nfo": True,  # 在 NFO actor/thumb 中写入远程头像地址（Kodi/可移植性）
     "scrape_actor_images_dir": "",       # Emby metadata/people 路径
     "actor_scrape_auto": True,
     "actor_scrape_lookup_by_code": True,
     "actor_scrape_write_nfo": True,
-    # AVMOO 与 AVSOX 共用后端，JavDB 不返回头像，不作为独立来源重复请求。
+    # AVMOO 与 AVSOX 共用后端；头像任务不请求需要过盾的 JavDB。
     "actor_scrape_sources": ["javbus", "avsox"],
     "actor_scrape_cache_dir": "",
+    "actor_scrape_interval_seconds": 2.0,  # 批量/逐演员请求冷却，避免持续压垮来源与过盾服务
+    "actor_javdb_directory_enabled": True, # 仅为首轮失败演员低频扫描 JavDB 演员目录
+    "actor_javdb_directory_interval_hours": 12,
     "emby_url": "",
     "emby_api_key": "",
     "emby_media_root": "",             # Emby 容器内看到的归档根路径；留空表示与本容器一致

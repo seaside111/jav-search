@@ -10,20 +10,24 @@ from typing import Optional
 from xml.dom import minidom
 
 import httpx
+from bs4 import BeautifulSoup
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from config_manager import CONFIG_PATH, load as load_config
 import emby
 from scrapers import search, enrich, SEARCH_MODE_ACTOR, SEARCH_MODE_CODE
+from scrapers import javdb as javdb_scraper
 
 router = APIRouter(prefix="/api/actors")
 _task: Optional[asyncio.Task] = None
+_directory_task: Optional[asyncio.Task] = None
 _state = {"running": False, "root": "", "total": 0, "processed": 0,
           "actors": 0, "saved": 0, "failed": 0, "emby_updated": 0, "current": "",
           "started": "", "finished": "", "message": "", "recent": []}
 _image_exts = {".jpg", ".jpeg", ".png", ".webp"}
 _video_exts = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".webm"}
+_pending_lock = asyncio.Lock()
 
 
 class ActorRunRequest(BaseModel):
@@ -167,6 +171,179 @@ def _sources(config: dict) -> list[str]:
     return result or ["javbus"]
 
 
+def _request_interval(config: dict) -> float:
+    """Return a bounded cooldown used by manual actor scraping."""
+    try:
+        return max(0.0, min(float(config.get("actor_scrape_interval_seconds", 2.0)), 60.0))
+    except (TypeError, ValueError):
+        return 2.0
+
+
+def _pending_path(config: dict) -> Path:
+    cache = Path(config.get("actor_scrape_cache_dir") or CONFIG_PATH.parent / "actor-cache")
+    return cache / "javdb-pending.json"
+
+
+def _load_pending(config: dict) -> dict:
+    try:
+        payload = json.loads(_pending_path(config).read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _save_pending(config: dict, pending: dict):
+    path = _pending_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+async def _queue_javdb_pending(actors: list[dict], folder: Path, config: dict):
+    """Register only actors still missing after the normal low-cost sources."""
+    def has_local(actor: dict) -> bool:
+        path = folder / "actors" / f"{_safe(actor['name'])}.jpg"
+        return path.exists() and path.stat().st_size > 1024
+
+    missing = [a for a in actors if a.get("name") and not has_local(a)]
+    if not missing or not config.get("actor_javdb_directory_enabled", True):
+        return
+    async with _pending_lock:
+        pending = _load_pending(config)
+        now = datetime.now().isoformat(timespec="seconds")
+        for actor in missing:
+            key = _key(actor["name"])
+            item = pending.setdefault(key, {"name": actor["name"], "folders": [],
+                                            "queued": now, "checks": 0})
+            value = str(folder.resolve())
+            if value not in item["folders"]:
+                item["folders"].append(value)
+        _save_pending(config, pending)
+    _log(f"已登记 JavDB 低频待补：{', '.join(a['name'] for a in missing)}")
+
+
+def _parse_javdb_actor_directory(html: str) -> list[dict]:
+    """Parse actor cards defensively; JavDB has used several card layouts."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    found = {}
+    for link in soup.select('a[href*="/actors/"]'):
+        name = (link.get("title") or link.get("aria-label") or link.get_text(" ", strip=True)).strip()
+        img = link.select_one("img")
+        avatar = ""
+        if img:
+            avatar = (img.get("data-src") or img.get("data-original") or
+                      img.get("data-lazy-src") or img.get("src") or "").strip()
+            name = name or (img.get("alt") or "").strip()
+        if not avatar:
+            styled = link.select_one("[style*='background-image']") or link
+            match = re.search(r"background-image\s*:\s*url\(['\"]?([^)'\"]+)",
+                              styled.get("style") or "", re.I)
+            avatar = match.group(1).strip() if match else ""
+        if avatar.startswith("//"):
+            avatar = "https:" + avatar
+        elif avatar.startswith("/"):
+            avatar = javdb_scraper.JAVDB_BASE + avatar
+        if name and _usable_avatar(avatar):
+            found.setdefault(_key(name), {"name": name, "avatar": avatar,
+                                          "source": "javdb"})
+    return list(found.values())
+
+
+async def _apply_directory_portrait(item: dict, folders: list[str], config: dict) -> dict:
+    name, avatar = item["name"], item["avatar"]
+    image = await _download(avatar, config.get("proxy") or None)
+    if not image:
+        return {"updated": False, "folders": 0, "emby_updated": 0}
+    cache_dir = Path(config.get("actor_scrape_cache_dir") or CONFIG_PATH.parent / "actor-cache") / _safe(name)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    portrait = cache_dir / "portrait.jpg"
+    portrait.write_bytes(image)
+    (cache_dir / "metadata.json").write_text(json.dumps({
+        "name": name, "url": avatar, "source": "javdb-directory",
+        "updated": datetime.now().isoformat(timespec="seconds")},
+        ensure_ascii=False, indent=2), encoding="utf-8")
+    touched, emby_updated = 0, 0
+    for value in folders:
+        folder = Path(value)
+        if not folder.is_dir():
+            continue
+        local = folder / "actors" / f"{_safe(name)}.jpg"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(portrait, local)
+        nfo = next(folder.glob("*.nfo"), None)
+        actors, code = [], ""
+        if nfo:
+            try:
+                tree, actors, code = _read_nfo(nfo)
+                for actor in actors:
+                    if _key(actor.get("name", "")) == _key(name):
+                        actor["avatar"] = avatar
+                        actor["avatar_source"] = "javdb-directory"
+                if config.get("actor_scrape_write_nfo", True):
+                    _write_nfo(nfo, tree, actors,
+                               config.get("scrape_actor_thumb_in_nfo", True))
+            except Exception as exc:
+                _log(f"后台头像更新 NFO 失败（{name}，{folder}）：{exc}")
+        touched += 1
+        if config.get("emby_actor_sync_enabled", False):
+            result = await sync_emby_folder(folder, config, code, actors or [{"name": name}])
+            emby_updated += result.get("emby_updated", 0)
+    return {"updated": touched > 0, "folders": touched, "emby_updated": emby_updated}
+
+
+async def run_javdb_directory_once(config: Optional[dict] = None) -> dict:
+    """Fetch one directory page and consume only matching pending actors."""
+    config = config or load_config()
+    async with _pending_lock:
+        pending = _load_pending(config)
+    if not pending:
+        return {"success": True, "pending": 0, "matched": 0, "updated": 0}
+    html, status, error = await javdb_scraper._fetch_html(
+        f"{javdb_scraper.JAVDB_BASE}/actors", config.get("proxy") or None,
+        retries=0)
+    if error or status != 200:
+        return {"success": False, "pending": len(pending), "matched": 0,
+                "updated": 0, "error": error or f"HTTP {status}"}
+    directory = {_key(a["name"]): a for a in _parse_javdb_actor_directory(html)}
+    matched = updated = emby_updated = 0
+    for key, queued in list(pending.items()):
+        actor = directory.get(key)
+        queued["checks"] = int(queued.get("checks", 0)) + 1
+        if not actor:
+            continue
+        matched += 1
+        result = await _apply_directory_portrait(actor, queued.get("folders") or [], config)
+        if result["updated"]:
+            updated += 1
+            emby_updated += result["emby_updated"]
+            pending.pop(key, None)
+        await asyncio.sleep(max(1.0, _request_interval(config)))
+    async with _pending_lock:
+        _save_pending(config, pending)
+    _log(f"JavDB 演员目录低频扫描完成：待补 {len(pending)}，匹配 {matched}，更新 {updated}")
+    return {"success": True, "pending": len(pending), "matched": matched,
+            "updated": updated, "emby_updated": emby_updated}
+
+
+async def _directory_loop():
+    while True:
+        config = load_config()
+        hours = max(1.0, min(float(config.get("actor_javdb_directory_interval_hours", 12)), 168.0))
+        # 启动后先等待完整周期，避免容器重启时立刻与首页/手动任务争抢 FlareSolverr。
+        await asyncio.sleep(hours * 3600)
+        if config.get("actor_javdb_directory_enabled", True):
+            try:
+                await run_javdb_directory_once(config)
+            except Exception as exc:
+                _log(f"JavDB 演员目录低频扫描失败：{exc}")
+
+
+def start_directory_monitor():
+    global _directory_task
+    if _directory_task is None or _directory_task.done():
+        _directory_task = asyncio.create_task(_directory_loop())
+    return _directory_task
+
+
 async def _details(query: str, mode: str, source: str, proxy: Optional[str]) -> list[dict]:
     try:
         items = await search(query=query, mode=mode, proxy=proxy,
@@ -235,7 +412,9 @@ async def _download(url: str, proxy: Optional[str], with_status: bool = False):
     if not _usable_avatar(url):
         _log("头像下载跳过：来源未返回有效图片地址")
         return result(None, "invalid")
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.javbus.com/",
+    referer = "https://javdb.com/" if ("javdb" in url or "jdbstatic" in url) \
+        else "https://www.javbus.com/"
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": referer,
                "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"}
     try:
         async with httpx.AsyncClient(proxy=proxy or None, timeout=30,
@@ -452,12 +631,24 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
             if avatar:
                 actor["avatar"], actor["avatar_source"] = avatar, source
     saved = 0
-    for actor in actors:
+    interval = _request_interval(config)
+    for actor_index, actor in enumerate(actors):
+        # A movie with several missing actors can otherwise issue continuous
+        # name fallbacks and forced image downloads. Keep those operations
+        # serial and paced; cache-only copies do not need a cooldown.
+        needs_network = (not _usable_avatar(actor.get("avatar", "")) or overwrite or
+                         _cached_image(actor.get("name", ""), config) is None)
+        if actor_index and needs_network and interval:
+            _state["message"] = f"请求冷却 {interval:g} 秒"
+            await asyncio.sleep(interval)
         if not _usable_avatar(actor.get("avatar", "")):
             avatar, source = await _avatar_by_name(actor["name"], sources, proxy)
             actor["avatar"], actor["avatar_source"] = avatar, source
         if await _save_actor(actor, folder, config, proxy, overwrite):
             saved += 1
+    # 首轮现有来源到此即结束。仍缺头像者只登记给 JavDB 目录后台任务，
+    # 不在影片任务中同步重试需要过盾的 JavDB。
+    await _queue_javdb_pending(actors, folder, config)
     # 必须先把番号补查新增的演员与头像 URL 写回 NFO，再让 Emby 扫描；
     # 否则新 Person/影片演员关系可能直到下一次手工刷新才出现。
     if nfo_path and tree is not None and actors and config.get("actor_scrape_write_nfo", True):
@@ -496,8 +687,13 @@ async def _run(root: Path, config: dict, overwrite: bool):
                    "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "finished": "",
                    "message": "正在扫描", "recent": []})
     try:
-        for path in nfos:
+        interval = _request_interval(config)
+        for index, path in enumerate(nfos):
+            if index and interval:
+                _state["message"] = f"批量任务冷却 {interval:g} 秒"
+                await asyncio.sleep(interval)
             _state["current"] = str(path)
+            _state["message"] = "正在扫描"
             result = await process_nfo(path, config, overwrite)
             _state["processed"] += 1
             _state["actors"] += len(result.get("actors") or [])
@@ -549,3 +745,18 @@ async def single(req: ActorSingleRequest):
     if not nfo:
         raise HTTPException(status_code=404, detail="影片目录中没有 NFO")
     return await process_nfo(nfo, load_config(), req.overwrite)
+
+
+@router.post("/javdb-directory/run")
+async def run_javdb_directory():
+    return await run_javdb_directory_once(load_config())
+
+
+@router.get("/javdb-directory/status")
+async def javdb_directory_status():
+    config = load_config()
+    pending = _load_pending(config)
+    return {"running": bool(_directory_task and not _directory_task.done()),
+            "enabled": config.get("actor_javdb_directory_enabled", True),
+            "pending": len(pending),
+            "actors": [item.get("name", "") for item in pending.values()]}

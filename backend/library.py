@@ -898,6 +898,12 @@ def _archive_folder_name(code: str, title_original: str, title_translated: str,
     """构造稳定且跨平台安全的影片文件夹名。"""
     safe_code = _safe_name(code) if code else "unknown"
     mode = config.get("scrape_folder_naming", "code")
+    names = [(a.get("name") or "").strip() for a in (actors or [])]
+    names = list(dict.fromkeys(n for n in names if n))
+    if config.get("scrape_folder_actor_mode", "first") != "all":
+        names = names[:1]
+    else:
+        names = names[:7]
     suffix = ""
     if mode == "code_title":
         use_translated = config.get("scrape_folder_title_translate", False)
@@ -905,17 +911,12 @@ def _archive_folder_name(code: str, title_original: str, title_translated: str,
     elif mode == "code_title_actor":
         use_translated = config.get("scrape_folder_title_translate", False)
         title = title_translated if use_translated else title_original
-        names = [(a.get("name") or "").strip() for a in (actors or [])]
-        names = list(dict.fromkeys(n for n in names if n))
-        if config.get("scrape_folder_actor_mode", "first") != "all":
-            names = names[:1]
         suffix = " ".join(part for part in [title, " ".join(names)] if (part or "").strip())
     elif mode == "code_actor":
-        names = [(a.get("name") or "").strip() for a in (actors or [])]
-        names = list(dict.fromkeys(n for n in names if n))
-        if config.get("scrape_folder_actor_mode", "first") != "all":
-            names = names[:1]
         suffix = " ".join(names)
+    elif mode == "actor":
+        actor_name = _safe_name(" ".join(names)) if names else ""
+        return (actor_name or safe_code)[:150].rstrip(" .")
     suffix = _safe_name(suffix.strip()) if (suffix or "").strip() else ""
     # 留出年月及文件名长度；缺元数据时稳定回退纯番号。
     return (f"{safe_code} {suffix}" if suffix else safe_code)[:150].rstrip(" .")
@@ -943,6 +944,12 @@ def _artwork_urls(movie: dict) -> tuple[str, str]:
     fanart = next(((url or "").strip() for url in (movie.get("samples") or [])
                    if (url or "").strip() and (url or "").strip() != poster), "")
     return poster, fanart
+
+
+def _use_jacket_artwork(config: dict, movie: dict, cover_url: str) -> bool:
+    """Use one confirmed horizontal jacket for both poster and fanart."""
+    return (config.get("scrape_jacket_artwork_enabled", False) and
+            _is_confirmed_jacket_cover(movie, cover_url))
 
 
 def _image_dimensions(data: bytes) -> tuple[int, int]:
@@ -1357,18 +1364,21 @@ async def _run_pending_artwork(config: dict) -> int:
         poster_url, fanart_url = _artwork_urls(movie)
         saved = []
         download_failed = False
-        if not poster_path.exists() and poster_url:
+        jacket_mode = _use_jacket_artwork(config, movie, poster_url)
+        if (not poster_path.exists() or (jacket_mode and not fanart_path.exists())) and poster_url:
             data = await _fetch_cover(poster_url, config.get("proxy") or None)
             if data:
-                data, cropped = _poster_bytes(
-                    data, _is_confirmed_jacket_cover(movie, poster_url))
+                jacket = data
+                data, cropped = _poster_bytes(data, jacket_mode)
                 if cropped:
                     _log(f"完整横向封套已裁取右侧正面：{code}-poster.jpg")
             if data and _write_artwork_if_missing(poster_path, data):
                 saved.append(poster_path.name)
             elif not poster_path.exists():
                 download_failed = True
-        if not fanart_path.exists() and fanart_url:
+            if data and jacket_mode and not fanart_path.exists() and _write_artwork_if_missing(fanart_path, jacket):
+                saved.append(fanart_path.name)
+        if not jacket_mode and not fanart_path.exists() and fanart_url:
             data, fanart_url = await _fetch_fanart(movie, config.get("proxy") or None)
             if data and _write_artwork_if_missing(fanart_path, data):
                 saved.append(fanart_path.name)
@@ -1608,17 +1618,24 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             _log(f"NFO 写入失败 {filepath}: {e}")
 
     cover_url, fanart_url = _artwork_urls(movie)
+    jacket_mode = _use_jacket_artwork(config, movie, cover_url)
     if cover_url and (overwrite or not status["has_poster"]
+                      or (jacket_mode and not status["has_fanart"])
                       or (fanart_url and not status["has_fanart"])):
         # 优先复用首页/详情已缓存的封面（命中即零上游请求）；未命中再回源（含 FC2 防盗链兜底）
         _log(f"获取封面（优先复用缓存）：{code} ← {cover_url[:60]}")
-        img = await _fetch_cover(cover_url, proxy) if (overwrite or not status["has_poster"]) else None
+        img = await _fetch_cover(cover_url, proxy) if (
+            overwrite or not status["has_poster"] or (jacket_mode and not status["has_fanart"])) else None
         if img:
             try:
-                img, cropped = _poster_bytes(
-                    img, _is_confirmed_jacket_cover(movie, cover_url))
-                (folder / f"{code}-poster.jpg").write_bytes(img)
-                saved_cover = True
+                jacket = img
+                img, cropped = _poster_bytes(img, jacket_mode)
+                if overwrite or not status["has_poster"]:
+                    (folder / f"{code}-poster.jpg").write_bytes(img)
+                    saved_cover = True
+                if jacket_mode and (overwrite or not status["has_fanart"]):
+                    (folder / f"{code}-fanart.jpg").write_bytes(jacket)
+                    saved_cover = True
                 if cropped:
                     _log(f"已从完整横向封套右侧裁取标准竖版：{code}-poster.jpg")
                 else:
@@ -1631,7 +1648,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
 
         # fanart/backdrop 必须来自独立且尺寸合格的横向样品图或宣传图。
         # 没有独立来源时宁可缺省，也不复制 poster 制造背景图。
-        if fanart_url and (overwrite or not status["has_fanart"]):
+        if not jacket_mode and fanart_url and (overwrite or not status["has_fanart"]):
             _log(f"获取背景图（独立样品/宣传图）：{code} ← {fanart_url[:60]}")
             fanart, selected_fanart_url = await _fetch_fanart(movie, proxy)
             if fanart:
@@ -1644,7 +1661,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             else:
                 movie.setdefault("_artwork_pending_sources", []).append("_download")
                 _log(f"背景图获取失败，不复制封面兜底：{code}")
-        elif not fanart_url:
+        elif not jacket_mode and not fanart_url:
             _log(f"无独立背景图来源，仅保存 poster：{code}")
 
     folder_title = name_zh
@@ -1680,7 +1697,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
 
 
 # ─────────────────────────────────────────
-# 归档：视频(重命名为番号) + NFO/封面 → output_dir/YYYYMM/番号/
+# 归档：视频（按配置决定是否改名）+ NFO/图片 → output_dir/YYYYMM/所选文件夹名/
 #   V1.5 统一：归档方式由全局 archive_mode 决定（hardlink/copy 保留原文件；move 移动后清原目录），
 #   与发种流水线共用同一归档目录与按年月结构。
 # ─────────────────────────────────────────
@@ -2385,7 +2402,8 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         src_parent = video_path.parent
         # V1.5 统一：归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
         mode = (config.get("archive_mode") or "hardlink").lower()
-        mv = _archive_file(video_path, output_dir, code, mode=mode, rename=organize_on,
+        rename_video = organize_on and config.get("scrape_video_rename_enabled", True)
+        mv = _archive_file(video_path, output_dir, code, mode=mode, rename=rename_video,
                            watch_dir=str(watch_dir), folder_name=folder_name,
                            by_month=config.get("archive_by_month", True))
         record["moved"] = mv.get("archived", False)
@@ -2790,7 +2808,8 @@ async def api_scrape_single(req: ScrapeRequest):
         mv = _archive_file(
             video_path, config["scrape_output_dir"], code,
             mode=(config.get("archive_mode") or "hardlink").lower(),
-            rename=config.get("scrape_organize_enabled", True),
+            rename=(config.get("scrape_organize_enabled", True) and
+                    config.get("scrape_video_rename_enabled", True)),
             watch_dir=config.get("scrape_watch_dir", ""),
             folder_name=folder_name,
             by_month=config.get("archive_by_month", True))
