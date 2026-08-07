@@ -347,6 +347,35 @@ class VideoClassificationTests(unittest.TestCase):
         self.assertEqual(len(Client.uploads), 2)
         self.assertTrue(all(item["updated"] for item in result["results"]))
 
+    def test_emby_finds_person_id_from_current_movie_people(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._payload
+
+        class Client:
+            async def get(self, url, **kwargs):
+                self.path = kwargs["params"]["Path"]
+                return Response({"Items": [{
+                    "Id": "movie-id", "People": [
+                        {"Name": "逢沢みゆ", "Id": "person-id", "Type": "Actor"}
+                    ]
+                }]})
+
+        client = Client()
+        result = asyncio.run(emby._find_people_from_media(
+            client, "http://emby", {}, ["逢沢みゆ"],
+            ["/media/NACT-163", "/media/NACT-163/NACT-163.mp4"]))
+        self.assertEqual(result["逢沢みゆ"]["Id"], "person-id")
+        self.assertEqual(client.path, "/media/NACT-163/NACT-163.mp4")
+
     def test_actor_nfo_is_written_before_emby_media_notification(self):
         original_sync = actor_scraper.emby.sync_person_images
 
@@ -746,8 +775,11 @@ class VideoClassificationTests(unittest.TestCase):
         poster, cropped = library._poster_bytes(raw.getvalue(), confirmed_jacket=True)
         with Image.open(BytesIO(poster)) as image:
             self.assertTrue(cropped)
-            self.assertEqual(image.size, (667, 1000))
-            self.assertGreater(image.getpixel((600, 500))[2], 200)
+            self.assertEqual(image.size, (795, 1000))
+            # The crop includes a narrow strip left of the centre seam while
+            # retaining the complete right/front panel.
+            self.assertGreater(image.getpixel((20, 500))[0], 150)
+            self.assertGreater(image.getpixel((700, 500))[2], 200)
 
         self.assertTrue(library._is_confirmed_jacket_cover({
             "source": "JavBus",

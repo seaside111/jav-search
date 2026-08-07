@@ -1019,7 +1019,10 @@ def _poster_bytes(data: bytes, confirmed_jacket: bool = False) -> tuple[bytes, b
     try:
         with Image.open(BytesIO(data)) as source:
             source.load()
-            crop_width = round(source.height * 2 / 3)
+            # Start just to the left of the centre seam.  A full jacket's
+            # front panel is the right half; retaining another 3% of the full
+            # width avoids shaving off artwork/text printed across the fold.
+            crop_width = round(source.width * 0.53)
             if crop_width <= 0 or crop_width > source.width:
                 return data, False
             front = source.crop((source.width - crop_width, 0,

@@ -112,6 +112,46 @@ async def _find_people_fallback(client: httpx.AsyncClient, base: str, headers: d
     return found
 
 
+async def _find_people_from_media(client: httpx.AsyncClient, base: str, headers: dict,
+                                  names: list[str], media_paths: list[str]) -> dict[str, dict]:
+    """Resolve people through the movie Emby just imported.
+
+    Emby's global /Persons index can lag behind a targeted media update.  The
+    movie item itself can already contain the actor association and Person Id,
+    so use that relationship before declaring the portrait missing.
+    """
+    pending = {_name_key(name): name for name in names if _name_key(name)}
+    found = {}
+    for path in reversed(media_paths or []):
+        if not pending:
+            break
+        response = await client.get(
+            f"{base}/Items", headers=headers,
+            params={"Recursive": "true", "Path": path, "Limit": 10,
+                    "Fields": "Path,People"})
+        if response.status_code in (401, 403):
+            response.raise_for_status()
+        if response.status_code >= 400:
+            continue
+        payload = response.json()
+        items = payload.get("Items", payload if isinstance(payload, list) else [])
+        for media in items or []:
+            people = media.get("People") or []
+            if not people and media.get("Id"):
+                detail = await client.get(
+                    f"{base}/Items/{media['Id']}", headers=headers,
+                    params={"Fields": "People"})
+                if detail.status_code < 400:
+                    people = (detail.json() or {}).get("People") or []
+            for person in people:
+                key = _name_key(person.get("Name", ""))
+                original = pending.get(key)
+                if original and person.get("Id"):
+                    found[original] = person
+                    pending.pop(key, None)
+    return found
+
+
 def _primary_tag(item: dict) -> str:
     tags = item.get("ImageTags") or {}
     return (tags.get("Primary") or "").strip() if isinstance(tags, dict) else ""
@@ -223,6 +263,13 @@ async def sync_person_images(url: str, api_key: str, portraits: list[dict],
                 fallback = await _find_people_fallback(
                     client, base, headers, list(pending))
                 for name, person in fallback.items():
+                    people[name] = person
+                    pending.pop(name, None)
+
+            if pending:
+                linked = await _find_people_from_media(
+                    client, base, headers, list(pending), paths)
+                for name, person in linked.items():
                     people[name] = person
                     pending.pop(name, None)
 
