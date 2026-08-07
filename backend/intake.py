@@ -28,7 +28,8 @@ _FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "pushed_intake.json"
 # detail_loaded 表示推送时详情是否已加载完整——刮削时据此决定要不要回原源补抓缺失字段。
 _META_FIELDS = ("code", "title", "cover", "cover_thumb", "source", "url",
                 "release_date", "duration", "director", "studio", "label",
-                "series", "score", "actors", "tags", "description", "detail_loaded")
+                "series", "score", "score_count", "actors", "tags", "description",
+                "samples", "magnets", "source_urls", "detail_loaded")
 
 _MAX_ENTRIES = 800
 _TTL_SECONDS = 30 * 24 * 3600   # 条目最长保留 30 天，防无限增长

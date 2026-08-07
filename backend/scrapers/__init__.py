@@ -32,7 +32,10 @@ SOURCE_MODULES = {
 
 # 合并时来源优先级（数字小者优先，作为主条目保留封面/标题）
 # FC2 番号体系独立、不与其它源重叠，优先级随意，置末即可
-_SOURCE_PRIORITY = {"javbus": 0, "javdb": 1, "jav321": 2, "dmm": 3,
+# JavBus remains the stable primary source. Between the two image-rich
+# fallbacks, prefer direct/lightweight JAV321; use shielded JAVDB to enrich
+# fields it uniquely provides (ratings, magnets, tags, etc.).
+_SOURCE_PRIORITY = {"javbus": 0, "jav321": 1, "javdb": 2, "dmm": 3,
                     "avmoo": 4, "avsox": 5, "fc2": 6}
 
 
@@ -90,6 +93,7 @@ def _merge_lists(lists_by_source: list[tuple[str, list[dict]]]) -> list[dict]:
 # 搜索要快，超时短些；首页最新是后台加载，可多等以便慢源（JavDB/FlareSolverr）也能进来。
 _PER_SOURCE_TIMEOUT = 25.0          # 搜索用
 _PER_SOURCE_TIMEOUT_LATEST = 40.0   # 首页最新用
+_PER_SOURCE_TIMEOUT_DETAIL = 75.0   # 后台补图：容纳 FlareSolverr 启动、过盾和代理会话
 
 
 async def _run_source(label: str, coro, timeout: float):
@@ -152,13 +156,15 @@ async def search_source_status(query: str, mode: str, source: str,
     mod = SOURCE_MODULES.get(source)
     if not mod:
         return [], "invalid"
+    timeout = (_PER_SOURCE_TIMEOUT_DETAIL
+               if source in _FLARESOLVERR_SOURCES else _PER_SOURCE_TIMEOUT)
     try:
         rows = await asyncio.wait_for(
             mod.search_list(query, mode, proxy, max_results),
-            timeout=_PER_SOURCE_TIMEOUT)
+            timeout=timeout)
         return (rows if isinstance(rows, list) else []), "ok"
     except asyncio.TimeoutError:
-        print(f"[source] {source} 超时（>{_PER_SOURCE_TIMEOUT}s），留待有限重试")
+        print(f"[source] {source} 超时（>{timeout}s），留待有限重试")
         return [], "timeout"
     except Exception as e:
         print(f"[source] {source} 失败: {e!r}")
@@ -223,9 +229,9 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
         if cached is not None:
             return result(cached, "ok")
         use_fs = source in _FLARESOLVERR_SOURCES and flaresolverr_on
-        # FlareSolverr 来源：全局串行闸 + 32s 超时；其余：并发信号量 + 快速超时
+        # FlareSolverr 来源需容纳浏览器启动、过盾及认证代理会话；其余保持快速超时。
         gate = _FLARESOLVERR_GATE if use_fs else sem
-        timeout = 32.0 if use_fs else per_timeout
+        timeout = _PER_SOURCE_TIMEOUT_DETAIL if use_fs else per_timeout
         async with gate:
             await asyncio.sleep(0.05)
             try:

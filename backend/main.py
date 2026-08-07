@@ -40,7 +40,7 @@ import actor_scraper
 import auth
 import logging
 
-APP_VERSION = "1.4.6.2"
+APP_VERSION = "1.4.6.3"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -193,6 +193,12 @@ class DetailItem(BaseModel):
 
 class DetailsRequest(BaseModel):
     items: list[DetailItem]        # 需补全详情的条目（前台当前页 + 预取下一页）
+
+
+class ResolveDetailRequest(BaseModel):
+    code: str
+    source: str
+    url: Optional[str] = None
 
 
 class TranslateRequest(BaseModel):
@@ -724,6 +730,48 @@ async def api_details(req: DetailsRequest):
         return {"success": True, "results": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"详情抓取失败: {str(e)}")
+
+
+@app.post("/api/details/resolve")
+async def api_detail_resolve(req: ResolveDetailRequest):
+    """Resolve one enabled source by known URL or code, then fetch/cache detail."""
+    from scrapers import SOURCE_MODULES, search_source_status
+    source = (req.source or "").strip().lower()
+    code = (req.code or "").strip()
+    config = load_config()
+    enabled = [str(s).lower() for s in (config.get("sources") or [])]
+    if source not in SOURCE_MODULES or source not in enabled:
+        return {"success": True, "status": "disabled", "detail": None}
+    proxy = config.get("proxy") or None
+    url = (req.url or "").strip()
+    # JAV321 的详情由 POST /search 返回，响应 URL 往往仍是 /search，不能靠随后 GET
+    # 可靠复现；即使前端带来了该 URL，也应按番号重新 POST 搜索并直接复用解析结果。
+    if source == "jav321":
+        url = ""
+    try:
+        seed = None
+        if not url:
+            rows, status = await search_source_status(
+                code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=3)
+            if status != "ok":
+                return {"success": True, "status": status, "detail": None}
+            wanted = re.sub(r"[^a-z0-9]", "", code.lower())
+            seed = next((row for row in rows
+                         if re.sub(r"[^a-z0-9]", "", str(row.get("code", "")).lower()) == wanted), None)
+            if not seed:
+                return {"success": True, "status": "empty", "detail": None}
+            url = (seed.get("url") or "").strip()
+            if seed.get("detail_loaded"):
+                return {"success": True, "status": "ok", "detail": seed, "url": url}
+        if not url:
+            return {"success": True, "status": "empty", "detail": seed}
+        result = await enrich([{"url": url, "source": source}], proxy=proxy,
+                              concurrency=1, per_timeout=15.0, with_status=True)
+        detail, status = result[0] if result else (None, "error")
+        return {"success": True, "status": status, "detail": detail, "url": url}
+    except Exception as e:
+        return {"success": True, "status": "error", "detail": None,
+                "error": f"{type(e).__name__}: {e}"}
 
 
 @app.get("/api/latest")

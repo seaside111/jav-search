@@ -14,11 +14,105 @@ import emby
 import qbittorrent
 import transmission
 import main
+import intake
 from scrapers import _javu_base, _javbus_base, _fsgate, jav321, dmm, javdb
 from config_manager import DEFAULT_CONFIG
 
 
 class JavDbFlareSolverrTests(unittest.TestCase):
+    def test_detail_resolver_prefers_jav321_code_search_over_non_durable_url(self):
+        import scrapers
+        detail = {
+            "code": "CLOT-041", "source": "JAV321", "detail_loaded": True,
+            "samples": ["https://img.jav321/sample-1.jpg"],
+            "url": "https://www.jav321.com/search",
+        }
+        search_mock = mock.AsyncMock(return_value=([detail], "ok"))
+        enrich_mock = mock.AsyncMock(return_value=[])
+        with mock.patch.object(main, "load_config", return_value={"sources": ["jav321"]}), \
+                mock.patch.object(scrapers, "search_source_status", search_mock), \
+                mock.patch.object(main, "enrich", enrich_mock):
+            result = asyncio.run(main.api_detail_resolve(main.ResolveDetailRequest(
+                code="CLOT-041", source="jav321",
+                url="https://www.jav321.com/search")))
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["detail"]["samples"], detail["samples"])
+        search_mock.assert_awaited_once()
+        enrich_mock.assert_not_awaited()
+
+    def test_pushed_intake_keeps_clicked_detail_artwork(self):
+        original_file = intake._FILE
+        with tempfile.TemporaryDirectory() as raw:
+            intake._FILE = Path(raw) / "pushed_intake.json"
+            try:
+                intake.register("ABC123", {
+                    "code": "CLOT-041", "title": "title", "detail_loaded": True,
+                    "samples": ["https://img.jav321/sample-1.jpg"],
+                    "source_urls": {"JAV321": "https://www.jav321.com/search"},
+                    "magnets": [{"link": "magnet:?xt=urn:btih:ABC123"}],
+                    "score_count": "100",
+                }, False)
+                saved = intake._load()["abc123"]
+            finally:
+                intake._FILE = original_file
+
+        self.assertEqual(saved["samples"], ["https://img.jav321/sample-1.jpg"])
+        self.assertEqual(saved["source_urls"]["JAV321"], "https://www.jav321.com/search")
+        self.assertEqual(saved["score_count"], "100")
+
+    def test_scrape_artwork_reuses_detail_image_cache_bytes(self):
+        cached = mock.AsyncMock(return_value=(b"cached-image", "image/jpeg"))
+        with mock.patch.object(main, "fetch_image_cached", cached):
+            data = asyncio.run(library._fetch_cover(
+                "https://img.jav321/sample-1.jpg", None))
+        self.assertEqual(data, b"cached-image")
+        cached.assert_awaited_once_with("https://img.jav321/sample-1.jpg")
+
+    def test_frontend_detail_failures_remain_retryable(self):
+        html = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
+            encoding="utf-8")
+        self.assertIn("/api/details/resolve", html)
+        self.assertIn("['jav321', 'javdb'].filter", html)
+        self.assertNotIn("m._javdb_extra_loaded = true", html)
+        self.assertNotIn("idxs.forEach(i => { if (currentResults[i]) currentResults[i].detail_loaded = true; })", html)
+
+    def test_jav321_is_preferred_over_shielded_javdb_for_merged_artwork(self):
+        import scrapers
+        merged = scrapers._merge_lists([
+            ("javdb", [{"code": "CLOT-041", "title": "JavDB title",
+                        "cover": "https://javdb/cover.jpg", "source": "JavDB",
+                        "url": "https://javdb/item"}]),
+            ("jav321", [{"code": "CLOT-041", "title": "JAV321 title",
+                         "cover": "https://jav321/cover.jpg", "source": "JAV321",
+                         "url": "https://jav321/item",
+                         "samples": ["https://jav321/sample.jpg"]}]),
+        ])
+        self.assertEqual(merged[0]["source"], "JAV321")
+        self.assertEqual(merged[0]["cover"], "https://jav321/cover.jpg")
+        self.assertEqual(merged[0]["samples"], ["https://jav321/sample.jpg"])
+        self.assertEqual(merged[0]["source_urls"]["JavDB"], "https://javdb/item")
+
+    def test_javdb_artwork_lookup_gets_slow_source_timeout_budget(self):
+        import scrapers
+        observed = []
+
+        async def fake_search(*_args, **_kwargs):
+            return []
+
+        async def fake_wait_for(coro, timeout):
+            observed.append(timeout)
+            return await coro
+
+        with mock.patch.object(scrapers.javdb, "search_list", fake_search), \
+                mock.patch.object(scrapers.asyncio, "wait_for", fake_wait_for):
+            rows, status = asyncio.run(scrapers.search_source_status(
+                "CLOT-041", "code", "javdb", max_results=3))
+
+        self.assertEqual((rows, status), ([], "ok"))
+        self.assertEqual(observed, [scrapers._PER_SOURCE_TIMEOUT_DETAIL])
+        self.assertGreater(observed[0], 40)
+
     def test_authenticated_proxy_uses_flaresolverr_session(self):
         calls = []
 
@@ -733,6 +827,26 @@ class VideoClassificationTests(unittest.TestCase):
         item = jav321._parse(html, query="ABC-123", url="https://www.jav321.com/video/abc-123")
         self.assertEqual(item["cover"], "https://www.jav321.com/images/cover.jpg")
         self.assertEqual(item["samples"], ["https://www.jav321.com/images/sample1.jpg"])
+
+    def test_jav321_parser_reads_current_wide_column_gallery(self):
+        html = """
+        <html><h3>CLOT-041 title</h3><div>品番：CLOT-041</div>
+        <div class="col-md-3"><img class="img-responsive" src="/cover/clot041.jpg"></div>
+        <div class="col-md-9" id="video_info">
+          <a href="https://pics.test/clot041jp-1.jpg"><img src="/thumb/one.jpg"></a>
+          <picture><source srcset="https://pics.test/clot041jp-2.webp 1x"></picture>
+          <img data-lazy-src="https://pics.test/clot041jp-3.jpg">
+          <img src="/images/logo.png">
+        </div></html>
+        """
+        item = jav321._parse(
+            html, query="CLOT-041", url="https://www.jav321.com/video/clot00041")
+        self.assertEqual(item["cover"], "https://www.jav321.com/cover/clot041.jpg")
+        self.assertEqual(item["samples"], [
+            "https://pics.test/clot041jp-1.jpg",
+            "https://pics.test/clot041jp-2.webp",
+            "https://pics.test/clot041jp-3.jpg",
+        ])
 
     def test_dmm_api_mapping_exposes_official_cover_and_samples(self):
         item = dmm._item({

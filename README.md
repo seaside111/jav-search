@@ -1,4 +1,4 @@
-# JAV Search · v1.4.6.2
+# JAV Search · v1.4.6.3
 
 运行在群晖 Docker 上的日本成人影片信息检索 Web 应用。支持按番号 / 演员 / 关键词搜索，集成百度·阿里云翻译，接入 **Jackett 资源搜索**，支持 **一键推送 qBittorrent / Transmission 下载** 与 **下载完成自动刮削归档（Emby 兼容 NFO + 封面）**。
 
@@ -74,7 +74,7 @@ docker stop jav-search && docker rm jav-search
 # 再次执行上面的 docker run 命令即可
 ```
 
-> 当前正式版本为 `v1.4.6.2`，也可以将镜像标签 `:latest` 换成固定版本标签 `:V1.4.6.2`。
+> 当前正式版本为 `v1.4.6.3`，也可以将镜像标签 `:latest` 换成固定版本标签 `:V1.4.6.3`。
 
 ### FlareSolverr（JavDB / FC2 过 Cloudflare 盾用 · 留空自动探测 / 也可手填）
 

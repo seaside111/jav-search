@@ -20,6 +20,19 @@ def _abs(url: str) -> str:
     return urljoin(BASE + "/", (url or "").strip()) if url else ""
 
 
+def _image_url(value: str) -> str:
+    """Normalize an image/srcset value and reject page, icon and placeholder URLs."""
+    raw = (value or "").strip().split(",", 1)[0].strip().split(" ", 1)[0]
+    if not raw or raw.startswith(("data:", "javascript:")):
+        return ""
+    low = raw.lower().split("?", 1)[0]
+    if not low.endswith((".jpg", ".jpeg", ".png", ".webp")):
+        return ""
+    if any(word in low for word in ("logo", "favicon", "loading", "noimage", "nowprinting")):
+        return ""
+    return _abs(raw)
+
+
 def _parse(html: str, query: str = "", url: str = "") -> Optional[dict]:
     soup = BeautifulSoup(html or "", "html.parser")
     title_node = soup.select_one("h3") or soup.select_one("h1") or soup.select_one("title")
@@ -44,10 +57,32 @@ def _parse(html: str, query: str = "", url: str = "") -> Optional[dict]:
             cover = _abs(candidate)
             break
     samples = []
-    for node in soup.select("#sample-waterfall a, .sample-box a, a[href*='sample'], img[src*='sample']"):
-        candidate = (node.get("href") or node.get("data-original")
-                     or node.get("data-src") or node.get("src"))
-        full = _abs(candidate)
+    # Current JAV321 pages do not consistently include "sample" in image URLs.
+    # The screenshots live in the wide information/media columns, including
+    # lazy-loaded img/picture nodes and links to originals.
+    sample_nodes = soup.select(
+        "#sample-waterfall a, #sample-waterfall img, #sample-waterfall source, "
+        ".sample-box a, .sample-box img, .sample-box source, "
+        "#video_info a, #video_info img, #video_info source, "
+        "div.col-md-9 a, div.col-md-9 img, div.col-md-9 source, "
+        "div.col-xs-12.col-md-12 a, div.col-xs-12.col-md-12 img, "
+        "div.col-xs-12.col-md-12 source, "
+        "a[href*='sample'], img[src*='sample']"
+    )
+    for node in sample_nodes:
+        # The wrapping link already contributed the original image; do not add
+        # its nested thumbnail as a second sample.
+        if node.name in {"img", "source"} and node.find_parent("a") is not None:
+            continue
+        values = [node.get("href"), node.get("data-original"), node.get("data-src"),
+                  node.get("data-lazy-src"), node.get("srcset"), node.get("src")]
+        if node.name == "a":
+            child = node.find(["img", "source"])
+            if child:
+                values.extend([child.get("data-original"), child.get("data-src"),
+                               child.get("data-lazy-src"), child.get("srcset"),
+                               child.get("src")])
+        full = next((_image_url(value) for value in values if _image_url(value)), "")
         if full and full != cover and full not in samples:
             samples.append(full)
 
@@ -70,21 +105,19 @@ async def search_list(query: str, mode: str, proxy: Optional[str] = None,
                       max_results: int = 20) -> list[dict]:
     if mode == "actor":
         return []
-    try:
-        async with httpx.AsyncClient(proxy=proxy or None, timeout=12,
-                                     follow_redirects=True) as client:
-            response = await client.post(BASE + "/search", data={"sn": query}, headers=_headers())
-        item = _parse(response.text, query=query, url=str(response.url)) if response.status_code == 200 else None
-        return [item] if item else []
-    except Exception:
-        return []
+    async with httpx.AsyncClient(proxy=proxy or None, timeout=12,
+                                 follow_redirects=True) as client:
+        response = await client.post(BASE + "/search", data={"sn": query}, headers=_headers())
+    if response.status_code != 200:
+        raise RuntimeError(f"JAV321 HTTP {response.status_code}")
+    item = _parse(response.text, query=query, url=str(response.url))
+    return [item] if item else []
 
 
 async def fetch_detail(url: str, proxy: Optional[str] = None) -> Optional[dict]:
-    try:
-        async with httpx.AsyncClient(proxy=proxy or None, timeout=12,
-                                     follow_redirects=True) as client:
-            response = await client.get(url, headers=_headers())
-        return _parse(response.text, url=str(response.url)) if response.status_code == 200 else None
-    except Exception:
-        return None
+    async with httpx.AsyncClient(proxy=proxy or None, timeout=12,
+                                 follow_redirects=True) as client:
+        response = await client.get(url, headers=_headers())
+    if response.status_code != 200:
+        raise RuntimeError(f"JAV321 HTTP {response.status_code}")
+    return _parse(response.text, url=str(response.url))
