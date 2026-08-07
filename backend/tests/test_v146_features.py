@@ -3,8 +3,11 @@ import os
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest import mock
+
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -192,6 +195,25 @@ class VideoClassificationTests(unittest.TestCase):
         expected = emby._name_key("チーチー")
         self.assertEqual(emby._name_key("ﾁｰﾁｰ"), expected)
         self.assertEqual(emby._name_key("チ\u200bーチー"), expected)
+
+    def test_emby_primary_verification_requires_image_tag_change(self):
+        class Response:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return [{"ImageType": "Primary", "ImageTag": "same-tag"}]
+
+        class Client:
+            async def get(self, *_args, **_kwargs):
+                return Response()
+
+        unchanged = asyncio.run(emby._verify_primary(
+            Client(), "http://emby", {}, "person", "same-tag"))
+        changed = asyncio.run(emby._verify_primary(
+            Client(), "http://emby", {}, "person", "old-tag"))
+        self.assertEqual(unchanged, (False, "same-tag"))
+        self.assertEqual(changed, (True, "same-tag"))
 
     def test_emby_person_fallback_matches_half_width_katakana(self):
         class Response:
@@ -706,6 +728,43 @@ class VideoClassificationTests(unittest.TestCase):
         )
 
     def test_artwork_merge_fills_missing_fields_without_overwrite(self):
+        def png(width, height):
+            return (b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+                    + width.to_bytes(4, "big") + height.to_bytes(4, "big"))
+
+        self.assertFalse(library._is_fanart_image(png(800, 1200)))
+        self.assertFalse(library._is_fanart_image(png(600, 338)))
+        self.assertTrue(library._is_fanart_image(png(1280, 720)))
+
+        source = Image.new("RGB", (1500, 1000), "red")
+        source.paste(Image.new("RGB", (750, 1000), "blue"), (750, 0))
+        raw = BytesIO()
+        source.save(raw, format="JPEG", quality=95)
+        unchanged, rejected = library._poster_bytes(raw.getvalue())
+        self.assertFalse(rejected)
+        self.assertEqual(unchanged, raw.getvalue())
+        poster, cropped = library._poster_bytes(raw.getvalue(), confirmed_jacket=True)
+        with Image.open(BytesIO(poster)) as image:
+            self.assertTrue(cropped)
+            self.assertEqual(image.size, (667, 1000))
+            self.assertGreater(image.getpixel((600, 500))[2], 200)
+
+        self.assertTrue(library._is_confirmed_jacket_cover({
+            "source": "JavBus",
+            "cover": "https://img.example/pics/cover/abc_b.jpg",
+            "samples": ["https://img.example/samples/abc-1.jpg"],
+        }, "https://img.example/pics/cover/abc_b.jpg"))
+        self.assertTrue(library._is_confirmed_jacket_cover({
+            "source": "JavDB",
+            "cover": "https://c0.jdbstatic.com/covers/ab/cover.jpg",
+            "samples": [],
+        }, "https://c0.jdbstatic.com/covers/ab/cover.jpg"))
+        self.assertFalse(library._is_confirmed_jacket_cover({
+            "source": "JavDB",
+            "cover": "https://c0.jdbstatic.com/samples/still.jpg",
+            "samples": ["https://c0.jdbstatic.com/samples/still.jpg"],
+        }, "https://c0.jdbstatic.com/samples/still.jpg"))
+
         movie = {"cover": "https://primary/poster.jpg", "samples": []}
         self.assertTrue(library._merge_artwork(movie, {
             "cover": "https://fallback/poster.jpg",
@@ -1394,7 +1453,8 @@ class NamingAndTrackerTests(unittest.TestCase):
                 return movie
 
             async def fake_fetch(*_args, **_kwargs):
-                return b"fanart"
+                return (b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+                        + (1280).to_bytes(4, "big") + (720).to_bytes(4, "big"))
 
             async def fake_notify(folder, _config):
                 notified.append(folder)
@@ -1425,7 +1485,8 @@ class NamingAndTrackerTests(unittest.TestCase):
                 library._fetch_cover = original_fetch
                 actor_scraper.notify_emby_folder = original_notify
             self.assertEqual(result, 1)
-            self.assertEqual((target / "DLDSS-509-fanart.jpg").read_bytes(), b"fanart")
+            self.assertTrue(library._is_fanart_image(
+                (target / "DLDSS-509-fanart.jpg").read_bytes()))
             self.assertEqual(notified, [target])
 
     def test_confirmed_no_fanart_does_not_enter_persistent_queue(self):

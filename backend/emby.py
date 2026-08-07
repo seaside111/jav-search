@@ -112,13 +112,25 @@ async def _find_people_fallback(client: httpx.AsyncClient, base: str, headers: d
     return found
 
 
+def _primary_tag(item: dict) -> str:
+    tags = item.get("ImageTags") or {}
+    return (tags.get("Primary") or "").strip() if isinstance(tags, dict) else ""
+
+
 async def _verify_primary(client: httpx.AsyncClient, base: str, headers: dict,
-                          item_id: str) -> bool:
+                          item_id: str, previous_tag: str = "") -> tuple[bool, str]:
     response = await client.get(f"{base}/Items/{item_id}/Images", headers=headers)
     response.raise_for_status()
     payload = response.json()
-    return isinstance(payload, list) and any(
-        (image.get("ImageType") or "").casefold() == "primary" for image in payload)
+    primary = next((image for image in payload if
+                    (image.get("ImageType") or "").casefold() == "primary"), None) \
+        if isinstance(payload, list) else None
+    if not primary:
+        return False, ""
+    current_tag = (primary.get("ImageTag") or primary.get("Tag") or "").strip()
+    # Older Emby versions do not expose a tag from /Images. Presence remains
+    # the only available verification in that compatibility case.
+    return (not previous_tag or not current_tag or current_tag != previous_tag), current_tag
 
 
 async def notify_media_paths(url: str, api_key: str, paths: list[str],
@@ -219,6 +231,7 @@ async def sync_person_images(url: str, api_key: str, portraits: list[dict],
                 if not person:
                     continue
                 item_id = person["Id"]
+                previous_tag = _primary_tag(person)
                 upload_headers = {**headers, "Content-Type": item.get("content_type", "image/jpeg")}
                 upload = await client.post(
                     f"{base}/Items/{item_id}/Images/Primary", headers=upload_headers,
@@ -229,10 +242,16 @@ async def sync_person_images(url: str, api_key: str, portraits: list[dict],
                                      "message": "API Key 没有管理员权限，无法上传头像"}
                     continue
                 upload.raise_for_status()
-                verified = await _verify_primary(client, base, headers, item_id)
+                verified, current_tag = await _verify_primary(
+                    client, base, headers, item_id, previous_tag)
                 results[name] = {"name": name, "updated": verified,
                                  "person_id": item_id,
-                                 "message": "头像已上传并验证" if verified else "头像上传后未检测到 Primary 图片"}
+                                 "previous_image_tag": previous_tag,
+                                 "image_tag": current_tag,
+                                 "message": "头像已上传，Primary ImageTag 已变化"
+                                            if verified and previous_tag and current_tag else
+                                            "头像已上传并验证" if verified else
+                                            "头像上传后 Primary ImageTag 未变化"}
             return {"media_update_triggered": True, "results": list(results.values()),
                     "message": "已通知当前影片目录，演员头像同步完成"}
     except Exception as exc:

@@ -27,12 +27,14 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 from xml.dom import minidom
 
 import httpx
 from fastapi import APIRouter, HTTPException
+from PIL import Image
 from pydantic import BaseModel
 
 from config_manager import load as load_config
@@ -943,6 +945,108 @@ def _artwork_urls(movie: dict) -> tuple[str, str]:
     return poster, fanart
 
 
+def _image_dimensions(data: bytes) -> tuple[int, int]:
+    """Read common web image dimensions without adding a Pillow dependency."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if data[:2] == b"\xff\xd8":
+        offset = 2
+        while offset + 9 < len(data):
+            if data[offset] != 0xFF:
+                offset += 1
+                continue
+            marker = data[offset + 1]
+            offset += 2
+            if marker in {0xD8, 0xD9}:
+                continue
+            if offset + 2 > len(data):
+                break
+            size = int.from_bytes(data[offset:offset + 2], "big")
+            if size < 2 or offset + size > len(data):
+                break
+            if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                          0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF} and size >= 7:
+                return (int.from_bytes(data[offset + 5:offset + 7], "big"),
+                        int.from_bytes(data[offset + 3:offset + 5], "big"))
+            offset += size
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP" and len(data) >= 30:
+        if data[12:16] == b"VP8X":
+            return (1 + int.from_bytes(data[24:27], "little"),
+                    1 + int.from_bytes(data[27:30], "little"))
+    return 0, 0
+
+
+def _is_fanart_image(data: bytes) -> bool:
+    """Accept backdrop-shaped images and reject portrait/DVD-cover artwork."""
+    width, height = _image_dimensions(data)
+    return width >= 640 and height >= 360 and width / max(height, 1) >= 1.35
+
+
+def _is_confirmed_jacket_cover(movie: dict, cover_url: str) -> bool:
+    """Require both trusted cover provenance and a source-specific cover URL."""
+    url = (cover_url or "").strip().lower().split("?", 1)[0]
+    if not url or url != (movie.get("cover") or "").strip().lower().split("?", 1)[0]:
+        return False
+    if any(url == (sample or "").strip().lower().split("?", 1)[0]
+           for sample in (movie.get("samples") or [])):
+        return False
+    source = (movie.get("poster_source") or movie.get("source") or "").strip().lower()
+    if source == "javbus":
+        javbus_cover = "/pics/cover/" in url and bool(
+            re.search(r"_b\.(?:jpe?g|png|webp)$", url))
+        dmm_package = "pics.dmm.co.jp/" in url and bool(
+            re.search(r"pl\.(?:jpe?g|png|webp)$", url))
+        return javbus_cover or dmm_package
+    if source == "javdb":
+        return "/covers/" in url and bool(
+            re.search(r"\.(?:jpe?g|png|webp)$", url))
+    return False
+
+
+def _poster_bytes(data: bytes, confirmed_jacket: bool = False) -> tuple[bytes, bool]:
+    """Crop the right/front panel of a confirmed full horizontal DVD jacket.
+
+    Japanese DVD jacket scans normally place the front panel on the right. A
+    conservative aspect-ratio gate prevents ordinary 16:9 stills from being
+    mistaken for a jacket. Already-portrait source artwork is kept unchanged.
+    """
+    if not confirmed_jacket:
+        return data, False
+    width, height = _image_dimensions(data)
+    ratio = width / max(height, 1)
+    if width < 700 or height < 450 or not 1.30 <= ratio <= 1.65:
+        return data, False
+    try:
+        with Image.open(BytesIO(data)) as source:
+            source.load()
+            crop_width = round(source.height * 2 / 3)
+            if crop_width <= 0 or crop_width > source.width:
+                return data, False
+            front = source.crop((source.width - crop_width, 0,
+                                 source.width, source.height)).convert("RGB")
+            output = BytesIO()
+            front.save(output, format="JPEG", quality=94, optimize=True)
+            return output.getvalue(), True
+    except (OSError, ValueError):
+        return data, False
+
+
+async def _fetch_fanart(movie: dict, proxy: Optional[str]) -> tuple[Optional[bytes], str]:
+    """Download the first genuinely wide, independent sample image."""
+    poster = (movie.get("cover") or "").strip()
+    urls = list(dict.fromkeys((u or "").strip() for u in (movie.get("samples") or [])))
+    for url in urls[:8]:
+        if not url or url == poster:
+            continue
+        data = await _fetch_cover(url, proxy)
+        if data and _is_fanart_image(data):
+            return data, url
+        if data:
+            width, height = _image_dimensions(data)
+            _log(f"跳过非横向背景候选：{url[:60]}（{width}x{height}）")
+    return None, ""
+
+
 def _merge_artwork(target: dict, detail: dict, source: str = "") -> bool:
     """Fill only missing source artwork and report whether anything changed."""
     changed = False
@@ -1135,6 +1239,7 @@ def _artwork_context(movie: dict) -> dict:
         "code": movie.get("code", ""), "cover": movie.get("cover", ""),
         "samples": list(movie.get("samples") or []),
         "source": movie.get("source", ""), "url": movie.get("url", ""),
+        "poster_source": movie.get("poster_source", ""),
         "source_urls": dict(movie.get("source_urls") or {}),
         "_artwork_pending_sources": list(movie.get("_artwork_pending_sources") or []),
     }
@@ -1251,12 +1356,17 @@ async def _run_pending_artwork(config: dict) -> int:
         download_failed = False
         if not poster_path.exists() and poster_url:
             data = await _fetch_cover(poster_url, config.get("proxy") or None)
+            if data:
+                data, cropped = _poster_bytes(
+                    data, _is_confirmed_jacket_cover(movie, poster_url))
+                if cropped:
+                    _log(f"完整横向封套已裁取右侧正面：{code}-poster.jpg")
             if data and _write_artwork_if_missing(poster_path, data):
                 saved.append(poster_path.name)
             elif not poster_path.exists():
                 download_failed = True
         if not fanart_path.exists() and fanart_url:
-            data = await _fetch_cover(fanart_url, config.get("proxy") or None)
+            data, fanart_url = await _fetch_fanart(movie, config.get("proxy") or None)
             if data and _write_artwork_if_missing(fanart_path, data):
                 saved.append(fanart_path.name)
             elif not fanart_path.exists():
@@ -1502,20 +1612,25 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         img = await _fetch_cover(cover_url, proxy) if (overwrite or not status["has_poster"]) else None
         if img:
             try:
+                img, cropped = _poster_bytes(
+                    img, _is_confirmed_jacket_cover(movie, cover_url))
                 (folder / f"{code}-poster.jpg").write_bytes(img)
                 saved_cover = True
-                _log(f"已写入封面：{code}-poster.jpg")
+                if cropped:
+                    _log(f"已从完整横向封套右侧裁取标准竖版：{code}-poster.jpg")
+                else:
+                    _log(f"已写入封面：{code}-poster.jpg")
             except Exception as e:
                 _log(f"封面保存失败 {filepath}: {e}")
         elif overwrite or not status["has_poster"]:
             movie.setdefault("_artwork_pending_sources", []).append("_download")
             _log(f"封面获取失败：{code}")
 
-        # fanart/backdrop 必须来自独立的样品图或宣传图。没有独立来源时宁可
-        # 缺省，也不复制 poster，更不在本地裁切制造另一张图片。
+        # fanart/backdrop 必须来自独立且尺寸合格的横向样品图或宣传图。
+        # 没有独立来源时宁可缺省，也不复制 poster 制造背景图。
         if fanart_url and (overwrite or not status["has_fanart"]):
             _log(f"获取背景图（独立样品/宣传图）：{code} ← {fanart_url[:60]}")
-            fanart = await _fetch_cover(fanart_url, proxy)
+            fanart, selected_fanart_url = await _fetch_fanart(movie, proxy)
             if fanart:
                 try:
                     (folder / f"{code}-fanart.jpg").write_bytes(fanart)
