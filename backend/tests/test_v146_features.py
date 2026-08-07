@@ -215,7 +215,7 @@ class VideoClassificationTests(unittest.TestCase):
         self.assertEqual(unchanged, (False, "same-tag"))
         self.assertEqual(changed, (True, "same-tag"))
 
-    def test_emby_person_fallback_matches_half_width_katakana(self):
+    def test_emby_movie_people_matches_half_width_katakana(self):
         class Response:
             def __init__(self, status=200, payload=None):
                 self.status_code = status
@@ -249,15 +249,12 @@ class VideoClassificationTests(unittest.TestCase):
                 raise AssertionError(url)
 
             async def get(self, url, **kwargs):
-                if url.endswith("/Persons") and "SearchTerm" in kwargs.get("params", {}):
-                    return Response(200, {"Items": [], "TotalRecordCount": 0})
-                if "/Persons/" in url:
-                    return Response(404)
-                if url.endswith("/Persons"):
-                    start = kwargs.get("params", {}).get("StartIndex", 0)
-                    item = ({"Name": "Other Person", "Id": "other"} if start == 0 else
-                            {"Name": "ﾁｰﾁｰ", "Id": "katakana-person"})
-                    return Response(200, {"Items": [item], "TotalRecordCount": 2})
+                if url.endswith("/Items"):
+                    return Response(200, {"Items": [{
+                        "Id": "movie", "People": [
+                            {"Name": "ﾁｰﾁｰ", "Id": "katakana-person"}
+                        ]
+                    }]})
                 if url.endswith("/Images"):
                     return Response(200, [{"ImageType": "Primary"}])
                 raise AssertionError(url)
@@ -291,7 +288,6 @@ class VideoClassificationTests(unittest.TestCase):
         class Client:
             media_updates = []
             uploads = []
-            searches = {}
 
             def __init__(self, **_kwargs):
                 pass
@@ -312,11 +308,13 @@ class VideoClassificationTests(unittest.TestCase):
                 raise AssertionError(url)
 
             async def get(self, url, **kwargs):
-                if url.endswith("/Persons"):
-                    name = kwargs["params"]["SearchTerm"]
-                    Client.searches[name] = Client.searches.get(name, 0) + 1
-                    items = [] if Client.searches[name] == 1 else [{"Name": name, "Id": f"id-{name}"}]
-                    return Response(200, {"Items": items})
+                if url.endswith("/Items"):
+                    return Response(200, {"Items": [{
+                        "Id": "movie", "People": [
+                            {"Name": "Actor A", "Id": "id-Actor A"},
+                            {"Name": "Actor B", "Id": "id-Actor B"},
+                        ]
+                    }]})
                 if url.endswith("/Images"):
                     return Response(200, [{"ImageType": "Primary"}])
                 raise AssertionError(url)
@@ -334,7 +332,8 @@ class VideoClassificationTests(unittest.TestCase):
                 "http://emby:8096", "admin-key", [
                     {"name": "Actor A", "image": b"image-a"},
                     {"name": "Actor B", "image": b"image-b"},
-                ], media_paths=["/media/202608/SAN-475", "/media/202608/SAN-475/SAN-475.mp4"],
+                ], media_paths=["/media/202608/SAN-475", "/media/202608/SAN-475/SAN-475.mp4",
+                                "/media/202608/SAN-475/SAN-475.nfo"],
                 poll_delays=(0,)))
         finally:
             emby.httpx.AsyncClient = original_client
@@ -345,7 +344,71 @@ class VideoClassificationTests(unittest.TestCase):
             {"Path": "/media/202608/SAN-475/SAN-475.mp4", "UpdateType": "Created"},
         ]}])
         self.assertEqual(len(Client.uploads), 2)
+        self.assertEqual(Client.uploads[0][1], b"aW1hZ2UtYQ==")
+        self.assertEqual(Client.uploads[1][1], b"aW1hZ2UtYg==")
         self.assertTrue(all(item["updated"] for item in result["results"]))
+
+    def test_emby_delayed_retry_uses_one_movie_lookup_without_renotifying(self):
+        class Response:
+            def __init__(self, status=200, payload=None):
+                self.status_code = status
+                self._payload = payload
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise RuntimeError(f"HTTP {self.status_code}")
+
+            def json(self):
+                return self._payload
+
+        class Client:
+            item_queries = 0
+            notifications = 0
+
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def post(self, url, **_kwargs):
+                if url.endswith("/Library/Media/Updated"):
+                    Client.notifications += 1
+                    return Response(204)
+                if url.endswith("/Images/Primary"):
+                    return Response(204)
+                raise AssertionError(url)
+
+            async def get(self, url, **kwargs):
+                if url.endswith("/Items"):
+                    Client.item_queries += 1
+                    path = kwargs["params"].get("Path", "")
+                    return Response(200, {"Items": [{
+                        "Id": "movie", "Path": path,
+                        "People": [{"Name": "工藤ゆり", "Id": "person"}],
+                    }]})
+                if url.endswith("/Images"):
+                    return Response(200, [{"ImageType": "Primary"}])
+                raise AssertionError(url)
+
+        original_client = emby.httpx.AsyncClient
+        emby.httpx.AsyncClient = Client
+        try:
+            result = asyncio.run(emby.sync_person_images(
+                "http://emby:8096", "admin-key",
+                [{"name": "工藤ゆり", "image": b"local-image"}],
+                media_paths=["/data/av/jp/202608/ECB-170",
+                             "/data/av/jp/202608/ECB-170/ECB-170.mp4",
+                             "/data/av/jp/202608/ECB-170/ECB-170.nfo"],
+                poll_delays=(), notify_media=False))
+        finally:
+            emby.httpx.AsyncClient = original_client
+        self.assertTrue(result["results"][0]["updated"])
+        self.assertEqual(Client.item_queries, 1)
+        self.assertEqual(Client.notifications, 0)
 
     def test_emby_finds_person_id_from_current_movie_people(self):
         class Response:
@@ -376,6 +439,142 @@ class VideoClassificationTests(unittest.TestCase):
         self.assertEqual(result["逢沢みゆ"]["Id"], "person-id")
         self.assertEqual(client.path, "/media/NACT-163/NACT-163.mp4")
 
+    def test_emby_polls_current_movie_people_until_relationship_exists(self):
+        class Response:
+            def __init__(self, status=200, payload=None):
+                self.status_code = status
+                self._payload = payload
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise RuntimeError(f"HTTP {self.status_code}")
+
+            def json(self):
+                return self._payload
+
+        class Client:
+            path_queries = 0
+            uploads = []
+
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def post(self, url, **kwargs):
+                if url.endswith("/Library/Media/Updated"):
+                    return Response(204)
+                if url.endswith("/Images/Primary"):
+                    Client.uploads.append(url)
+                    return Response(204)
+                raise AssertionError(url)
+
+            async def get(self, url, **kwargs):
+                params = kwargs.get("params", {})
+                if url.endswith("/Persons") and "SearchTerm" in params:
+                    return Response(200, {"Items": []})
+                if url.endswith("/Items") and "Path" in params:
+                    Client.path_queries += 1
+                    if Client.path_queries >= 4 and params["Path"].endswith(".mp4"):
+                        return Response(200, {"Items": [{
+                            "Id": "movie-id", "Path": params["Path"], "People": [
+                                {"Name": "工藤ゆり", "Id": "person-id", "Type": "Actor"}
+                            ]
+                        }]})
+                    return Response(200, {"Items": []})
+                if url.endswith("/Items"):
+                    return Response(200, {"Items": []})
+                if url.endswith("/Images"):
+                    return Response(200, [{"ImageType": "Primary"}])
+                raise AssertionError((url, params))
+
+        original_client = emby.httpx.AsyncClient
+        emby.httpx.AsyncClient = Client
+        try:
+            result = asyncio.run(emby.sync_person_images(
+                "http://emby:8096", "admin-key",
+                [{"name": "工藤ゆり", "image": b"local-image"}],
+                media_paths=["/data/av/jp/202608/ECB-170",
+                             "/data/av/jp/202608/ECB-170/ECB-170.mp4"],
+                poll_delays=(0, 0)))
+        finally:
+            emby.httpx.AsyncClient = original_client
+        self.assertTrue(result["results"][0]["updated"])
+        self.assertFalse(result["retryable"])
+        self.assertEqual(Client.uploads, [
+            "http://emby:8096/Items/person-id/Images/Primary"])
+
+    def test_emby_movie_code_fallback_handles_normalized_server_path(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._payload
+
+        class Client:
+            async def get(self, _url, **kwargs):
+                params = kwargs.get("params", {})
+                if "Path" in params:
+                    return Response({"Items": []})
+                self.term = params.get("SearchTerm")
+                return Response({"Items": [{
+                    "Id": "movie-id", "Name": "ECB-170",
+                    "Path": "/normalized/library/ECB-170/ECB-170.mp4",
+                    "People": [{"Name": "虹村ゆみ", "Id": "person-id"}],
+                }]})
+
+        client = Client()
+        found, state = asyncio.run(emby._find_people_from_media_state(
+            client, "http://emby", {}, ["虹村ゆみ"],
+            ["/data/av/jp/202608/ECB-170/ECB-170.mp4"]))
+        self.assertEqual(client.term, "ECB-170")
+        self.assertEqual(found["虹村ゆみ"]["Id"], "person-id")
+        self.assertTrue(state["media_found"])
+        self.assertTrue(state["people_loaded"])
+
+    def test_emby_pending_retry_survives_and_is_removed_after_success(self):
+        original_sync = actor_scraper.sync_emby_folder
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            folder = root / "archive" / "ECB-170"
+            folder.mkdir(parents=True)
+            config = {"actor_scrape_cache_dir": str(root / "cache"),
+                      "emby_actor_sync_enabled": True}
+            asyncio.run(actor_scraper._queue_emby_pending(
+                folder, "ECB-170", config, ["工藤ゆり", "虹村ゆみ"]))
+            pending = actor_scraper._load_emby_pending(config)
+            task = pending[str(folder.resolve())]
+            task["next_attempt"] = 0
+            actor_scraper._save_emby_pending(config, pending)
+
+            async def fake_sync(current, _config, code="", actors=None, queue_retry=True,
+                                notify_media=True, poll_delays=None):
+                self.assertEqual(current, folder)
+                self.assertEqual(code, "ECB-170")
+                self.assertFalse(queue_retry)
+                self.assertFalse(notify_media)
+                self.assertEqual(poll_delays, ())
+                return {"emby_updated": 2, "retryable": False, "message": "ok"}
+
+            actor_scraper.sync_emby_folder = fake_sync
+            try:
+                result = asyncio.run(actor_scraper.run_emby_pending_once(config))
+            finally:
+                actor_scraper.sync_emby_folder = original_sync
+            remaining = actor_scraper._load_emby_pending(config)
+        self.assertEqual(result["emby_updated"], 2)
+        self.assertEqual(remaining, {})
+
     def test_actor_nfo_is_written_before_emby_media_notification(self):
         original_sync = actor_scraper.emby.sync_person_images
 
@@ -392,6 +591,7 @@ class VideoClassificationTests(unittest.TestCase):
                 current = nfo.read_text(encoding="utf-8")
                 self.assertIn("Actor A", current)
                 self.assertEqual([item["name"] for item in portraits], ["Actor A"])
+                self.assertEqual(portraits[0]["image"], b"x" * 2048)
                 self.assertIn(str(folder.resolve()), media_paths)
                 return {"media_update_triggered": True, "results": [
                     {"name": "Actor A", "updated": True, "message": "ok"}]}
@@ -1028,7 +1228,8 @@ class NamingAndTrackerTests(unittest.TestCase):
         frontend = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
             encoding="utf-8")
         self.assertIn("归档目录/YYYYMM/所选文件夹名/", frontend)
-        self.assertIn("从当前影片的 People 关联中定位", frontend)
+        self.assertIn("仅从当前影片 People 关联取得 Person ID", frontend)
+        self.assertIn("不枚举全局人物库", frontend)
         self.assertIn("影片首轮头像任务不请求需要过盾的 JavDB", frontend)
 
     def test_sukebei_is_default_resource_source(self):

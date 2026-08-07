@@ -3,6 +3,7 @@ import asyncio
 import json
 import re
 import shutil
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -22,12 +23,14 @@ from scrapers import javdb as javdb_scraper
 router = APIRouter(prefix="/api/actors")
 _task: Optional[asyncio.Task] = None
 _directory_task: Optional[asyncio.Task] = None
+_emby_retry_task: Optional[asyncio.Task] = None
 _state = {"running": False, "root": "", "total": 0, "processed": 0,
           "actors": 0, "saved": 0, "failed": 0, "emby_updated": 0, "current": "",
           "started": "", "finished": "", "message": "", "recent": []}
 _image_exts = {".jpg", ".jpeg", ".png", ".webp"}
 _video_exts = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".webm"}
 _pending_lock = asyncio.Lock()
+_emby_pending_lock = asyncio.Lock()
 
 
 class ActorRunRequest(BaseModel):
@@ -196,6 +199,54 @@ def _save_pending(config: dict, pending: dict):
     path = _pending_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _emby_pending_path(config: dict) -> Path:
+    cache = Path(config.get("actor_scrape_cache_dir") or CONFIG_PATH.parent / "actor-cache")
+    return cache / "emby-pending.json"
+
+
+def _load_emby_pending(config: dict) -> dict:
+    try:
+        payload = json.loads(_emby_pending_path(config).read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _save_emby_pending(config: dict, pending: dict):
+    path = _emby_pending_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+async def _queue_emby_pending(folder: Path, code: str, config: dict,
+                              names: list[str]):
+    """Persist an incomplete Emby import so a late Person creation is not missed."""
+    key = str(folder.resolve())
+    async with _emby_pending_lock:
+        pending = _load_emby_pending(config)
+        current = pending.get(key) if isinstance(pending.get(key), dict) else {}
+        pending[key] = {
+            "folder": key,
+            "code": code or folder.name,
+            "names": list(dict.fromkeys(name for name in names if name)),
+            "attempts": int(current.get("attempts", 0)),
+            "queued": current.get("queued") or datetime.now().isoformat(timespec="seconds"),
+            "next_attempt": min(float(current.get("next_attempt", time.time() + 120)),
+                                time.time() + 120),
+        }
+        _save_emby_pending(config, pending)
+
+
+async def _remove_emby_pending(folder: Path, config: dict):
+    key = str(folder.resolve())
+    async with _emby_pending_lock:
+        pending = _load_emby_pending(config)
+        if pending.pop(key, None) is not None:
+            _save_emby_pending(config, pending)
 
 
 async def _queue_javdb_pending(actors: list[dict], folder: Path, config: dict):
@@ -547,7 +598,10 @@ async def notify_emby_folder(folder: Path, config: dict) -> dict:
 
 
 async def sync_emby_folder(folder: Path, config: dict, code: str = "",
-                           actors: Optional[list] = None) -> dict:
+                           actors: Optional[list] = None,
+                           queue_retry: bool = True,
+                           notify_media: bool = True,
+                           poll_delays: Optional[tuple[float, ...]] = None) -> dict:
     """After archive completion, notify only this Emby folder and sync its portraits."""
     if not config.get("emby_actor_sync_enabled", False):
         return {"emby_updated": 0, "results": [], "message": "Emby 同步未启用"}
@@ -580,9 +634,14 @@ async def sync_emby_folder(folder: Path, config: dict, code: str = "",
 
     _log(f"Emby 定向通知当前影片目录并同步演员头像：{code or folder.name}"
          f"（演员 {len(portraits)} 位，目录 {media_paths[0]}）")
+    sync_options = {"media_paths": media_paths}
+    if not notify_media:
+        sync_options["notify_media"] = False
+    if poll_delays is not None:
+        sync_options["poll_delays"] = poll_delays
     batch = await emby.sync_person_images(
         config.get("emby_url", ""), config.get("emby_api_key", ""), portraits,
-        media_paths=media_paths)
+        **sync_options)
     by_name = {_key(item.get("name", "")): item for item in batch.get("results") or []}
     for actor in actors or []:
         result = by_name.get(_key(actor.get("name", "")), {})
@@ -591,9 +650,85 @@ async def sync_emby_folder(folder: Path, config: dict, code: str = "",
         if result and not result.get("updated"):
             _log(f"Emby 演员头像同步失败（{actor['name']}）：{result.get('message', '')}")
     updated = sum(1 for actor in actors or [] if actor.get("emby_updated"))
+    if queue_retry and batch.get("retryable"):
+        await _queue_emby_pending(
+            folder, code or folder.name, config,
+            batch.get("pending_names") or [item["name"] for item in portraits])
+        _log(f"Emby 演员头像已进入延迟重试：{code or folder.name}"
+             f"（{len(batch.get('pending_names') or portraits)} 位）")
+    elif queue_retry and not batch.get("retryable"):
+        await _remove_emby_pending(folder, config)
     _log(f"Emby 当前影片目录同步完成：{code or folder.name}"
          f"（头像 {len(portraits)}，更新 {updated}）")
     return {**batch, "actors": actors or [], "emby_updated": updated}
+
+
+async def run_emby_pending_once(config: Optional[dict] = None) -> dict:
+    """Retry one due movie; retain failures with a bounded backoff until they succeed."""
+    config = config or load_config()
+    if not config.get("emby_actor_sync_enabled", False):
+        return {"processed": 0, "pending": len(_load_emby_pending(config))}
+    async with _emby_pending_lock:
+        pending = _load_emby_pending(config)
+        due = next(((key, item) for key, item in pending.items()
+                    if isinstance(item, dict) and
+                    float(item.get("next_attempt", 0)) <= time.time()), None)
+    if not due:
+        return {"processed": 0, "pending": len(pending)}
+
+    key, task = due
+    folder = Path(task.get("folder") or key)
+    if not folder.is_dir():
+        async with _emby_pending_lock:
+            current = _load_emby_pending(config)
+            current.pop(key, None)
+            _save_emby_pending(config, current)
+        _log(f"Emby 延迟重试已移除：归档目录不存在（{folder}）")
+        return {"processed": 1, "pending": max(0, len(pending) - 1), "removed": True}
+
+    retry_actors = [{"name": name} for name in (task.get("names") or []) if name]
+    result = await sync_emby_folder(
+        folder, config, task.get("code") or folder.name,
+        actors=retry_actors or None, queue_retry=False,
+        notify_media=False, poll_delays=())
+    if result.get("emby_updated", 0) > 0 and not result.get("retryable"):
+        await _remove_emby_pending(folder, config)
+        _log(f"Emby 延迟重试成功：{task.get('code') or folder.name}"
+             f"（更新 {result.get('emby_updated', 0)} 位）")
+    else:
+        async with _emby_pending_lock:
+            current = _load_emby_pending(config)
+            saved = current.get(key)
+            if isinstance(saved, dict):
+                attempts = int(saved.get("attempts", 0)) + 1
+                # 2/5/15/30/60 分钟，之后每 6 小时继续尝试；单轮只查当前影片一次。
+                delays = (300, 900, 1800, 3600)
+                saved["attempts"] = attempts
+                saved["next_attempt"] = time.time() + (
+                    delays[attempts - 1] if attempts <= len(delays) else 21600)
+                saved["last_message"] = result.get("message", "Emby 同步尚未完成")
+                _save_emby_pending(config, current)
+        _log(f"Emby 延迟重试仍待处理：{task.get('code') or folder.name}"
+             f"（第 {int(task.get('attempts', 0)) + 1} 次）")
+    return {"processed": 1, "pending": len(_load_emby_pending(config)),
+            "emby_updated": result.get("emby_updated", 0)}
+
+
+async def _emby_retry_loop():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await run_emby_pending_once(load_config())
+        except Exception as exc:
+            _log(f"Emby 演员头像延迟重试异常：{exc}")
+        await asyncio.sleep(60)
+
+
+def start_emby_retry_monitor():
+    global _emby_retry_task
+    if _emby_retry_task is None or _emby_retry_task.done():
+        _emby_retry_task = asyncio.create_task(_emby_retry_loop())
+    return _emby_retry_task
 
 
 async def process_movie(folder: Path, actors: list, code: str, config: dict,

@@ -1,10 +1,10 @@
 """Emby API client used by the actor portrait scraper."""
 import asyncio
 import base64
+import os
 import re
 import unicodedata
 from typing import Optional
-from urllib.parse import quote
 
 import httpx
 
@@ -47,109 +47,112 @@ async def test_connection(url: str, api_key: str) -> dict:
         return {"configured": True, "online": False, "message": f"连接失败：{exc}"}
 
 
-async def _find_person(client: httpx.AsyncClient, base: str, headers: dict,
-                       name: str) -> Optional[dict]:
-    response = await client.get(
-        f"{base}/Persons", headers=headers,
-        params={"SearchTerm": name, "Recursive": "true", "Limit": 30,
-                "Fields": "ImageTags"})
-    response.raise_for_status()
-    payload = response.json()
-    items = payload.get("Items", payload if isinstance(payload, list) else [])
-    wanted = _name_key(name)
-    return next((item for item in items
-                 if _name_key(item.get("Name", "")) == wanted), None)
+async def _find_people_from_media(client: httpx.AsyncClient, base: str, headers: dict,
+                                  names: list[str], media_paths: list[str]) -> dict[str, dict]:
+    """Resolve Person IDs only through the current movie's People relationship."""
+    found, _state = await _find_people_from_media_state(
+        client, base, headers, names, media_paths)
+    return found
 
 
-async def _find_people_fallback(client: httpx.AsyncClient, base: str, headers: dict,
-                                names: list[str]) -> dict[str, dict]:
-    """Bypass Emby's SearchTerm index for Unicode names it cannot tokenize."""
+def _path_key(value: str) -> str:
+    """Compare Emby paths across Windows/Linux separators and harmless casing differences."""
+    return re.sub(r"/+", "/", (value or "").replace("\\", "/")).rstrip("/").casefold()
+
+
+def _media_search_terms(media_paths: list[str]) -> list[str]:
+    """Extract stable movie identifiers for when Emby's exact Path filter misses."""
+    terms = []
+    for value in reversed(media_paths or []):
+        name = os.path.basename((value or "").replace("\\", "/").rstrip("/"))
+        stem = os.path.splitext(name)[0]
+        match = re.search(r"(?i)(FC2(?:-PPV)?[-_ ]?\d{5,8}|[A-Z]{2,10}[-_ ]?\d{2,7})", stem)
+        term = re.sub(r"[_ ]+", "-", match.group(1)).upper() if match else ""
+        if term and term not in terms:
+            terms.append(term)
+    return terms
+
+
+def _media_path_matches(item: dict, media_paths: list[str], terms: list[str]) -> bool:
+    actual = _path_key(item.get("Path", ""))
+    candidates = [_path_key(path) for path in media_paths or [] if path]
+    if actual and any(actual == path or actual.startswith(path + "/") or
+                      path.startswith(actual + "/") for path in candidates):
+        return True
+    haystack = _name_key(f"{item.get('Name', '')} {item.get('Path', '')}")
+    return bool(haystack and any(_name_key(term) in haystack for term in terms))
+
+
+async def _find_people_from_media_state(client: httpx.AsyncClient, base: str,
+                                        headers: dict, names: list[str],
+                                        media_paths: list[str]) -> tuple[dict[str, dict], dict]:
+    """Return linked people plus enough state to explain/retry an incomplete import."""
     pending = {_name_key(name): name for name in names if _name_key(name)}
-    found = {}
+    found, media_by_id = {}, {}
+    paths = [path for path in media_paths or [] if (path or "").strip()]
+    terms = _media_search_terms(paths)
 
-    # Emby exposes a direct person-by-name endpoint. Try it before enumerating
-    # a potentially large people library.
-    for key, name in list(pending.items()):
-        response = await client.get(
-            f"{base}/Persons/{quote(name, safe='')}", headers=headers,
-            params={"Fields": "ImageTags"})
+    async def add_items(response, exact_path: bool = False):
         if response.status_code in (401, 403):
             response.raise_for_status()
         if response.status_code >= 400:
-            # Older Emby versions may not support this route consistently for
-            # Unicode path segments. Continue with the paged list fallback.
-            continue
-        response.raise_for_status()
-        item = response.json()
-        if isinstance(item, dict) and item.get("Id") and _name_key(item.get("Name", "")) == key:
-            found[name] = item
-            pending.pop(key, None)
-    if not pending:
-        return found
-
-    # SearchTerm can return no rows for Japanese full-width/half-width forms.
-    # Page through people only once, after normal polling has finished.
-    start, limit = 0, 200
-    while pending:
-        response = await client.get(
-            f"{base}/Persons", headers=headers,
-            params={"Recursive": "true", "StartIndex": start, "Limit": limit,
-                    "Fields": "ImageTags"})
-        response.raise_for_status()
+            return
         payload = response.json()
         items = payload.get("Items", payload if isinstance(payload, list) else [])
         for item in items or []:
-            key = _name_key(item.get("Name", ""))
-            original = pending.pop(key, None)
-            if original and item.get("Id"):
-                found[original] = item
-        total = payload.get("TotalRecordCount") if isinstance(payload, dict) else None
-        start += len(items or [])
-        if (not items or
-                (isinstance(total, int) and start >= total) or
-                (not isinstance(total, int) and len(items) < limit)):
-            break
-    return found
+            item_type = (item.get("Type") or "").casefold() if isinstance(item, dict) else ""
+            if (isinstance(item, dict) and item.get("Id") and
+                    not item.get("IsFolder") and item_type not in ("folder", "collectionfolder") and
+                    (exact_path or _media_path_matches(item, paths, terms))):
+                media_by_id[item["Id"]] = item
 
-
-async def _find_people_from_media(client: httpx.AsyncClient, base: str, headers: dict,
-                                  names: list[str], media_paths: list[str]) -> dict[str, dict]:
-    """Resolve people through the movie Emby just imported.
-
-    Emby's global /Persons index can lag behind a targeted media update.  The
-    movie item itself can already contain the actor association and Person Id,
-    so use that relationship before declaring the portrait missing.
-    """
-    pending = {_name_key(name): name for name in names if _name_key(name)}
-    found = {}
-    for path in reversed(media_paths or []):
-        if not pending:
-            break
+    # NFO files are metadata inputs rather than Emby items. Query video files
+    # first and the movie folder last, avoiding a guaranteed-empty NFO request.
+    non_nfo = [path for path in paths
+               if os.path.splitext(path.replace("\\", "/"))[1].casefold() != ".nfo"]
+    exact_paths = sorted(non_nfo, key=lambda path: 0 if os.path.splitext(path)[1] else 1)
+    for path in exact_paths:
         response = await client.get(
             f"{base}/Items", headers=headers,
             params={"Recursive": "true", "Path": path, "Limit": 10,
-                    "Fields": "Path,People"})
-        if response.status_code in (401, 403):
-            response.raise_for_status()
-        if response.status_code >= 400:
-            continue
-        payload = response.json()
-        items = payload.get("Items", payload if isinstance(payload, list) else [])
-        for media in items or []:
-            people = media.get("People") or []
-            if not people and media.get("Id"):
-                detail = await client.get(
-                    f"{base}/Items/{media['Id']}", headers=headers,
-                    params={"Fields": "People"})
-                if detail.status_code < 400:
-                    people = (detail.json() or {}).get("People") or []
-            for person in people:
-                key = _name_key(person.get("Name", ""))
-                original = pending.get(key)
-                if original and person.get("Id"):
-                    found[original] = person
-                    pending.pop(key, None)
-    return found
+                    "Fields": "Path,People,MediaType"})
+        await add_items(response, exact_path=True)
+        if media_by_id:
+            break
+
+    # Some Emby versions normalize mount paths before persisting them, making an
+    # otherwise valid exact Path query return no rows. The movie code is a safe,
+    # narrow fallback; results are still checked against path/code before use.
+    if not media_by_id:
+        for term in terms:
+            response = await client.get(
+                f"{base}/Items", headers=headers,
+                params={"Recursive": "true", "SearchTerm": term, "Limit": 50,
+                        "IncludeItemTypes": "Movie,Video,AdultVideo",
+                        "MediaTypes": "Video", "Fields": "Path,People,MediaType"})
+            await add_items(response)
+            if media_by_id:
+                break
+
+    people_loaded = False
+    for media in media_by_id.values():
+        people = media.get("People") or []
+        if not people:
+            detail = await client.get(
+                f"{base}/Items/{media['Id']}", headers=headers,
+                params={"Fields": "Path,People"})
+            if detail.status_code in (401, 403):
+                detail.raise_for_status()
+            if detail.status_code < 400:
+                people = (detail.json() or {}).get("People") or []
+        people_loaded = people_loaded or bool(people)
+        for person in people:
+            key = _name_key(person.get("Name", ""))
+            original = pending.get(key)
+            if original and person.get("Id"):
+                found[original] = person
+                pending.pop(key, None)
+    return found, {"media_found": bool(media_by_id), "people_loaded": people_loaded}
 
 
 def _primary_tag(item: dict) -> str:
@@ -201,14 +204,14 @@ async def notify_media_paths(url: str, api_key: str, paths: list[str],
 
 async def sync_person_images(url: str, api_key: str, portraits: list[dict],
                              media_paths: Optional[list[str]] = None,
-                             poll_delays: tuple[float, ...] = (1, 2, 3, 5, 8, 13, 20)) -> dict:
-    """Notify Emby about only the new media paths, then upload Person images.
+                             poll_delays: tuple[float, ...] = (2, 5, 8),
+                             notify_media: bool = True) -> dict:
+    """Resolve Person IDs from the current movie and upload local portraits.
 
-    A newly written NFO is not immediately represented by an Emby Person.  Starting
-    a targeted media update before lookup makes Emby import the NFO/actor association.
-    Uploading directly to the Person afterwards avoids relying on Emby downloading
-    the remote NFO <thumb> URL.  We intentionally do not FullRefresh the Person after
-    upload because a metadata provider could replace the image we just set.
+    The movie People relationship is authoritative and already contains the Person
+    IDs needed for upload. Initial calls notify only the current media paths and wait
+    briefly; persisted retries skip the notification and perform one lightweight
+    movie lookup. We never enumerate the global Persons library or FullRefresh a Person.
     """
     base, token = normalize_url(url), (api_key or "").strip()
     valid = [item for item in (portraits or [])
@@ -234,44 +237,50 @@ async def sync_person_images(url: str, api_key: str, portraits: list[dict],
                for item in valid}
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            media_update = await client.post(
-                f"{base}/Library/Media/Updated", headers={**headers, "Content-Type": "application/json"},
-                json={"Updates": [{"Path": path, "UpdateType": "Created"} for path in paths]})
-            if media_update.status_code in (401, 403):
-                return {"media_update_triggered": False, "results": [{
-                    "name": item["name"], "updated": False,
-                    "message": "API Key 没有权限通知当前影片目录"} for item in valid],
-                    "message": "Emby 管理员权限不足"}
-            media_update.raise_for_status()
+            if notify_media:
+                notify_paths = [path for path in paths
+                                if os.path.splitext(path.replace("\\", "/"))[1].casefold() != ".nfo"]
+                media_update = await client.post(
+                    f"{base}/Library/Media/Updated",
+                    headers={**headers, "Content-Type": "application/json"},
+                    json={"Updates": [{"Path": path, "UpdateType": "Created"}
+                                      for path in (notify_paths or paths[:1])]})
+                if media_update.status_code in (401, 403):
+                    return {"media_update_triggered": False, "results": [{
+                        "name": item["name"], "updated": False,
+                        "message": "API Key 没有权限通知当前影片目录"} for item in valid],
+                        "message": "Emby 管理员权限不足"}
+                media_update.raise_for_status()
 
             pending = {item["name"]: item for item in valid}
             people = {}
-            # 先立即查询已存在的 Person；新 Person 尚未出现时再按间隔轮询。
+            media_state = {"media_found": False, "people_loaded": False}
+            # 只轮询当前影片 People；所有演员共享同一次影片查询。
             delays = (0,) + tuple(poll_delays)
             for delay in delays:
                 if delay:
                     await asyncio.sleep(delay)
-                for name in list(pending):
-                    person = await _find_person(client, base, headers, name)
-                    if person and person.get("Id"):
-                        people[name] = person
-                        pending.pop(name, None)
+                linked, current_state = await _find_people_from_media_state(
+                    client, base, headers, list(pending), paths)
+                media_state["media_found"] = (media_state["media_found"] or
+                                              current_state["media_found"])
+                media_state["people_loaded"] = (media_state["people_loaded"] or
+                                                 current_state["people_loaded"])
+                for name, person in linked.items():
+                    people[name] = person
+                    pending.pop(name, None)
                 if not pending:
                     break
 
             if pending:
-                fallback = await _find_people_fallback(
-                    client, base, headers, list(pending))
-                for name, person in fallback.items():
-                    people[name] = person
-                    pending.pop(name, None)
-
-            if pending:
-                linked = await _find_people_from_media(
-                    client, base, headers, list(pending), paths)
-                for name, person in linked.items():
-                    people[name] = person
-                    pending.pop(name, None)
+                if not media_state["media_found"]:
+                    pending_message = "Emby 尚未导入当前影片，已进入延迟重试"
+                elif not media_state["people_loaded"]:
+                    pending_message = "Emby 已导入影片但演员关系尚未建立，已进入延迟重试"
+                else:
+                    pending_message = "Emby 当前影片中未找到同名演员，已进入延迟重试"
+                for name in pending:
+                    results[name]["message"] = pending_message
 
             for name, item in valid_by_name(valid).items():
                 person = people.get(name)
@@ -299,12 +308,22 @@ async def sync_person_images(url: str, api_key: str, portraits: list[dict],
                                             if verified and previous_tag and current_tag else
                                             "头像已上传并验证" if verified else
                                             "头像上传后 Primary ImageTag 未变化"}
-            return {"media_update_triggered": True, "results": list(results.values()),
-                    "message": "已通知当前影片目录，演员头像同步完成"}
+            failed_names = [name for name, result in results.items()
+                            if not result.get("updated")]
+            return {"media_update_triggered": notify_media, "results": list(results.values()),
+                    "retryable": bool(failed_names), "pending_names": failed_names,
+                    "media_found": media_state["media_found"],
+                    "people_loaded": media_state["people_loaded"],
+                    "message": ("已通知当前影片目录，部分演员等待 Emby 完成入库"
+                                if pending else
+                                "部分演员头像上传或验证未完成，已进入延迟重试"
+                                if failed_names else
+                                "已通知当前影片目录，演员头像同步完成")}
     except Exception as exc:
         return {"media_update_triggered": False, "results": [{
             "name": item["name"], "updated": False,
             "message": f"Emby 更新失败：{exc}"} for item in valid],
+            "retryable": True, "pending_names": [item["name"] for item in valid],
             "message": f"Emby 更新失败：{exc}"}
 
 

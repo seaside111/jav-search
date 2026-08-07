@@ -40,7 +40,7 @@ import actor_scraper
 import auth
 import logging
 
-APP_VERSION = "1.4.6.6"
+APP_VERSION = "1.4.6.7"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -91,6 +91,10 @@ async def _on_startup():
         actor_scraper.start_directory_monitor()
     except Exception as e:
         print(f"[启动] JavDB 演员目录低频任务启动失败: {e}", flush=True)
+    try:
+        actor_scraper.start_emby_retry_monitor()
+    except Exception as e:
+        print(f"[启动] Emby 演员头像延迟重试启动失败: {e}", flush=True)
     # 推送入库轮询：磁力下完即删（保留文件）+ 给在库种子补记内容名供刮削按名匹配
     try:
         intake.start_poller(load_config)
