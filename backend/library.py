@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import time
 import uuid
@@ -434,6 +435,85 @@ def _name_similarity(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, sa, sb).ratio() if sa and sb else 0.0
 
 
+_QUALITY_MARKER = re.compile(
+    r'(?<![a-z0-9])(?:480p|720p|1080[pi]?|1440p|2160p|4k|8k|uhd|fhd|hd|sd|'
+    r'hdr|sdr|10bit|8bit|x26[45]|h[._-]?26[45]|hevc|av1)(?![a-z0-9])',
+    re.IGNORECASE,
+)
+_VIDEO_PROBE_CACHE = {}
+
+
+def _quality_markers(stem: str) -> set[str]:
+    """Return explicit encode/quality labels; these describe variants, never parts."""
+    return {m.group(0).lower().replace("_", "").replace("-", "").replace(".", "")
+            for m in _QUALITY_MARKER.finditer(stem or "")}
+
+
+def _probe_video(video_path: Path) -> dict:
+    """Read duration and video geometry with ffprobe when available."""
+    try:
+        st = video_path.stat()
+        key = (str(video_path), st.st_size, st.st_mtime_ns)
+    except Exception:
+        return {}
+    cached = _VIDEO_PROBE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    probe = shutil.which("ffprobe")
+    if not probe:
+        _VIDEO_PROBE_CACHE[key] = {}
+        return {}
+    try:
+        cp = subprocess.run(
+            [probe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "format=duration:stream=width,height,codec_name",
+             "-of", "json", str(video_path)],
+            capture_output=True, text=True, timeout=12, check=False,
+        )
+        raw = json.loads(cp.stdout or "{}") if cp.returncode == 0 else {}
+        stream = next(iter(raw.get("streams") or []), {})
+        result = {
+            "duration": float((raw.get("format") or {}).get("duration") or 0),
+            "width": int(stream.get("width") or 0),
+            "height": int(stream.get("height") or 0),
+            "codec": (stream.get("codec_name") or "").lower(),
+        }
+    except Exception:
+        result = {}
+    _VIDEO_PROBE_CACHE[key] = result
+    return result
+
+
+def _is_quality_variant(a: Path, b: Path) -> bool:
+    """Whether two same-code files are alternate encodes, not sequential parts."""
+    if a == b:
+        return False
+    a_part, b_part = _part_index(a.stem), _part_index(b.stem)
+    if a_part is not None and b_part is not None and a_part != b_part:
+        return False
+    am, bm = _quality_markers(a.stem), _quality_markers(b.stem)
+    af, bf = _probe_video(a), _probe_video(b)
+    ad, bd = af.get("duration", 0), bf.get("duration", 0)
+    close_duration = bool(ad and bd and abs(ad - bd) <= max(3.0, max(ad, bd) * 0.005))
+    geometry_differs = bool(af.get("width") and bf.get("width") and
+                            (af["width"], af["height"]) != (bf["width"], bf["height"]))
+    encode_differs = bool(af.get("codec") and bf.get("codec") and
+                          af["codec"] != bf["codec"])
+    explicit_quality_differs = bool(am and bm and am != bm)
+    return ((geometry_differs or encode_differs or explicit_quality_differs) and close_duration
+            or (not ad and not bd and explicit_quality_differs))
+
+
+def _variant_preference(video_path: Path) -> tuple:
+    """Deterministically prefer the highest-resolution/largest alternate encode."""
+    facts = _probe_video(video_path)
+    try:
+        size = video_path.stat().st_size
+    except Exception:
+        size = 0
+    return (facts.get("width", 0) * facts.get("height", 0), size, video_path.name.lower())
+
+
 def _seq_order_key(stem: str, code: str = "") -> Optional[int]:
     idx = _part_index(stem, code)
     if idx is not None:
@@ -498,8 +578,24 @@ def _same_code_main_videos(video_path: Path, code: str, watch_dir: str = "") -> 
             continue
         if _norm(_recognize_code(s, watch_dir)) == norm:
             mains.append(s)
-    mains.sort(key=lambda p: p.name.lower())
-    return mains
+    representatives = []
+    for candidate in sorted(mains, key=lambda p: p.name.lower()):
+        group_pos = next((i for i, current in enumerate(representatives)
+                          if _is_quality_variant(candidate, current)), None)
+        if group_pos is None:
+            representatives.append(candidate)
+        elif _variant_preference(candidate) > _variant_preference(representatives[group_pos]):
+            representatives[group_pos] = candidate
+    representatives.sort(key=lambda p: p.name.lower())
+    return representatives
+
+
+def _is_nonpreferred_variant(video_path: Path, code: str, watch_dir: str = "") -> bool:
+    """Keep alternate encodes at source while only the preferred one is archived."""
+    representatives = _same_code_main_videos(video_path, code, watch_dir)
+    if video_path in representatives:
+        return False
+    return any(_is_quality_variant(video_path, current) for current in representatives)
 
 
 def _part_suffix(video_path: Path, code: str, watch_dir: str = "",
@@ -511,15 +607,18 @@ def _part_suffix(video_path: Path, code: str, watch_dir: str = "",
     archived_parts：目标归档目录内已存在的同番号分集数（分批先到的分集已落地时据此判定多分段）。"""
     own = _part_index(video_path.stem, code)
     mains = _same_code_main_videos(video_path, code, watch_dir)   # 含自身（仍在源目录）
-    # 判定多分段：可见同番号正片 + 已归档分集 > 1，或自身序号 ≥2（必有更前分集）。
-    # own==1 且暂无其它证据时按单片处理（文件名干净）；后续分集到达会触发自愈补号。
-    multipart = (len(mains) + archived_parts > 1) or (own is not None and own >= 2)
+    known_parts = {_part_index(p.stem, code) for p in mains}
+    known_parts.discard(None)
+    # 文件数量、大小和名称相似度都不是分段证据。只有至少两个不同的明确
+    # 分段编号，或当前文件自己明确为第 2 段以后，才生成 -cdN。
+    multipart = (len(known_parts) >= 2 or (own is not None and own >= 2)
+                 or (own is not None and archived_parts > 0))
     if not multipart:
         return ""
     if own is not None:
         return f"-cd{own}"
-    idx = next((i for i, p in enumerate(mains) if p.name == video_path.name), 0)
-    return f"-cd{idx + 1}"
+    # 当前文件没有自己的序号时不按扫描/文件名顺序猜号。
+    return ""
 
 
 async def _resolve_code(video_path: Path, config: dict) -> str:
@@ -824,6 +923,107 @@ async def _fetch_cover(url: str, proxy: Optional[str]) -> Optional[bytes]:
         return await _download_image(url, proxy, _cover_referer(url))
 
 
+def _artwork_urls(movie: dict) -> tuple[str, str]:
+    """Select independent source images for poster and fanart; never synthesize one."""
+    poster = (movie.get("cover") or "").strip()
+    fanart = next(((url or "").strip() for url in (movie.get("samples") or [])
+                   if (url or "").strip() and (url or "").strip() != poster), "")
+    return poster, fanart
+
+
+def _merge_artwork(target: dict, detail: dict, source: str = "") -> bool:
+    """Fill only missing source artwork and report whether anything changed."""
+    changed = False
+    if not target.get("cover") and detail.get("cover"):
+        target["cover"] = detail["cover"]
+        target["poster_source"] = source or detail.get("source", "")
+        changed = True
+    if not target.get("samples") and detail.get("samples"):
+        target["samples"] = list(detail["samples"])
+        target["fanart_source"] = source or detail.get("source", "")
+        changed = True
+    return changed
+
+
+async def _backfill_artwork(movie: dict, code: str, config: dict,
+                            proxy: Optional[str]) -> dict:
+    """Lazily fill missing poster/fanart from at most a few enabled sources.
+
+    Existing per-source detail URLs and the shared detail cache are used first.
+    A small code search is performed only when pushed metadata has no alternate
+    source URLs. Each source is tried sequentially and work stops as soon as
+    both artwork types are available.
+    """
+    if movie.get("cover") and movie.get("samples"):
+        return movie
+    limit = max(0, min(int(config.get("scrape_artwork_fallback_limit", 2)), 4))
+    if not limit:
+        return movie
+    from scrapers import enrich
+
+    enabled = [s for s in (config.get("sources") or ["javbus", "javdb"])
+               if s in {"javbus", "javdb", "avsox", "avmoo", "fc2", "jav321", "dmm"}]
+    def source_key(value: str) -> str:
+        key = (value or "").strip().lower()
+        return "dmm" if key in {"dmm", "dmm/fanza", "fanza"} else key
+
+    source_urls = {source_key(src): url for src, url in
+                   dict(movie.get("source_urls") or {}).items() if source_key(src)}
+    if movie.get("source") and movie.get("url"):
+        source_urls.setdefault(source_key(movie["source"]), movie["url"])
+
+    # Prefer sources known to expose independent samples, then the current
+    # source. Only enabled sources participate, so user source choices remain
+    # authoritative.
+    priority = {"dmm": 0, "jav321": 1, "javdb": 2, "avsox": 3,
+                "avmoo": 4, "fc2": 5, "javbus": 6}
+    candidates = sorted(
+        ((src, url) for src, url in source_urls.items() if src in enabled and url),
+        key=lambda item: priority.get(item[0], 99),
+    )
+
+    # Pushed single-source metadata may not contain merged source URLs. Search
+    # once, with a small result limit, only while artwork is still incomplete.
+    if len(candidates) <= 1 and (not movie.get("cover") or not movie.get("samples")):
+        try:
+            found = await search(query=code, mode=SEARCH_MODE_CODE, proxy=proxy,
+                                 sources=enabled, max_results=10)
+            norm = _norm(code)
+            exact = next((item for item in found
+                          if _norm(item.get("code", "")) == norm), None)
+            if exact:
+                for src, url in (exact.get("source_urls") or {}).items():
+                    key = source_key(src)
+                    if key in enabled and url and key not in source_urls:
+                        source_urls[key] = url
+                _merge_artwork(movie, exact, exact.get("source", ""))
+                candidates = sorted(
+                    ((src, url) for src, url in source_urls.items() if src in enabled and url),
+                    key=lambda item: priority.get(item[0], 99),
+                )
+        except Exception as e:
+            _log(f"图片备用来源搜索失败（继续使用已有图片）：{code}: {e}")
+
+    attempts = 0
+    seen_urls = set()
+    for source, url in candidates:
+        if attempts >= limit or (movie.get("cover") and movie.get("samples")):
+            break
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        attempts += 1
+        try:
+            rows = await enrich([{"url": url, "source": source}], proxy=proxy,
+                                concurrency=1, per_timeout=12.0)
+            detail = rows[0] if rows else None
+            if detail and _merge_artwork(movie, detail, source):
+                _log(f"图片备用来源补全：{code}（{source}，尝试 {attempts}/{limit}）")
+        except Exception as e:
+            _log(f"图片备用来源失败：{code}（{source}）: {e}")
+    return movie
+
+
 def _get_file_status(video_path: Path, code: str = "") -> dict:
     """检查视频旁是否已有以 番号 命名的 NFO/封面。"""
     folder = video_path.parent
@@ -833,6 +1033,8 @@ def _get_file_status(video_path: Path, code: str = "") -> dict:
     fanart_path = folder / f"{stem}-fanart.jpg"
     return {
         "has_nfo": nfo_path.exists(),
+        "has_poster": poster_path.exists(),
+        "has_fanart": fanart_path.exists(),
         "has_cover": poster_path.exists() or fanart_path.exists(),
     }
 
@@ -886,7 +1088,8 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         _log(f"开始刮削：{path.name} → 番号 {code}")
 
     status = _get_file_status(path, code)
-    if not overwrite and status["has_nfo"] and status["has_cover"]:
+    if (not overwrite and status["has_nfo"] and status["has_poster"]
+            and status["has_fanart"]):
         existing = _read_existing_nfo_metadata(path, code)
         actor_images_saved = 0
         if (config.get("scrape_actor_images_enabled", False)
@@ -954,6 +1157,10 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             except Exception as e:
                 _log(f"详情补全失败 {code}: {e}")
 
+    # 图片齐全时零额外请求；仅缺 poster/fanart 时按有限来源逐个补查，命中即停。
+    if not movie.get("cover") or not movie.get("samples"):
+        await _backfill_artwork(movie, code, config, proxy)
+
     # ── 标题/简介翻译 ──
     # 番号（字母+数字）不翻译，仅作前缀；只对真正的日文片名/简介长句翻译。
     raw_title = movie.get("title", "")
@@ -1008,21 +1215,38 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         except Exception as e:
             _log(f"NFO 写入失败 {filepath}: {e}")
 
-    cover_url = movie.get("cover", "")
-    if cover_url and (overwrite or not status["has_cover"]):
+    cover_url, fanart_url = _artwork_urls(movie)
+    if cover_url and (overwrite or not status["has_poster"]
+                      or (fanart_url and not status["has_fanart"])):
         # 优先复用首页/详情已缓存的封面（命中即零上游请求）；未命中再回源（含 FC2 防盗链兜底）
         _log(f"获取封面（优先复用缓存）：{code} ← {cover_url[:60]}")
-        img = await _fetch_cover(cover_url, proxy)
+        img = await _fetch_cover(cover_url, proxy) if (overwrite or not status["has_poster"]) else None
         if img:
             try:
                 (folder / f"{code}-poster.jpg").write_bytes(img)
-                (folder / f"{code}-fanart.jpg").write_bytes(img)
                 saved_cover = True
-                _log(f"已写入封面：{code}-poster.jpg / -fanart.jpg")
+                _log(f"已写入封面：{code}-poster.jpg")
             except Exception as e:
                 _log(f"封面保存失败 {filepath}: {e}")
-        else:
+        elif overwrite or not status["has_poster"]:
             _log(f"封面获取失败：{code}")
+
+        # fanart/backdrop 必须来自独立的样品图或宣传图。没有独立来源时宁可
+        # 缺省，也不复制 poster，更不在本地裁切制造另一张图片。
+        if fanart_url and (overwrite or not status["has_fanart"]):
+            _log(f"获取背景图（独立样品/宣传图）：{code} ← {fanart_url[:60]}")
+            fanart = await _fetch_cover(fanart_url, proxy)
+            if fanart:
+                try:
+                    (folder / f"{code}-fanart.jpg").write_bytes(fanart)
+                    saved_cover = True
+                    _log(f"已写入背景图：{code}-fanart.jpg")
+                except Exception as e:
+                    _log(f"背景图保存失败 {filepath}: {e}")
+            else:
+                _log(f"背景图获取失败，不复制封面兜底：{code}")
+        elif not fanart_url:
+            _log(f"无独立背景图来源，仅保存 poster：{code}")
 
     folder_title = name_zh
     # 文件夹标题单独开启翻译时，只把 name_part（纯标题）交给翻译器；演员列表始终保持源站原名，
@@ -1900,6 +2124,16 @@ async def _scan_once(config: dict) -> int:
         if size < min_bytes:
             n_small += 1
             _log(f"文件过小忽略：{vf.name}（{round(size/1024/1024,1)}MB < {min_bytes//1024//1024}MB）")
+            continue
+
+        # 同内容不同清晰度/编码不是 CD 分段。只归档确定的最佳版本，其余版本
+        # 保留在下载目录，不删除、不改成 -cdN，也不阻塞最佳版本继续处理。
+        variant_code = _recognize_code(vf, watch)
+        if (variant_code and organize_on
+                and _is_nonpreferred_variant(vf, variant_code, watch)):
+            _processed.add(fp)
+            _size_history.pop(fp, None)
+            _log(f"检测到同片不同清晰度/编码，保留非首选版本在原处：{vf.name}")
             continue
 
         if torrent_task:

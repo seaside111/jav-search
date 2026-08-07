@@ -568,7 +568,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.1</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.2</div>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="3"/>
@@ -637,8 +637,28 @@
             <label class="source-chk"><input type="checkbox" id="srcAvsox"> AVSOX</label>
             <label class="source-chk"><input type="checkbox" id="srcAvmoo"> AVMOO</label>
             <label class="source-chk"><input type="checkbox" id="srcFc2"> FC2</label>
+            <label class="source-chk"><input type="checkbox" id="srcJav321"> JAV321</label>
+            <label class="source-chk"><input type="checkbox" id="srcDmm"> DMM/FANZA</label>
           </div>
-          <span class="setting-hint">JavBus / JavDB 为主；AVSOX 专收无码、AVMOO 收录大量旧番号；FC2 专收 FC2-PPV 素人/无码（fc2ppvdb.com，须配 FlareSolverr）</span>
+          <span class="setting-hint">JAV321 与 DMM/FANZA 默认关闭；启用后可参与缺图补全。DMM/FANZA 必须配置下方官方联盟 API 凭据。</span>
+        </div>
+
+        <div class="setting-group">
+          <h3>多来源图片补全</h3>
+          <div class="setting-row">
+            <label class="setting-label">最多补查详情源</label>
+            <input class="setting-input" id="cfgArtworkFallbackLimit" type="number" value="2" min="0" max="4">
+            <span class="setting-hint">图片齐全时不请求；缺 poster/fanart 时逐源尝试、命中即停。0 表示关闭。</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">DMM/FANZA API ID</label>
+            <input class="setting-input" id="cfgDmmApiId" type="password" autocomplete="off">
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">DMM/FANZA Affiliate ID</label>
+            <input class="setting-input" id="cfgDmmAffiliateId" type="password" autocomplete="off">
+            <span class="setting-hint">仅调用官方联盟 API；未配置完整凭据时 DMM 来源自动跳过。</span>
+          </div>
         </div>
 
         <div class="setting-group">
@@ -2230,6 +2250,11 @@ async function openSettings() {
     document.getElementById('srcAvsox').checked  = (cfg.sources || []).includes('avsox');
     document.getElementById('srcAvmoo').checked  = (cfg.sources || []).includes('avmoo');
     document.getElementById('srcFc2').checked    = (cfg.sources || []).includes('fc2');
+    document.getElementById('srcJav321').checked = (cfg.sources || []).includes('jav321');
+    document.getElementById('srcDmm').checked    = (cfg.sources || []).includes('dmm');
+    document.getElementById('cfgArtworkFallbackLimit').value = cfg.scrape_artwork_fallback_limit ?? 2;
+    document.getElementById('cfgDmmApiId').value = cfg.dmm_api_id || '';
+    document.getElementById('cfgDmmAffiliateId').value = cfg.dmm_affiliate_id || '';
     document.getElementById('cfgJavdbFlare').value  = cfg.javdb_flaresolverr_url || '';
     document.getElementById('cfgJavdbFlareProxy').checked = cfg.javdb_flaresolverr_use_proxy !== false;
     document.getElementById('cfgJavdbCookie').value = cfg.javdb_cookie || '';
@@ -2602,6 +2627,8 @@ async function saveSettings() {
   if (document.getElementById('srcAvsox').checked)  sources.push('avsox');
   if (document.getElementById('srcAvmoo').checked)  sources.push('avmoo');
   if (document.getElementById('srcFc2').checked)    sources.push('fc2');
+  if (document.getElementById('srcJav321').checked) sources.push('jav321');
+  if (document.getElementById('srcDmm').checked)    sources.push('dmm');
   if (!sources.length) { showToast('至少选择一个数据源'); return; }
   let maxResults = parseInt(document.getElementById('cfgMaxResults').value) || 300;
   maxResults = Math.max(12, Math.min(maxResults, 500));
@@ -2613,6 +2640,9 @@ async function saveSettings() {
   const payload = {
     proxy: document.getElementById('cfgProxy').value.trim(),
     sources,
+    scrape_artwork_fallback_limit: Math.max(0, Math.min(parseInt(document.getElementById('cfgArtworkFallbackLimit').value) || 0, 4)),
+    dmm_api_id: document.getElementById('cfgDmmApiId').value.trim(),
+    dmm_affiliate_id: document.getElementById('cfgDmmAffiliateId').value.trim(),
     javdb_flaresolverr_url: document.getElementById('cfgJavdbFlare').value.trim(),
     javdb_flaresolverr_use_proxy: document.getElementById('cfgJavdbFlareProxy').checked,
     javdb_cookie: document.getElementById('cfgJavdbCookie').value.trim(),

@@ -9,7 +9,10 @@ CONFIG_PATH = Path(os.getenv("CONFIG_DIR", "/config")) / "settings.json"
 
 DEFAULT_CONFIG = {
     "proxy": "",                         # HTTP代理，如 http://192.168.1.1:7890
-    "sources": ["javbus", "javdb"],      # 启用的数据源: javbus/javdb/avsox/avmoo
+    "sources": ["javbus", "javdb"],      # 可选: javbus/javdb/avsox/avmoo/jav321/dmm
+    "scrape_artwork_fallback_limit": 2,   # poster/fanart 缺失时最多补查几个详情源（0=关闭）
+    "dmm_api_id": "",                    # DMM/FANZA 官方联盟 API ID
+    "dmm_affiliate_id": "",              # DMM/FANZA Affiliate ID
     # V1.4.2：JavDB 反爬增强
     "javdb_flaresolverr_url": "",        # FlareSolverr 地址（如 http://192.168.1.100:8191），填了则 JavDB 走它过 CF 盾
     "javdb_flaresolverr_use_proxy": True, # FlareSolverr 是否复用主代理；其自带出口（如 WARP）时应关掉走直连
@@ -176,6 +179,8 @@ MAX_RESULTS_HARD_CAP = 500
 _ENV_FALLBACKS = {
     "javdb_flaresolverr_url": "JAVDB_FLARESOLVERR_URL",
     "fc2_flaresolverr_url": "FC2_FLARESOLVERR_URL",
+    "dmm_api_id": "DMM_API_ID",
+    "dmm_affiliate_id": "DMM_AFFILIATE_ID",
 }
 
 

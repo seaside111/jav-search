@@ -40,7 +40,7 @@ import actor_scraper
 import auth
 import logging
 
-APP_VERSION = "1.4.6.1"
+APP_VERSION = "1.4.6.2"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -214,6 +214,9 @@ class ConfigUpdateRequest(BaseModel):
     # exclude_none 排不掉，从而把用户已存的 proxy / jackett / 翻译密钥等悄悄清空。
     proxy: Optional[str] = None
     sources: Optional[list[str]] = None
+    scrape_artwork_fallback_limit: Optional[int] = None
+    dmm_api_id: Optional[str] = None
+    dmm_affiliate_id: Optional[str] = None
     # V1.4.2 JavDB 反爬增强
     javdb_flaresolverr_url: Optional[str] = None
     javdb_flaresolverr_use_proxy: Optional[bool] = None
@@ -898,7 +901,7 @@ async def api_get_config():
     config = load_config()
     # 脱敏返回（隐藏密钥）
     safe_config = dict(config)
-    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "mteam_api_key", "javdb_cookie", "fc2_cookie", "image_imgbb_key", "image_imgchest_token", "image_freeimage_key", "image_postimage_key", "emby_api_key"]:
+    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "mteam_api_key", "javdb_cookie", "fc2_cookie", "dmm_api_id", "dmm_affiliate_id", "image_imgbb_key", "image_imgchest_token", "image_freeimage_key", "image_postimage_key", "emby_api_key"]:
         if safe_config.get(key):
             v = safe_config[key]
             safe_config[key] = "***" + v[-4:] if len(v) > 4 else "****"
@@ -912,7 +915,7 @@ async def api_set_config(req: ConfigUpdateRequest):
 
     update = req.dict(exclude_none=True)
     # 如果是脱敏值则不更新
-    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "mteam_api_key", "javdb_cookie", "fc2_cookie", "image_imgbb_key", "image_imgchest_token", "image_freeimage_key", "image_postimage_key", "emby_api_key"]:
+    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "mteam_api_key", "javdb_cookie", "fc2_cookie", "dmm_api_id", "dmm_affiliate_id", "image_imgbb_key", "image_imgchest_token", "image_freeimage_key", "image_postimage_key", "emby_api_key"]:
         v = update.get(key, "")
         if v and v.startswith("***"):
             update.pop(key, None)

@@ -13,7 +13,7 @@ import emby
 import qbittorrent
 import transmission
 import main
-from scrapers import _javu_base, _javbus_base
+from scrapers import _javu_base, _javbus_base, jav321, dmm
 from config_manager import DEFAULT_CONFIG
 
 
@@ -443,6 +443,153 @@ class VideoClassificationTests(unittest.TestCase):
                 [main, second], str(root), min_bytes=200, keep_bytes=500)
             self.assertIn(second, keep)
             self.assertNotIn(second, drop)
+
+    def test_same_duration_different_resolution_is_quality_variant(self):
+        a = Path("ABC-123 source-a.mp4")
+        b = Path("ABC-123 source-b.mp4")
+        original = library._probe_video
+        facts = {
+            a: {"duration": 7200.0, "width": 1920, "height": 1080, "codec": "h264"},
+            b: {"duration": 7201.0, "width": 3840, "height": 2160, "codec": "hevc"},
+        }
+        library._probe_video = lambda path: facts[path]
+        try:
+            self.assertTrue(library._is_quality_variant(a, b))
+        finally:
+            library._probe_video = original
+
+    def test_real_cd_parts_are_not_quality_variants(self):
+        a = Path("ABC-123-CD1.mp4")
+        b = Path("ABC-123-CD2.mp4")
+        original = library._probe_video
+        facts = {
+            a: {"duration": 3600.0, "width": 1920, "height": 1080, "codec": "h264"},
+            b: {"duration": 4100.0, "width": 1920, "height": 1080, "codec": "h264"},
+        }
+        library._probe_video = lambda path: facts[path]
+        try:
+            self.assertFalse(library._is_quality_variant(a, b))
+        finally:
+            library._probe_video = original
+
+    def test_only_higher_resolution_variant_is_archive_representative(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            low = root / "ABC-123 source-a.mp4"
+            high = root / "ABC-123 source-b.mp4"
+            low.write_bytes(b"low")
+            high.write_bytes(b"high quality")
+            original = library._probe_video
+            facts = {
+                low: {"duration": 7200.0, "width": 1280, "height": 720, "codec": "h264"},
+                high: {"duration": 7201.0, "width": 3840, "height": 2160, "codec": "hevc"},
+            }
+            library._probe_video = lambda path: facts[path]
+            try:
+                self.assertTrue(library._is_nonpreferred_variant(low, "ABC-123", str(root)))
+                self.assertFalse(library._is_nonpreferred_variant(high, "ABC-123", str(root)))
+                self.assertEqual(library._part_suffix(high, "ABC-123", str(root)), "")
+            finally:
+                library._probe_video = original
+
+    def test_artwork_uses_independent_sample_for_fanart(self):
+        self.assertEqual(
+            library._artwork_urls({
+                "cover": "https://img/poster.jpg",
+                "samples": ["https://img/poster.jpg", "https://img/backdrop.jpg"],
+            }),
+            ("https://img/poster.jpg", "https://img/backdrop.jpg"),
+        )
+        self.assertEqual(
+            library._artwork_urls({"cover": "https://img/poster.jpg", "samples": []}),
+            ("https://img/poster.jpg", ""),
+        )
+
+    def test_artwork_merge_fills_missing_fields_without_overwrite(self):
+        movie = {"cover": "https://primary/poster.jpg", "samples": []}
+        self.assertTrue(library._merge_artwork(movie, {
+            "cover": "https://fallback/poster.jpg",
+            "samples": ["https://fallback/fanart.jpg"],
+        }, "javdb"))
+        self.assertEqual(movie["cover"], "https://primary/poster.jpg")
+        self.assertEqual(movie["samples"], ["https://fallback/fanart.jpg"])
+        self.assertEqual(movie["fanart_source"], "javdb")
+
+    def test_artwork_backfill_stops_after_first_successful_source(self):
+        import scrapers
+        movie = {
+            "code": "ABC-123", "cover": "https://primary/poster.jpg", "samples": [],
+            "source": "JavBus", "url": "https://javbus/item",
+            "source_urls": {
+                "JavBus": "https://javbus/item",
+                "JavDB": "https://javdb/item",
+                "AVSOX": "https://avsox/item",
+            },
+        }
+        original = scrapers.enrich
+        calls = []
+
+        async def fake_enrich(items, **kwargs):
+            calls.append(items[0]["source"])
+            return [{"samples": ["https://javdb/fanart.jpg"]}]
+
+        scrapers.enrich = fake_enrich
+        try:
+            asyncio.run(library._backfill_artwork(
+                movie, "ABC-123",
+                {"sources": ["javbus", "javdb", "avsox"],
+                 "scrape_artwork_fallback_limit": 2}, None))
+        finally:
+            scrapers.enrich = original
+        self.assertEqual(calls, ["javdb"])
+        self.assertEqual(movie["samples"], ["https://javdb/fanart.jpg"])
+
+    def test_ambiguous_same_code_files_are_not_guessed_as_cd_parts(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            first = root / "ABC-123 main.mp4"
+            second = root / "ABC-123 alternate.mp4"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            with mock.patch.object(library, "_probe_video", return_value={}):
+                self.assertEqual(library._part_suffix(first, "ABC-123", str(root)), "")
+                self.assertEqual(library._part_suffix(second, "ABC-123", str(root)), "")
+
+    def test_jav321_parser_keeps_cover_and_sample_separate(self):
+        html = """
+        <html><h3>ABC-123 Sample title</h3><div>品番：ABC-123</div>
+        <div class="col-md-3"><img src="/images/cover.jpg"></div>
+        <div id="sample-waterfall"><a href="/images/sample1.jpg">sample</a></div>
+        </html>
+        """
+        item = jav321._parse(html, query="ABC-123", url="https://www.jav321.com/video/abc-123")
+        self.assertEqual(item["cover"], "https://www.jav321.com/images/cover.jpg")
+        self.assertEqual(item["samples"], ["https://www.jav321.com/images/sample1.jpg"])
+
+    def test_dmm_api_mapping_exposes_official_cover_and_samples(self):
+        item = dmm._item({
+            "content_id": "ssis00123", "title": "Title",
+            "imageURL": {"large": "https://pics.dmm.co.jp/cover.jpg"},
+            "sampleImageURL": {"sample_l": {"image": ["https://pics.dmm.co.jp/sample.jpg"]}},
+            "maker": {"name": "Maker"}, "actress": [{"name": "Actor"}],
+        })
+        self.assertEqual(item["code"], "SSIS-123")
+        self.assertEqual(item["cover"], "https://pics.dmm.co.jp/cover.jpg")
+        self.assertEqual(item["samples"], ["https://pics.dmm.co.jp/sample.jpg"])
+        self.assertTrue(item["detail_loaded"])
+
+    def test_dmm_code_search_rejects_nonmatching_first_result(self):
+        original = dmm._api
+
+        async def fake_api(params, proxy):
+            return [{"content_id": "other00999", "title": "OTHER-999"}]
+
+        dmm._api = fake_api
+        try:
+            result = asyncio.run(dmm.search_list("ABC-123", "code"))
+        finally:
+            dmm._api = original
+        self.assertEqual(result, [])
 
 
 class NamingAndTrackerTests(unittest.TestCase):

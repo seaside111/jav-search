@@ -12,7 +12,7 @@ import asyncio
 import re
 from typing import Optional
 
-from . import javbus, javdb, avsox, avmoo, fc2
+from . import javbus, javdb, avsox, avmoo, fc2, jav321, dmm
 from . import _detailcache
 
 SEARCH_MODE_CODE = "code"
@@ -26,11 +26,14 @@ SOURCE_MODULES = {
     "avsox": avsox,
     "avmoo": avmoo,
     "fc2": fc2,        # V1.4.3：FC2-PPV 专用源（fc2ppvdb.com，无码/素人）
+    "jav321": jav321,
+    "dmm": dmm,
 }
 
 # 合并时来源优先级（数字小者优先，作为主条目保留封面/标题）
 # FC2 番号体系独立、不与其它源重叠，优先级随意，置末即可
-_SOURCE_PRIORITY = {"javbus": 0, "javdb": 1, "avmoo": 2, "avsox": 3, "fc2": 4}
+_SOURCE_PRIORITY = {"javbus": 0, "javdb": 1, "jav321": 2, "dmm": 3,
+                    "avmoo": 4, "avsox": 5, "fc2": 6}
 
 
 def _normalize_code(code: str) -> str:
