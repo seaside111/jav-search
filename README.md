@@ -85,9 +85,13 @@ JavDB / FC2 需要过 Cloudflare 盾。**FlareSolverr 不打进本项目的安�
 # 自己单独跑一个 FlareSolverr（任意主机/NAS 均可，端口默认 8191）
 docker run -d --name flaresolverr --restart unless-stopped \
   -p 8191:8191 \
-  -e LOG_LEVEL=info -e TZ=Asia/Shanghai \
+  -e LOG_LEVEL=warning -e TZ=Asia/Shanghai \
   ghcr.io/flaresolverr/flaresolverr:latest
 ```
+
+> 🔐 不建议把 FlareSolverr 设为 `LOG_LEVEL=info`：其 INFO 日志会打印完整请求体，
+> 其中可能包含主代理账号密码和站点 Cookie。排障时若临时开启，结束后应立即恢复为
+> `warning`，并避免公开粘贴原始请求体。
 
 **最省事：「设置 → JavDB 反爬」的 FlareSolverr 地址栏留空即可** —— 程序会自动探测本机/同宿主机的
 FlareSolverr（依次试容器名 / `host.docker.internal` / 网桥网关 / `127.0.0.1`，再扫描 docker 同网段的

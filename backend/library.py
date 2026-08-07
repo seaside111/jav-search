@@ -118,6 +118,8 @@ _scrape_jobs: dict[str, dict] = {}
 
 # 文件大小稳定性追踪： path -> [last_size, stable_count]
 _size_history: dict[str, list] = {}
+# 过小文件仍每轮检查是否变大，但相同大小/mtime 只记录一次，避免广告文件刷屏。
+_small_log_history: dict[str, tuple[int, int]] = {}
 # 已处理（移动走或失败记录过）的文件路径，避免重复处理（进程内）
 _processed: set[str] = set()
 
@@ -130,6 +132,16 @@ _PROCESSED_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "scrape_processed.j
 _processed_sig: dict[str, float] = {}     # signature -> 处理时间戳
 _processed_loaded = False
 _PROCESSED_MAX = 20000                     # 上限：超出按时间裁掉最旧（极少触发；裁掉的最旧文件若仍在会被再处理一次）
+
+# 已归档但缺 poster/fanart 的低频补全队列。任务记录最终归档目录，后续只补图片，
+# 不重复翻译、写 NFO、归档视频或触发演员同步。
+_ARTWORK_PENDING_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "scrape_artwork_pending.json"
+_ARTWORK_TERMINAL_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "scrape_artwork_terminal.json"
+_artwork_pending: dict[str, dict] = {}
+_artwork_pending_loaded = False
+_artwork_terminal: dict[str, list[str]] = {}
+_artwork_terminal_loaded = False
+_artwork_legacy_last = 0.0
 
 
 def _file_sig(video_path: Path, size: int) -> str:
@@ -945,9 +957,17 @@ def _merge_artwork(target: dict, detail: dict, source: str = "") -> bool:
     return changed
 
 
+def _enabled_artwork_sources(code: str, config: dict) -> list[str]:
+    enabled = [s for s in (config.get("sources") or ["javbus", "javdb"])
+               if s in {"javbus", "javdb", "avsox", "avmoo", "fc2", "jav321", "dmm"}]
+    if not _norm(code).startswith("fc2ppv"):
+        enabled = [s for s in enabled if s != "fc2"]
+    return enabled
+
+
 async def _backfill_artwork(movie: dict, code: str, config: dict,
                             proxy: Optional[str]) -> dict:
-    """Lazily fill missing poster/fanart from at most a few enabled sources.
+    """Lazily fill missing poster/fanart by trying enabled sources sequentially.
 
     Existing per-source detail URLs and the shared detail cache are used first.
     A small code search is performed only when pushed metadata has no alternate
@@ -956,13 +976,12 @@ async def _backfill_artwork(movie: dict, code: str, config: dict,
     """
     if movie.get("cover") and movie.get("samples"):
         return movie
-    limit = max(0, min(int(config.get("scrape_artwork_fallback_limit", 2)), 4))
-    if not limit:
+    configured_limit = max(0, min(int(config.get("scrape_artwork_fallback_limit", 2)), 6))
+    if configured_limit <= 0:
         return movie
-    from scrapers import enrich
+    from scrapers import enrich, search_source_status
 
-    enabled = [s for s in (config.get("sources") or ["javbus", "javdb"])
-               if s in {"javbus", "javdb", "avsox", "avmoo", "fc2", "jav321", "dmm"}]
+    enabled = _enabled_artwork_sources(code, config)
     def source_key(value: str) -> str:
         key = (value or "").strip().lower()
         return "dmm" if key in {"dmm", "dmm/fanza", "fanza"} else key
@@ -977,51 +996,311 @@ async def _backfill_artwork(movie: dict, code: str, config: dict,
     # authoritative.
     priority = {"dmm": 0, "jav321": 1, "javdb": 2, "avsox": 3,
                 "avmoo": 4, "fc2": 5, "javbus": 6}
+    # 缺图时真正按来源逐个尝试。已有详情 URL 直接复用；没有 URL 的来源单独做一次
+    # 小范围番号搜索，避免一次聚合搜索中某源超时后候选 URL 丢失。任一来源拿到
+    # 独立 fanart 即停止，全部已启用来源都无结果才允许后续先归档。
+    pending_only = {source_key(src) for src in (movie.get("_artwork_pending_sources") or [])}
     candidates = sorted(
-        ((src, url) for src, url in source_urls.items() if src in enabled and url),
-        key=lambda item: priority.get(item[0], 99),
-    )
-
-    # Pushed single-source metadata may not contain merged source URLs. Search
-    # once, with a small result limit, only while artwork is still incomplete.
-    if len(candidates) <= 1 and (not movie.get("cover") or not movie.get("samples")):
-        try:
-            found = await search(query=code, mode=SEARCH_MODE_CODE, proxy=proxy,
-                                 sources=enabled, max_results=10)
-            norm = _norm(code)
-            exact = next((item for item in found
-                          if _norm(item.get("code", "")) == norm), None)
-            if exact:
-                for src, url in (exact.get("source_urls") or {}).items():
-                    key = source_key(src)
-                    if key in enabled and url and key not in source_urls:
-                        source_urls[key] = url
-                _merge_artwork(movie, exact, exact.get("source", ""))
-                candidates = sorted(
-                    ((src, url) for src, url in source_urls.items() if src in enabled and url),
-                    key=lambda item: priority.get(item[0], 99),
-                )
-        except Exception as e:
-            _log(f"图片备用来源搜索失败（继续使用已有图片）：{code}: {e}")
-
+        (src for src in enabled if not pending_only or src in pending_only),
+        key=lambda src: priority.get(src, 99))
     attempts = 0
-    seen_urls = set()
-    for source, url in candidates:
-        if attempts >= limit or (movie.get("cover") and movie.get("samples")):
+    conclusive = 0
+    transient = []
+    for source in candidates:
+        if ((movie.get("cover") and movie.get("samples"))
+                or conclusive >= configured_limit):
             break
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
         attempts += 1
+        url = source_urls.get(source, "")
         try:
-            rows = await enrich([{"url": url, "source": source}], proxy=proxy,
-                                concurrency=1, per_timeout=12.0)
-            detail = rows[0] if rows else None
-            if detail and _merge_artwork(movie, detail, source):
-                _log(f"图片备用来源补全：{code}（{source}，尝试 {attempts}/{limit}）")
+            detail = None
+            source_status = "ok"
+            if not url:
+                found, source_status = await search_source_status(
+                    code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=3)
+                if source_status in {"timeout", "error"}:
+                    transient.append(source)
+                    _log(f"图片备用来源暂时失败：{code}（{source}，不占补查额度）")
+                    continue
+                norm = _norm(code)
+                detail = next((item for item in found
+                               if _norm(item.get("code", "")) == norm), None)
+                if detail:
+                    url = detail.get("url", "")
+                    if url:
+                        source_urls[source] = url
+                    _merge_artwork(movie, detail, source)
+            if url and not movie.get("samples"):
+                rows = await enrich([{"url": url, "source": source}], proxy=proxy,
+                                    concurrency=1, per_timeout=12.0, with_status=True)
+                entry = rows[0] if rows else (None, "error")
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    enriched, enrich_status = entry
+                else:  # 兼容测试替身及旧的自定义 enrich 包装
+                    enriched, enrich_status = entry, ("ok" if entry else "empty")
+                if enrich_status in {"timeout", "error"}:
+                    transient.append(source)
+                    _log(f"图片备用来源暂时失败：{code}（{source}，不占补查额度）")
+                    continue
+                if enriched:
+                    detail = enriched
+                    _merge_artwork(movie, enriched, source)
+            # 只有确实取得该番号的来源条目/详情才占补查额度。超时、异常、空结果
+            # 都保持 detail=None，继续尝试后面的 JAV321/DMM 等来源。
+            if detail:
+                conclusive += 1
+            if detail and movie.get("samples"):
+                _log(f"图片备用来源补全：{code}（{source}，有效响应 {conclusive}/{configured_limit}）")
+            elif not movie.get("samples"):
+                counted = f"有效响应 {conclusive}/{configured_limit}" if detail else "不占补查额度"
+                _log(f"图片备用来源未取得独立 fanart：{code}（{source}，{counted}，继续下一来源）")
         except Exception as e:
+            transient.append(source)
             _log(f"图片备用来源失败：{code}（{source}）: {e}")
+    movie["_artwork_pending_sources"] = list(dict.fromkeys(transient))
+    if not movie.get("samples"):
+        if conclusive >= configured_limit and attempts < len(candidates):
+            _log(f"已达到 {configured_limit} 个有效补查来源上限，暂未找到独立 fanart：{code}")
+        else:
+            _log(f"已尝试全部已启用图片来源，暂未找到独立 fanart：{code}")
     return movie
+
+
+def _load_artwork_pending() -> None:
+    global _artwork_pending_loaded
+    if _artwork_pending_loaded:
+        return
+    _artwork_pending_loaded = True
+    try:
+        data = json.loads(_ARTWORK_PENDING_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            _artwork_pending.update({str(k): v for k, v in data.items() if isinstance(v, dict)})
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        _log(f"载入归档图片补全队列失败（忽略）：{e}")
+
+
+def _save_artwork_pending() -> None:
+    try:
+        _ARTWORK_PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _ARTWORK_PENDING_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(_artwork_pending, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_ARTWORK_PENDING_FILE)
+    except Exception as e:
+        _log(f"保存归档图片补全队列失败（忽略）：{e}")
+
+
+def _load_artwork_terminal() -> None:
+    global _artwork_terminal_loaded
+    if _artwork_terminal_loaded:
+        return
+    _artwork_terminal_loaded = True
+    try:
+        data = json.loads(_ARTWORK_TERMINAL_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            _artwork_terminal.update({str(k): sorted(map(str, v))
+                                      for k, v in data.items() if isinstance(v, list)})
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        _log(f"载入归档图片终止记录失败（忽略）：{e}")
+
+
+def _artwork_source_signature(code: str, config: dict) -> list[str]:
+    return sorted(_enabled_artwork_sources(code, config))
+
+
+def _save_artwork_terminal() -> None:
+    try:
+        _ARTWORK_TERMINAL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _ARTWORK_TERMINAL_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(_artwork_terminal, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_ARTWORK_TERMINAL_FILE)
+    except Exception as e:
+        _log(f"保存归档图片终止记录失败（忽略）：{e}")
+
+
+def _mark_artwork_terminal(target_dir: Path, code: str, config: dict) -> None:
+    _load_artwork_terminal()
+    _artwork_terminal[str(target_dir)] = _artwork_source_signature(code, config)
+    while len(_artwork_terminal) > _PROCESSED_MAX:
+        _artwork_terminal.pop(next(iter(_artwork_terminal)), None)
+    _save_artwork_terminal()
+
+
+def _artwork_context(movie: dict) -> dict:
+    """仅保留补图所需、可安全持久化的来源上下文。"""
+    return {
+        "code": movie.get("code", ""), "cover": movie.get("cover", ""),
+        "samples": list(movie.get("samples") or []),
+        "source": movie.get("source", ""), "url": movie.get("url", ""),
+        "source_urls": dict(movie.get("source_urls") or {}),
+        "_artwork_pending_sources": list(movie.get("_artwork_pending_sources") or []),
+    }
+
+
+def _queue_artwork_backfill(target_dir: Path, code: str, movie: Optional[dict],
+                            config: dict) -> bool:
+    """把准确的最终归档目录加入低频补图队列；已有任务不重置退避时间。"""
+    if not code or int(config.get("scrape_artwork_fallback_limit", 2)) <= 0:
+        return False
+    target_dir = Path(target_dir)
+    poster = target_dir / f"{code}-poster.jpg"
+    fanart = target_dir / f"{code}-fanart.jpg"
+    if poster.exists() and fanart.exists():
+        return False
+    _load_artwork_pending()
+    _load_artwork_terminal()
+    key = str(target_dir)
+    signature = _artwork_source_signature(code, config)
+    if _artwork_terminal.get(key) == signature:
+        return False
+    if key in _artwork_terminal:  # 来源集合改变，允许只重新检查一次
+        _artwork_terminal.pop(key, None)
+        _save_artwork_terminal()
+    context = _artwork_context(movie or {})
+    if movie is None:
+        # 旧归档尚未做过这套状态化检查，只允许进入一次有限检查流程。
+        context["_artwork_pending_sources"] = _enabled_artwork_sources(code, config)
+    elif not context.get("_artwork_pending_sources"):
+        _mark_artwork_terminal(target_dir, code, config)
+        _log(f"归档图片补全终止：{code}（已启用来源均已确认无图，不进入持久化队列）")
+        return False
+    current = _artwork_pending.get(key)
+    if current:
+        old = current.setdefault("movie", {})
+        _merge_artwork(old, context, context.get("source", ""))
+        if not old.get("source_urls") and context.get("source_urls"):
+            old["source_urls"] = context["source_urls"]
+        if "_artwork_pending_sources" in context:
+            old["_artwork_pending_sources"] = context["_artwork_pending_sources"]
+            if not context["_artwork_pending_sources"]:
+                _artwork_pending.pop(key, None)
+                _save_artwork_pending()
+                _mark_artwork_terminal(target_dir, code, config)
+        return False
+    _artwork_pending[key] = {
+        "target_dir": key, "code": code, "movie": context,
+        "attempts": 0, "next_attempt": time.time() + 15 * 60,
+    }
+    _save_artwork_pending()
+    _log(f"归档图片待补全：{code}（最终目录 {target_dir}，15 分钟后低频重试）")
+    return True
+
+
+def _write_artwork_if_missing(path: Path, data: bytes) -> bool:
+    """在最终归档目录原子补图，绝不覆盖已有图片。"""
+    if path.exists() or not data:
+        return False
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        tmp.write_bytes(data)
+        _commit_temp_without_overwrite(tmp, path)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+
+
+async def _run_pending_artwork(config: dict) -> int:
+    """每轮最多处理一个到期任务；只重试暂时失败来源，最多三轮。"""
+    _load_artwork_pending()
+    if not _artwork_pending or int(config.get("scrape_artwork_fallback_limit", 2)) <= 0:
+        return 0
+    now = time.time()
+    due = sorted(
+        ((key, task) for key, task in _artwork_pending.items()
+         if float(task.get("next_attempt", 0)) <= now),
+        key=lambda item: float(item[1].get("next_attempt", 0)),
+    )
+    if not due:
+        return 0
+    key, task = due[0]
+    target = Path(task.get("target_dir") or key)
+    code = (task.get("code") or "").strip()
+    output = (config.get("scrape_output_dir") or "").strip()
+    try:
+        resolved = target.resolve()
+        root = Path(output).resolve()
+        if not output or (resolved != root and root not in resolved.parents):
+            raise ValueError("目标目录不在当前归档根目录内")
+    except Exception as e:
+        _log(f"取消无效归档图片补全任务：{code or key}（{e}）")
+        _artwork_pending.pop(key, None)
+        _save_artwork_pending()
+        return 0
+    poster_path = target / f"{code}-poster.jpg"
+    fanart_path = target / f"{code}-fanart.jpg"
+    if poster_path.exists() and fanart_path.exists():
+        _artwork_pending.pop(key, None)
+        _save_artwork_pending()
+        return 0
+
+    movie = dict(task.get("movie") or {})
+    movie["code"] = code
+    try:
+        await _backfill_artwork(movie, code, config, config.get("proxy") or None)
+        poster_url, fanart_url = _artwork_urls(movie)
+        saved = []
+        download_failed = False
+        if not poster_path.exists() and poster_url:
+            data = await _fetch_cover(poster_url, config.get("proxy") or None)
+            if data and _write_artwork_if_missing(poster_path, data):
+                saved.append(poster_path.name)
+            elif not poster_path.exists():
+                download_failed = True
+        if not fanart_path.exists() and fanart_url:
+            data = await _fetch_cover(fanart_url, config.get("proxy") or None)
+            if data and _write_artwork_if_missing(fanart_path, data):
+                saved.append(fanart_path.name)
+            elif not fanart_path.exists():
+                download_failed = True
+        if poster_path.exists() and fanart_path.exists():
+            _artwork_pending.pop(key, None)
+            _save_artwork_pending()
+            _log(f"归档图片补全完成：{code} → {target}（{', '.join(saved) or '图片已存在'}）")
+            if saved and config.get("emby_actor_sync_enabled", False):
+                try:
+                    import actor_scraper
+                    notified = await actor_scraper.notify_emby_folder(target, config)
+                    _log(f"Emby 已定向刷新补图目录：{code}（{notified.get('message', '')}）")
+                except Exception as e:
+                    _log(f"Emby 补图目录通知失败（不影响图片落盘）：{code}（{e}）")
+            return 1
+        if download_failed:
+            movie.setdefault("_artwork_pending_sources", []).append("_download")
+        task["movie"] = _artwork_context(movie)
+    except Exception as e:
+        _log(f"归档图片补全失败：{code}（{e}）")
+
+    pending_sources = list(movie.get("_artwork_pending_sources") or [])
+    if not pending_sources:
+        _artwork_pending.pop(key, None)
+        _save_artwork_pending()
+        _mark_artwork_terminal(target, code, config)
+        _log(f"归档图片补全任务结束：{code}（现有来源已全部确认无 fanart）")
+        return 0
+
+    task["attempts"] = int(task.get("attempts", 0)) + 1
+    if task["attempts"] >= 3:
+        _artwork_pending.pop(key, None)
+        _save_artwork_pending()
+        _mark_artwork_terminal(target, code, config)
+        _log(f"归档图片补全任务结束：{code}（暂时失败来源已重试 3 次，不再查询）")
+        return 0
+    delays = (15 * 60, 60 * 60, 6 * 60 * 60)
+    delay = delays[min(task["attempts"] - 1, len(delays) - 1)]
+    task["next_attempt"] = time.time() + delay
+    _artwork_pending[key] = task
+    _save_artwork_pending()
+    _log(f"归档图片仍缺失：{code}（下次约 {delay // 60} 分钟后重试）")
+    return 0
 
 
 def _get_file_status(video_path: Path, code: str = "") -> dict:
@@ -1229,6 +1508,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             except Exception as e:
                 _log(f"封面保存失败 {filepath}: {e}")
         elif overwrite or not status["has_poster"]:
+            movie.setdefault("_artwork_pending_sources", []).append("_download")
             _log(f"封面获取失败：{code}")
 
         # fanart/backdrop 必须来自独立的样品图或宣传图。没有独立来源时宁可
@@ -1244,6 +1524,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                 except Exception as e:
                     _log(f"背景图保存失败 {filepath}: {e}")
             else:
+                movie.setdefault("_artwork_pending_sources", []).append("_download")
                 _log(f"背景图获取失败，不复制封面兜底：{code}")
         elif not fanart_url:
             _log(f"无独立背景图来源，仅保存 poster：{code}")
@@ -1276,7 +1557,8 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             "title_zh": title_for_nfo, "title_original": name_part,
             "folder_title": folder_title, "actors": movie.get("actors") or [],
             "actor_images_saved": actor_images_saved,
-            "saved_nfo": saved_nfo, "saved_cover": saved_cover}
+            "saved_nfo": saved_nfo, "saved_cover": saved_cover,
+            "artwork": _artwork_context(movie)}
 
 
 # ─────────────────────────────────────────
@@ -1559,7 +1841,8 @@ def _build_archive_index(output_dir: str) -> dict:
       - inodes：{(st_dev, st_ino)} —— hardlink 模式(默认)源文件与归档文件同 inode，精确命中；
       - sizes ：{(归一化番号, 字节数)} —— copy 模式跨 inode，用 番号+字节数 命中。
     （move 模式源文件已移走，本就不会被再次扫描，无需索引。）"""
-    idx = {"inodes": set(), "sizes": set()}
+    idx = {"inodes": set(), "sizes": set(),
+           "paths_by_inode": {}, "paths_by_size": {}}
     if not output_dir:
         return idx
     out = Path(output_dir)
@@ -1573,9 +1856,13 @@ def _build_archive_index(output_dir: str) -> dict:
                 except Exception:
                     continue
                 if stt.st_ino:
-                    idx["inodes"].add((stt.st_dev, stt.st_ino))
+                    inode_key = (stt.st_dev, stt.st_ino)
+                    idx["inodes"].add(inode_key)
+                    idx["paths_by_inode"].setdefault(inode_key, p)
                 if safe:
-                    idx["sizes"].add((safe, stt.st_size))
+                    size_key = (safe, stt.st_size)
+                    idx["sizes"].add(size_key)
+                    idx["paths_by_size"].setdefault(size_key, p)
     except Exception as e:
         _log(f"建立归档索引失败（忽略，回退仅靠签名去重）：{e}")
     return idx
@@ -1593,6 +1880,54 @@ def _is_already_archived(video_path: Path, size: int, code: str, idx: dict) -> b
         pass
     if code:
         return (_norm(_safe_name(code)), size) in idx["sizes"]   # copy：番号+字节数命中
+    return False
+
+
+def _archived_target_for_source(video_path: Path, size: int, code: str,
+                                idx: dict) -> Optional[Path]:
+    """从归档索引反查 hardlink/copy 源文件已经落到的准确最终目录。"""
+    try:
+        stt = video_path.stat()
+        if stt.st_ino:
+            found = idx.get("paths_by_inode", {}).get((stt.st_dev, stt.st_ino))
+            if found:
+                return Path(found).parent
+    except Exception:
+        pass
+    if code:
+        found = idx.get("paths_by_size", {}).get((_norm(_safe_name(code)), size))
+        if found:
+            return Path(found).parent
+    return None
+
+
+def _discover_legacy_archive_artwork(archive_idx: dict, config: dict) -> bool:
+    """每小时最多发现一个旧归档缺图任务，优先最近归档，避免升级后批量联网。"""
+    global _artwork_legacy_last
+    now = time.time()
+    if now - _artwork_legacy_last < 60 * 60:
+        return False
+    _artwork_legacy_last = now
+    paths = set(archive_idx.get("paths_by_inode", {}).values())
+    paths.update(archive_idx.get("paths_by_size", {}).values())
+    try:
+        paths = sorted(paths, key=lambda p: Path(p).stat().st_mtime, reverse=True)
+    except Exception:
+        paths = list(paths)
+    seen = set()
+    for video in paths:
+        folder = Path(video).parent
+        if folder in seen:
+            continue
+        seen.add(folder)
+        code = _code_from_name(folder.name) or _code_from_name(Path(video).stem)
+        if not code:
+            continue
+        # 只接管已有 NFO/poster、但缺 fanart 的旧归档；其它不完整归档不在这里重刮。
+        if ((folder / f"{code}.nfo").exists()
+                and (folder / f"{code}-poster.jpg").exists()
+                and not (folder / f"{code}-fanart.jpg").exists()):
+            return _queue_artwork_backfill(folder, code, None, config)
     return False
 
 
@@ -1938,6 +2273,10 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         record["moved"] = mv.get("archived", False)
         record["archive_mode"] = mode
         record["target_dir"] = mv.get("target_dir", "")
+        if (mv.get("archived") and scrape_meta and mv.get("target_dir")
+                and scrape_res.get("artwork") is not None):
+            _queue_artwork_backfill(
+                Path(mv["target_dir"]), code, scrape_res.get("artwork"), config)
         if (mv.get("archived") and config.get("emby_actor_sync_enabled", False)
                 and scrape_res.get("actor_images_saved", 0)):
             try:
@@ -2003,6 +2342,9 @@ async def _scan_once(config: dict) -> int:
             return 0
     # 以归档目录现有内容为准的兜底去重索引（签名文件缺失时仍能跳过早已归档的原文件）。
     archive_idx = _build_archive_index(out_dir)
+    # 归档图片补全与视频处理解耦：每轮最多一个到期任务，直接写最终归档目录。
+    await _run_pending_artwork(config)
+    _discover_legacy_archive_artwork(archive_idx, config)
     now = time.time()
     processed = 0
     n_total = n_done_before = n_incomplete = n_small = n_waiting = n_extra = n_publish = 0
@@ -2123,8 +2465,12 @@ async def _scan_once(config: dict) -> int:
 
         if size < min_bytes:
             n_small += 1
-            _log(f"文件过小忽略：{vf.name}（{round(size/1024/1024,1)}MB < {min_bytes//1024//1024}MB）")
+            small_sig = (size, int(getattr(st, "st_mtime_ns", st.st_mtime * 1_000_000_000)))
+            if _small_log_history.get(fp) != small_sig:
+                _small_log_history[fp] = small_sig
+                _log(f"文件过小忽略：{vf.name}（{round(size/1024/1024,1)}MB < {min_bytes//1024//1024}MB）")
             continue
+        _small_log_history.pop(fp, None)
 
         # 同内容不同清晰度/编码不是 CD 分段。只归档确定的最佳版本，其余版本
         # 保留在下载目录，不删除、不改成 -cdN，也不阻塞最佳版本继续处理。

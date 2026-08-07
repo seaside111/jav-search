@@ -118,6 +118,9 @@ def _write_nfo(path: Path, tree: ET.ElementTree, actors: list, write_thumb: bool
                 thumb = ET.SubElement(node, "thumb")
             thumb.text = avatar
             written += 1
+        elif actor.get("avatar_invalid") and thumb is not None:
+            # 404/410 已确认永久失效，不把死链继续留作 NFO 回退地址。
+            node.remove(thumb)
         elif not write_thumb and thumb is not None:
             node.remove(thumb)
     raw = ET.tostring(root, encoding="unicode")
@@ -225,10 +228,13 @@ async def _avatar_by_name(name: str, sources: list[str], proxy: Optional[str]) -
     return "", ""
 
 
-async def _download(url: str, proxy: Optional[str]) -> Optional[bytes]:
+async def _download(url: str, proxy: Optional[str], with_status: bool = False):
+    def result(data: Optional[bytes], status: str):
+        return (data, status) if with_status else data
+
     if not _usable_avatar(url):
         _log("头像下载跳过：来源未返回有效图片地址")
-        return None
+        return result(None, "invalid")
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.javbus.com/",
                "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"}
     try:
@@ -237,12 +243,13 @@ async def _download(url: str, proxy: Optional[str]) -> Optional[bytes]:
             response = await client.get(url, headers=headers)
             content_type = response.headers.get("content-type", "")
             if response.status_code == 200 and content_type.startswith("image/") and len(response.content) > 1024:
-                return response.content
+                return result(response.content, "ok")
             _log(f"头像下载无效：HTTP {response.status_code}，类型 {content_type or '未知'}，"
                  f"大小 {len(response.content)} 字节（{url}）")
+            return result(None, "gone" if response.status_code in {404, 410} else "transient")
     except Exception as exc:
         _log(f"图片下载失败：{url}: {exc}")
-    return None
+    return result(None, "transient")
 
 
 def _cached_image(name: str, config: dict) -> Optional[Path]:
@@ -280,8 +287,16 @@ async def _save_actor(actor: dict, folder: Path, config: dict,
     if local.exists() and local.stat().st_size > 1024 and not overwrite:
         cached = local
     if cached is None or overwrite:
-        image = await _download((actor.get("avatar") or "").strip(), proxy)
+        downloaded = await _download((actor.get("avatar") or "").strip(), proxy,
+                                     with_status=True)
+        if isinstance(downloaded, tuple):
+            image, download_status = downloaded
+        else:  # 兼容测试替身及旧的自定义下载包装
+            image, download_status = downloaded, ("ok" if downloaded else "transient")
         if not image:
+            if download_status == "gone":
+                actor["avatar"] = ""
+                actor["avatar_invalid"] = True
             return False
         cache_dir.mkdir(parents=True, exist_ok=True)
         cached = cache_dir / "portrait.jpg"
@@ -339,6 +354,17 @@ def _emby_media_paths(folder: Path, config: dict) -> tuple[list[str], str]:
             else:
                 paths.append(str(child.resolve()))
     return paths, ""
+
+
+async def notify_emby_folder(folder: Path, config: dict) -> dict:
+    """Notify Emby to refresh only this archived movie folder after an artwork backfill."""
+    media_paths, path_error = _emby_media_paths(folder, config)
+    if path_error:
+        return {"triggered": False, "message": path_error}
+    # The folder path is sufficient for Emby to discover newly added local artwork.
+    return await emby.notify_media_paths(
+        config.get("emby_url", ""), config.get("emby_api_key", ""),
+        media_paths[:1], update_type="Updated")
 
 
 async def sync_emby_folder(folder: Path, config: dict, code: str = "",

@@ -10,7 +10,7 @@ CONFIG_PATH = Path(os.getenv("CONFIG_DIR", "/config")) / "settings.json"
 DEFAULT_CONFIG = {
     "proxy": "",                         # HTTP代理，如 http://192.168.1.1:7890
     "sources": ["javbus", "javdb"],      # 可选: javbus/javdb/avsox/avmoo/jav321/dmm
-    "scrape_artwork_fallback_limit": 2,   # poster/fanart 缺失时最多补查几个详情源（0=关闭）
+    "scrape_artwork_fallback_limit": 2,   # 最多几个有效图片源响应（超时/异常不计，0=关闭）
     "dmm_api_id": "",                    # DMM/FANZA 官方联盟 API ID
     "dmm_affiliate_id": "",              # DMM/FANZA Affiliate ID
     # V1.4.2：JavDB 反爬增强

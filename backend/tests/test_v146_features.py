@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 import tempfile
 import unittest
@@ -13,8 +14,33 @@ import emby
 import qbittorrent
 import transmission
 import main
-from scrapers import _javu_base, _javbus_base, jav321, dmm
+from scrapers import _javu_base, _javbus_base, jav321, dmm, javdb
 from config_manager import DEFAULT_CONFIG
+
+
+class JavDbFlareSolverrTests(unittest.TestCase):
+    def test_browser_session_cookies_are_not_forwarded_to_flaresolverr(self):
+        calls = []
+
+        async def fake_fetch(url, flaresolverr_url, proxy, cookies=None, priority=0):
+            calls.append({"url": url, "proxy": proxy, "cookies": cookies})
+            return "<html><title>JavDB</title></html>", 200, ""
+
+        opts = {
+            "flaresolverr_url": "http://flaresolverr:8191",
+            "flaresolverr_use_proxy": True,
+            "cookie": "cf_clearance=secret; _jdb_session=session; custom=value",
+        }
+        with mock.patch.object(javdb, "_fetch_via_flaresolverr", fake_fetch):
+            html, status, error = asyncio.run(javdb._fetch_html(
+                "https://javdb.com/censored", "http://proxy:7890", opts))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(error, "")
+        self.assertIn("JavDB", html)
+        self.assertEqual(calls[0]["cookies"], javdb.BASE_COOKIES)
+        self.assertNotIn("cf_clearance", calls[0]["cookies"])
+        self.assertNotIn("_jdb_session", calls[0]["cookies"])
 
 
 class VideoClassificationTests(unittest.TestCase):
@@ -252,6 +278,36 @@ class VideoClassificationTests(unittest.TestCase):
         self.assertEqual(result["saved"], 1)
         self.assertIn("<thumb>https://img.test/recovered.jpg</thumb>", written)
         self.assertIn("https://img.test/recovered.jpg", metadata)
+
+    def test_permanent_actor_portrait_404_is_removed_from_nfo(self):
+        original_download = actor_scraper._download
+        with tempfile.TemporaryDirectory() as raw:
+            folder = Path(raw) / "movie"
+            folder.mkdir()
+            nfo = folder / "FNS-232.nfo"
+            nfo.write_text("""<movie><uniqueid>FNS-232</uniqueid><actor>
+              <name>Actor A</name><thumb>https://img.test/missing.jpg</thumb>
+            </actor></movie>""", encoding="utf-8")
+            tree = actor_scraper.ET.parse(nfo)
+
+            async def gone(*_args, **_kwargs):
+                return None, "gone"
+
+            actor_scraper._download = gone
+            try:
+                result = asyncio.run(actor_scraper.process_movie(
+                    folder, [{"name": "Actor A",
+                              "avatar": "https://img.test/missing.jpg"}], "FNS-232",
+                    {"actor_scrape_lookup_by_code": False,
+                     "actor_scrape_write_nfo": True,
+                     "scrape_actor_thumb_in_nfo": True,
+                     "actor_scrape_cache_dir": str(Path(raw) / "cache")},
+                    nfo, tree, sync_emby=False))
+            finally:
+                actor_scraper._download = original_download
+            written = nfo.read_text(encoding="utf-8")
+        self.assertEqual(result["saved"], 0)
+        self.assertNotIn("<thumb>", written)
 
     def test_emby_archive_root_maps_only_current_movie_folder(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -542,6 +598,68 @@ class VideoClassificationTests(unittest.TestCase):
         finally:
             scrapers.enrich = original
         self.assertEqual(calls, ["javdb"])
+        self.assertEqual(movie["samples"], ["https://javdb/fanart.jpg"])
+
+    def test_artwork_backfill_continues_to_next_enabled_source(self):
+        import scrapers
+        movie = {
+            "code": "ABC-123", "cover": "https://primary/poster.jpg", "samples": [],
+            "source_urls": {
+                "JavDB": "https://javdb/item",
+                "AVSOX": "https://avsox/item",
+                "JavBus": "https://javbus/item",
+            },
+        }
+        original = scrapers.enrich
+        calls = []
+
+        async def fake_enrich(items, **kwargs):
+            source = items[0]["source"]
+            calls.append(source)
+            if source == "avsox":
+                return [{"samples": ["https://avsox/fanart.jpg"]}]
+            return [None]
+
+        scrapers.enrich = fake_enrich
+        try:
+            asyncio.run(library._backfill_artwork(
+                movie, "ABC-123",
+                {"sources": ["javbus", "javdb", "avsox"],
+                 "scrape_artwork_fallback_limit": 1}, None))
+        finally:
+            scrapers.enrich = original
+        self.assertEqual(calls, ["javdb", "avsox"])
+        self.assertEqual(movie["samples"], ["https://avsox/fanart.jpg"])
+
+    def test_artwork_timeouts_do_not_consume_effective_source_limit(self):
+        import scrapers
+        movie = {
+            "code": "ABC-123", "cover": "https://primary/poster.jpg", "samples": [],
+            "source_urls": {
+                "DMM/FANZA": "dmmapi://abc00123",
+                "JAV321": "https://jav321/item",
+                "JavDB": "https://javdb/item",
+            },
+        }
+        original = scrapers.enrich
+        calls = []
+
+        async def fake_enrich(items, **kwargs):
+            source = items[0]["source"]
+            calls.append(source)
+            if source == "javdb":
+                return [({"samples": ["https://javdb/fanart.jpg"]}, "ok")]
+            return [(None, "timeout")]  # 模拟 DMM 与 JAV321 超时/请求失败
+
+        scrapers.enrich = fake_enrich
+        try:
+            asyncio.run(library._backfill_artwork(
+                movie, "ABC-123",
+                {"sources": ["dmm", "jav321", "javdb"],
+                 "scrape_artwork_fallback_limit": 1}, None))
+        finally:
+            scrapers.enrich = original
+        self.assertEqual(calls, ["dmm", "jav321", "javdb"])
         self.assertEqual(movie["samples"], ["https://javdb/fanart.jpg"])
 
     def test_ambiguous_same_code_files_are_not_guessed_as_cd_parts(self):
@@ -1054,6 +1172,199 @@ class NamingAndTrackerTests(unittest.TestCase):
             self.assertTrue((target / "SAN-475-poster.jpg").exists())
             self.assertTrue((target / "SAN-475-fanart.jpg").exists())
             self.assertTrue((target / "actors" / "ActorA.jpg").exists())
+
+    def test_non_fc2_artwork_search_skips_fc2_source(self):
+        import scrapers
+        original_search = scrapers.search_source_status
+        original_enrich = scrapers.enrich
+        searched_sources = []
+
+        async def fake_search(_query, _mode, source, **_kwargs):
+            searched_sources.append(source)
+            return [], "ok"
+
+        async def fake_enrich(*_args, **_kwargs):
+            return [None]
+
+        scrapers.search_source_status = fake_search
+        scrapers.enrich = fake_enrich
+        try:
+            asyncio.run(library._backfill_artwork({
+                "code": "DLDSS-509", "cover": "https://javbus/poster.jpg",
+                "samples": [], "source": "JavBus", "url": "https://javbus/item",
+            }, "DLDSS-509", {
+                "sources": ["javbus", "javdb", "fc2"],
+                "scrape_artwork_fallback_limit": 2,
+            }, None))
+        finally:
+            scrapers.search_source_status = original_search
+            scrapers.enrich = original_enrich
+        self.assertIn("javdb", searched_sources)
+        self.assertNotIn("fc2", searched_sources)
+
+    def test_pending_fanart_is_written_to_exact_archive_folder(self):
+        original_file = library._ARTWORK_PENDING_FILE
+        original_pending = library._artwork_pending
+        original_loaded = library._artwork_pending_loaded
+        original_terminal_file = library._ARTWORK_TERMINAL_FILE
+        original_terminal = library._artwork_terminal
+        original_terminal_loaded = library._artwork_terminal_loaded
+        original_backfill = library._backfill_artwork
+        original_fetch = library._fetch_cover
+        original_notify = actor_scraper.notify_emby_folder
+        notified = []
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            target = root / "202608" / "DLDSS-509"
+            target.mkdir(parents=True)
+            (target / "DLDSS-509-poster.jpg").write_bytes(b"poster")
+            library._ARTWORK_PENDING_FILE = root / "pending.json"
+            library._artwork_pending = {}
+            library._artwork_pending_loaded = True
+            library._ARTWORK_TERMINAL_FILE = root / "terminal.json"
+            library._artwork_terminal = {}
+            library._artwork_terminal_loaded = True
+
+            async def fake_backfill(movie, *_args, **_kwargs):
+                movie["samples"] = ["https://source/fanart.jpg"]
+                return movie
+
+            async def fake_fetch(*_args, **_kwargs):
+                return b"fanart"
+
+            async def fake_notify(folder, _config):
+                notified.append(folder)
+                return {"triggered": True, "message": "ok"}
+
+            library._backfill_artwork = fake_backfill
+            library._fetch_cover = fake_fetch
+            actor_scraper.notify_emby_folder = fake_notify
+            try:
+                config = {"scrape_output_dir": str(root),
+                          "scrape_artwork_fallback_limit": 2,
+                          "emby_actor_sync_enabled": True}
+                self.assertTrue(library._queue_artwork_backfill(
+                    target, "DLDSS-509", {
+                        "cover": "https://source/poster.jpg",
+                        "_artwork_pending_sources": ["_download"],
+                    }, config))
+                library._artwork_pending[str(target)]["next_attempt"] = 0
+                result = asyncio.run(library._run_pending_artwork(config))
+            finally:
+                library._ARTWORK_PENDING_FILE = original_file
+                library._artwork_pending = original_pending
+                library._artwork_pending_loaded = original_loaded
+                library._ARTWORK_TERMINAL_FILE = original_terminal_file
+                library._artwork_terminal = original_terminal
+                library._artwork_terminal_loaded = original_terminal_loaded
+                library._backfill_artwork = original_backfill
+                library._fetch_cover = original_fetch
+                actor_scraper.notify_emby_folder = original_notify
+            self.assertEqual(result, 1)
+            self.assertEqual((target / "DLDSS-509-fanart.jpg").read_bytes(), b"fanart")
+            self.assertEqual(notified, [target])
+
+    def test_confirmed_no_fanart_does_not_enter_persistent_queue(self):
+        original_file = library._ARTWORK_PENDING_FILE
+        original_pending = library._artwork_pending
+        original_loaded = library._artwork_pending_loaded
+        original_terminal_file = library._ARTWORK_TERMINAL_FILE
+        original_terminal = library._artwork_terminal
+        original_terminal_loaded = library._artwork_terminal_loaded
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            target = root / "DLDSS-509"
+            target.mkdir()
+            (target / "DLDSS-509-poster.jpg").write_bytes(b"poster")
+            library._ARTWORK_PENDING_FILE = root / "pending.json"
+            library._artwork_pending = {}
+            library._artwork_pending_loaded = True
+            library._ARTWORK_TERMINAL_FILE = root / "terminal.json"
+            library._artwork_terminal = {}
+            library._artwork_terminal_loaded = True
+            try:
+                queued = library._queue_artwork_backfill(
+                    target, "DLDSS-509", {
+                        "cover": "https://source/poster.jpg", "samples": [],
+                        "_artwork_pending_sources": [],
+                    }, {"scrape_artwork_fallback_limit": 2})
+                self.assertFalse(queued)
+                self.assertEqual(library._artwork_pending, {})
+                self.assertIn(str(target), library._artwork_terminal)
+                self.assertFalse(library._queue_artwork_backfill(
+                    target, "DLDSS-509", None,
+                    {"scrape_artwork_fallback_limit": 2}))
+                self.assertTrue(library._queue_artwork_backfill(
+                    target, "DLDSS-509", None,
+                    {"scrape_artwork_fallback_limit": 2,
+                     "sources": ["javbus", "javdb", "jav321"]}))
+            finally:
+                library._ARTWORK_PENDING_FILE = original_file
+                library._artwork_pending = original_pending
+                library._artwork_pending_loaded = original_loaded
+                library._ARTWORK_TERMINAL_FILE = original_terminal_file
+                library._artwork_terminal = original_terminal
+                library._artwork_terminal_loaded = original_terminal_loaded
+
+    def test_transient_artwork_task_stops_after_three_retries(self):
+        original_file = library._ARTWORK_PENDING_FILE
+        original_pending = library._artwork_pending
+        original_loaded = library._artwork_pending_loaded
+        original_terminal_file = library._ARTWORK_TERMINAL_FILE
+        original_terminal = library._artwork_terminal
+        original_terminal_loaded = library._artwork_terminal_loaded
+        original_backfill = library._backfill_artwork
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            target = root / "DLDSS-509"
+            target.mkdir()
+            (target / "DLDSS-509-poster.jpg").write_bytes(b"poster")
+            key = str(target)
+            library._ARTWORK_PENDING_FILE = root / "pending.json"
+            library._artwork_pending = {key: {
+                "target_dir": key, "code": "DLDSS-509", "attempts": 2,
+                "next_attempt": 0,
+                "movie": {"cover": "https://source/poster.jpg",
+                          "_artwork_pending_sources": ["javdb"]},
+            }}
+            library._artwork_pending_loaded = True
+            library._ARTWORK_TERMINAL_FILE = root / "terminal.json"
+            library._artwork_terminal = {}
+            library._artwork_terminal_loaded = True
+
+            async def still_timeout(movie, *_args, **_kwargs):
+                movie["_artwork_pending_sources"] = ["javdb"]
+                return movie
+
+            library._backfill_artwork = still_timeout
+            try:
+                asyncio.run(library._run_pending_artwork({
+                    "scrape_output_dir": str(root),
+                    "scrape_artwork_fallback_limit": 2,
+                }))
+                self.assertNotIn(key, library._artwork_pending)
+            finally:
+                library._ARTWORK_PENDING_FILE = original_file
+                library._artwork_pending = original_pending
+                library._artwork_pending_loaded = original_loaded
+                library._ARTWORK_TERMINAL_FILE = original_terminal_file
+                library._artwork_terminal = original_terminal
+                library._artwork_terminal_loaded = original_terminal_loaded
+                library._backfill_artwork = original_backfill
+
+    def test_archive_index_finds_exact_hardlink_target_folder(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "downloads" / "DLDSS-509.H265.mp4"
+            target = root / "archive" / "202608" / "DLDSS-509" / "DLDSS-509.mp4"
+            source.parent.mkdir(parents=True)
+            target.parent.mkdir(parents=True)
+            source.write_bytes(b"video")
+            os.link(source, target)
+            idx = library._build_archive_index(str(root / "archive"))
+            found = library._archived_target_for_source(
+                source, source.stat().st_size, "DLDSS-509", idx)
+        self.assertEqual(found, target.parent)
 
 
 if __name__ == "__main__":

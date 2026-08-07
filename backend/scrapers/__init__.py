@@ -145,6 +145,26 @@ async def search(
     return _merge_lists(collected)[:max_results]
 
 
+async def search_source_status(query: str, mode: str, source: str,
+                               proxy: Optional[str] = None,
+                               max_results: int = 3) -> tuple[list[dict], str]:
+    """Search one source and preserve whether it completed, timed out, or failed."""
+    mod = SOURCE_MODULES.get(source)
+    if not mod:
+        return [], "invalid"
+    try:
+        rows = await asyncio.wait_for(
+            mod.search_list(query, mode, proxy, max_results),
+            timeout=_PER_SOURCE_TIMEOUT)
+        return (rows if isinstance(rows, list) else []), "ok"
+    except asyncio.TimeoutError:
+        print(f"[source] {source} 超时（>{_PER_SOURCE_TIMEOUT}s），留待有限重试")
+        return [], "timeout"
+    except Exception as e:
+        print(f"[source] {source} 失败: {e!r}")
+        return [], "error"
+
+
 # 走 FlareSolverr 的来源（JavDB/FC2）专用「全局串行闸」。
 # FlareSolverr 是单浏览器实例，不支持并发——多个请求同时打过去只会在它内部排队、
 # 互相挤到全部超时。用进程级 Semaphore(1) 让这些请求一个一个来；
@@ -154,7 +174,8 @@ _FLARESOLVERR_SOURCES = ("javdb", "fc2")
 
 
 async def enrich(items: list[dict], proxy: Optional[str] = None,
-                 concurrency: int = 10, per_timeout: float = 9.0) -> list[dict]:
+                 concurrency: int = 10, per_timeout: float = 9.0,
+                 with_status: bool = False) -> list:
     """
     按需抓取详情。items 为待补全的条目（需含 url + source），
     返回与输入等长、顺序一致的详情列表（失败/超时项为 None）。
@@ -181,11 +202,14 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
         pass
 
     async def one(item):
+        def result(value, status):
+            return (value, status) if with_status else value
+
         url = item.get("url", "")
         source = (item.get("source", "") or "").lower()
         mod = SOURCE_MODULES.get(source)
         if not mod or not url:
-            return None
+            return result(None, "invalid")
         # 缓存命中即直接返回——前台预抓/点开详情/刮削回源共用这份缓存，
         # 「后台已抓过的内容刮削直接拿，没抓过才真去抓」。
         cached = _detailcache.get(url)
@@ -197,7 +221,7 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
                             for actor in cached.get("actors") or [])):
             cached = None
         if cached is not None:
-            return cached
+            return result(cached, "ok")
         use_fs = source in _FLARESOLVERR_SOURCES and flaresolverr_on
         # FlareSolverr 来源：全局串行闸 + 32s 超时；其余：并发信号量 + 快速超时
         gate = _FLARESOLVERR_GATE if use_fs else sem
@@ -208,13 +232,13 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
                 res = await asyncio.wait_for(mod.fetch_detail(url, proxy), timeout=timeout)
                 if res:                       # 仅缓存成功结果，失败不缓存以便重试
                     _detailcache.put(url, res)
-                return res
+                return result(res, "ok" if res else "empty")
             except asyncio.TimeoutError:
                 print(f"[enrich] {source} {url} timeout")
-                return None
+                return result(None, "timeout")
             except Exception as e:
                 print(f"[enrich] {source} {url} failed: {e!r}")
-                return None
+                return result(None, "error")
 
     return await asyncio.gather(*[one(it) for it in items])
 

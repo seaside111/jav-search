@@ -121,6 +121,32 @@ async def _verify_primary(client: httpx.AsyncClient, base: str, headers: dict,
         (image.get("ImageType") or "").casefold() == "primary" for image in payload)
 
 
+async def notify_media_paths(url: str, api_key: str, paths: list[str],
+                             update_type: str = "Updated") -> dict:
+    """Notify Emby about only the supplied media paths; never start a full-library scan."""
+    base, token = normalize_url(url), (api_key or "").strip()
+    unique = []
+    for value in paths or []:
+        path = (value or "").strip()
+        if path and path not in unique:
+            unique.append(path)
+    if not base or not token or not unique:
+        return {"triggered": False, "message": "Emby 未配置或缺少当前影片路径"}
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.post(
+                f"{base}/Library/Media/Updated",
+                headers={**_headers(token), "Content-Type": "application/json"},
+                json={"Updates": [{"Path": path, "UpdateType": update_type}
+                                  for path in unique]})
+            if response.status_code in (401, 403):
+                return {"triggered": False, "message": "API Key 没有权限通知当前影片目录"}
+            response.raise_for_status()
+        return {"triggered": True, "message": "已通知当前影片目录"}
+    except Exception as e:
+        return {"triggered": False, "message": f"Emby 定向通知失败：{e}"}
+
+
 async def sync_person_images(url: str, api_key: str, portraits: list[dict],
                              media_paths: Optional[list[str]] = None,
                              poll_delays: tuple[float, ...] = (1, 2, 3, 5, 8, 13, 20)) -> dict:

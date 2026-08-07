@@ -5,7 +5,7 @@ JavDB 刮削器（V1.4.2 — 重点优化）
   1. 反爬增强：自动携带 over18 / locale / theme 等 Cookie，补全更像浏览器的请求头，
      失败自动重试，从根上解决「Cloudflare 拦截 / 年龄门 → 列表 0 条」的问题。
   2. 可选 FlareSolverr：配置了 javdb_flaresolverr_url 时，所有 JavDB 请求改走
-     FlareSolverr 拿到过盾后的 HTML（带 cf_clearance），适合服务器自建 CF 突破服务。
+     FlareSolverr 拿到过盾后的 HTML，适合服务器自建 CF 突破服务。
   3. 连通诊断 diagnose()：返回 HTTP 状态 / 是否命中 CF 盾 / 出口 IP 所在国 / 解析条数，
      用于判断「是否需要日本 IP 才能访问」。
   4. 详情抓取扩充：磁力链、样品图、评分人数、演员、片商/发行/系列等字段更完整，
@@ -146,6 +146,16 @@ def _merge_cookies(extra_cookie: str = "") -> dict:
     return cookies
 
 
+def _flaresolverr_cookies() -> dict:
+    """只向 FlareSolverr 传递无会话状态的站点偏好 Cookie。
+
+    浏览器导出的 cf_clearance 与生成它的浏览器指纹、User-Agent 和出口 IP 绑定，
+    交给 FlareSolverr 的独立 Chromium 会话通常无效，反而会让挑战持续失败。
+    _jdb_session 等登录 Cookie 也不应进入 FlareSolverr 的请求日志。
+    """
+    return dict(BASE_COOKIES)
+
+
 def _is_cf_challenge(html: str, status: int = 200) -> bool:
     """
     判断返回内容是否为 Cloudflare 验证页 / 拦截页（而非真正的 JavDB 页面）。
@@ -200,14 +210,17 @@ async def _fetch_html(url: str, proxy: Optional[str], opts: Optional[dict] = Non
     if flaresolverr:
         # FlareSolverr 用的代理：默认复用主代理；关掉则让其走自身网络出口（直连）
         fs_proxy = proxy if opts.get("flaresolverr_use_proxy", True) else None
+        # 手工 Cookie 仍供 httpx 直连使用；FlareSolverr 必须自行取得与自身浏览器
+        # 指纹和出口 IP 匹配的 clearance，避免导入不匹配的浏览器会话。
+        fs_cookies = _flaresolverr_cookies()
         html, status, err = await _fetch_via_flaresolverr(url, flaresolverr, fs_proxy,
-                                                          cookies, priority)
+                                                          fs_cookies, priority)
         # 带 Cookie 报错时，自动重试一次不带 Cookie：
         # 某些 FlareSolverr 版本对 cookies 字段敏感会直接 500，去掉 Cookie 往往就能过盾
         # （代价是可能停在年龄门，但至少能拿到页面、由上层识别）。
         # 仅在「确实连上了」FlareSolverr 却报错时重试（err 形如 'flaresolverr: ...'）；
         # 连不上（'flaresolverr 异常: ConnectTimeout' 等）再探一轮也是白费，跳过。
-        if err and cookies and "flaresolverr:" in err:
+        if err and fs_cookies and "flaresolverr:" in err:
             html2, status2, err2 = await _fetch_via_flaresolverr(url, flaresolverr, fs_proxy,
                                                                  None, priority)
             if not err2:

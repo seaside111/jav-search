@@ -646,9 +646,9 @@
         <div class="setting-group">
           <h3>多来源图片补全</h3>
           <div class="setting-row">
-            <label class="setting-label">最多补查详情源</label>
-            <input class="setting-input" id="cfgArtworkFallbackLimit" type="number" value="2" min="0" max="4">
-            <span class="setting-hint">图片齐全时不请求；缺 poster/fanart 时逐源尝试、命中即停。0 表示关闭。</span>
+            <label class="setting-label">最多有效补查来源</label>
+            <input class="setting-input" id="cfgArtworkFallbackLimit" type="number" value="2" min="0" max="6">
+            <span class="setting-hint">图片齐全时不请求；超时、异常或没有返回可识别条目不占额度，会继续尝试 JAV321 等后续来源；命中 fanart 即停。0 表示关闭。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">DMM/FANZA API ID</label>
@@ -671,12 +671,12 @@
           <div class="setting-row">
             <label class="setting-label">FlareSolverr 复用代理</label>
             <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgJavdbFlareProxy" checked> 让 FlareSolverr 走主代理</label>
-            <span class="setting-hint">默认开。若 FlareSolverr 报 ERR_NO_SUPPORTED_PROXIES，或它自带网络出口（如 WARP），请关掉走直连</span>
+            <span class="setting-hint">默认开。若 FlareSolverr 报 ERR_NO_SUPPORTED_PROXIES，或挑战持续超时，可关掉后测试其自身出口。FlareSolverr 请使用 warning/error 日志级别，info 会打印代理认证信息</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">JavDB Cookie</label>
             <input class="setting-input" id="cfgJavdbCookie" type="text" placeholder="cf_clearance=xxx; _jdb_session=yyy">
-            <span class="setting-hint">可选。浏览器登录 JavDB 后导出的 Cookie，用于过盾/提升抓取成功率</span>
+            <span class="setting-hint">可选，供增强直连使用。浏览器导出的 cf_clearance 与浏览器指纹/出口 IP 绑定，不会转交给 FlareSolverr；FlareSolverr 会自行建立匹配其浏览器的通行状态</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">样品图预取</label>
@@ -2640,7 +2640,7 @@ async function saveSettings() {
   const payload = {
     proxy: document.getElementById('cfgProxy').value.trim(),
     sources,
-    scrape_artwork_fallback_limit: Math.max(0, Math.min(parseInt(document.getElementById('cfgArtworkFallbackLimit').value) || 0, 4)),
+    scrape_artwork_fallback_limit: Math.max(0, Math.min(parseInt(document.getElementById('cfgArtworkFallbackLimit').value) || 0, 6)),
     dmm_api_id: document.getElementById('cfgDmmApiId').value.trim(),
     dmm_affiliate_id: document.getElementById('cfgDmmAffiliateId').value.trim(),
     javdb_flaresolverr_url: document.getElementById('cfgJavdbFlare').value.trim(),
