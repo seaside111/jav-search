@@ -26,6 +26,7 @@ import heapq
 import socket
 import asyncio
 import itertools
+import uuid
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -355,6 +356,7 @@ async def _request_one(endpoint: str, url: str, proxy: Optional[str],
     if not ep.endswith("/v1"):
         ep += "/v1"
     payload = {"cmd": "request.get", "url": url, "maxTimeout": max_timeout}
+    session = ""
     if proxy:
         purl, puser, ppass = split_proxy_auth(proxy)
         pobj = {"url": purl}
@@ -362,7 +364,13 @@ async def _request_one(endpoint: str, url: str, proxy: Optional[str],
             pobj["username"] = puser
         if ppass:
             pobj["password"] = ppass
-        payload["proxy"] = pobj
+        # request.get only supports an unauthenticated proxy.  FlareSolverr's
+        # authenticated-proxy API is session based: create the browser with
+        # the proxy, then make the request through that session.
+        if puser or ppass:
+            session = f"jav-search-{uuid.uuid4().hex}"
+        else:
+            payload["proxy"] = pobj
     # 仅传 name/value（不带 domain）：部分 FlareSolverr 版本对带 domain 的 cookie 会报 500。
     if cookies:
         payload["cookies"] = [{"name": k, "value": v} for k, v in cookies.items()]
@@ -370,7 +378,25 @@ async def _request_one(endpoint: str, url: str, proxy: Optional[str],
     timeout = httpx.Timeout(connect=6.0, read=read_timeout, write=read_timeout, pool=read_timeout)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(ep, json=payload)
+            if session:
+                create_payload = {
+                    "cmd": "sessions.create", "session": session, "proxy": pobj,
+                }
+                create_resp = await client.post(ep, json=create_payload)
+                create_data = create_resp.json()
+                if (create_resp.status_code != 200 or
+                        (create_data.get("status") or "").lower() == "error"):
+                    detail = create_data.get("message") or f"HTTP {create_resp.status_code}"
+                    return "", create_resp.status_code, f"flaresolverr: {detail}", True, True
+                payload["session"] = session
+            try:
+                resp = await client.post(ep, json=payload)
+            finally:
+                if session:
+                    try:
+                        await client.post(ep, json={"cmd": "sessions.destroy", "session": session})
+                    except Exception:
+                        pass
     except (httpx.ConnectError, httpx.ConnectTimeout) as e:
         # 没连上：地址问题，可换候选；实例健康度未知 → 计为不健康（连不上本就该熔断）
         return "", 0, f"flaresolverr 异常: {type(e).__name__}: {e}", False, False

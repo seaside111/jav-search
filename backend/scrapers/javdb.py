@@ -521,15 +521,27 @@ def _parse_detail(html: str, url: str) -> Optional[dict]:
             tags.append(t)
     info["tags"] = tags
 
-    # 样品图（预览图）
-    samples = []
-    for a in soup.select("div.preview-images a.tile-item, .tile-images.preview-images a"):
-        href = a.get("href") or ""
+    # 样品图（预览图）。JavDB 当前页面同时存在旧 tile-item、fancybox
+    # 灯箱和懒加载 picture/source 标记；优先原图链接并去重。
+    samples, sample_seen = [], set()
+    selectors = (
+        "div.preview-images a[href], .tile-images.preview-images a[href], "
+        "a[data-fancybox='gallery'][href], a[data-fancybox^='preview'][href]"
+    )
+    for a in soup.select(selectors):
         img = a.find("img")
-        thumb = (img.get("src") or img.get("data-src") or "") if img else ""
-        full = href or thumb
-        if full:
-            samples.append(_abs(full))
+        source = a.find("source")
+        candidates = [
+            a.get("href"), a.get("data-src"),
+            img.get("data-src") if img else "", img.get("data-original") if img else "",
+            source.get("srcset") if source else "", img.get("src") if img else "",
+        ]
+        full = next((str(v).split(",", 1)[0].strip().split(" ", 1)[0]
+                     for v in candidates if v and _looks_like_image(str(v))), "")
+        full = _abs(full) if full else ""
+        if full and full not in sample_seen:
+            sample_seen.add(full)
+            samples.append(full)
     info["samples"] = samples[:30]
 
     # 磁力链
@@ -587,6 +599,38 @@ async def _probe_exit_ip(proxy: Optional[str]) -> dict:
         return {"error": f"ip-api HTTP {resp.status_code}"}
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
+
+
+async def _probe_flaresolverr_exit_ip(flaresolverr_url: str,
+                                      proxy: Optional[str]) -> dict:
+    """Measure the browser's real egress, not the backend httpx process."""
+    html, _status, error = await _fetch_via_flaresolverr(
+        "https://api.ipify.org?format=json", flaresolverr_url, proxy,
+        _flaresolverr_cookies(), PRIO_DETAIL)
+    if error or not html:
+        return {"error": error or "FlareSolverr 未返回出口 IP"}
+    text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+    match = re.search(r'"ip"\s*:\s*"([^" ]+)"', text)
+    if not match:
+        match = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text)
+    if not match:
+        return {"error": "无法从 FlareSolverr 响应识别出口 IP"}
+    ip = match.group(1) if match.lastindex else match.group(0)
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(
+                f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,query,isp")
+        data = resp.json()
+        if resp.status_code == 200 and data.get("status") == "success":
+            return {
+                "ip": data.get("query", ip), "country": data.get("country", ""),
+                "country_code": data.get("countryCode", ""), "isp": data.get("isp", ""),
+                "is_japan": data.get("countryCode", "") == "JP",
+                "measured_via": "flaresolverr",
+            }
+    except Exception:
+        pass
+    return {"ip": ip, "measured_via": "flaresolverr"}
 
 
 def _inspect_page(html: str) -> dict:
@@ -654,7 +698,9 @@ async def diagnose(proxy: Optional[str] = None) -> dict:
     test_url = f"{JAVDB_BASE}/censored?sort_type=0"
 
     html, status, err = await _fetch_html(test_url, proxy, opts, retries=1)
-    exit_ip = await _probe_exit_ip(proxy)
+    fs_proxy = proxy if opts.get("flaresolverr_use_proxy", True) else None
+    exit_ip = (await _probe_flaresolverr_exit_ip(fs_effective, fs_proxy)
+               if fs_effective else await _probe_exit_ip(proxy))
 
     # FlareSolverr 实际连通的地址（手填走智能适配结果；留空走自动探测结果）：用于回显
     fs_endpoint = (_fs_resolved(fs_raw) or _normalize_fs_url(fs_raw)) if fs_raw else fs_auto

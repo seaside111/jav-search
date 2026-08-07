@@ -14,11 +14,61 @@ import emby
 import qbittorrent
 import transmission
 import main
-from scrapers import _javu_base, _javbus_base, jav321, dmm, javdb
+from scrapers import _javu_base, _javbus_base, _fsgate, jav321, dmm, javdb
 from config_manager import DEFAULT_CONFIG
 
 
 class JavDbFlareSolverrTests(unittest.TestCase):
+    def test_authenticated_proxy_uses_flaresolverr_session(self):
+        calls = []
+
+        class Response:
+            status_code = 200
+            def __init__(self, payload): self.payload = payload
+            def json(self): return self.payload
+
+        class Client:
+            def __init__(self, **_kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_args): return False
+            async def post(self, _url, json):
+                calls.append(json)
+                if json["cmd"] == "request.get":
+                    return Response({"status": "ok", "solution": {
+                        "status": 200, "response": "<html>ok</html>"}})
+                return Response({"status": "ok", "session": json.get("session")})
+
+        with mock.patch.object(_fsgate.httpx, "AsyncClient", Client):
+            html, status, error, connected, healthy = asyncio.run(
+                _fsgate._request_one(
+                    "http://fs:8191", "https://javdb.com",
+                    "http://user:pass@proxy:7890", None, 40000, 70))
+
+        self.assertEqual((status, error, connected, healthy), (200, "", True, True))
+        self.assertIn("ok", html)
+        self.assertEqual([call["cmd"] for call in calls],
+                         ["sessions.create", "request.get", "sessions.destroy"])
+        self.assertEqual(calls[0]["proxy"], {
+            "url": "http://proxy:7890", "username": "user", "password": "pass"})
+        self.assertNotIn("proxy", calls[1])
+        self.assertEqual(calls[1]["session"], calls[0]["session"])
+
+    def test_javdb_current_preview_markup_returns_all_original_images(self):
+        html = """
+        <html><title>ABC-123</title><h2 class="title"><strong>ABC-123 title</strong></h2>
+        <a data-fancybox="gallery" href="https://img.test/sample-1.jpg">
+          <img data-src="https://img.test/thumb-1.jpg"></a>
+        <a data-fancybox="preview-gallery" href="/samples/sample-2.webp">
+          <picture><source srcset="/thumb-2.webp 1x, /thumb-2@2x.webp 2x"></picture></a>
+        <a data-fancybox="gallery" href="https://img.test/sample-1.jpg"></a>
+        </html>
+        """
+        detail = javdb._parse_detail(html, "https://javdb.com/v/abc")
+        self.assertEqual(detail["samples"], [
+            "https://img.test/sample-1.jpg",
+            "https://javdb.com/samples/sample-2.webp",
+        ])
+
     def test_browser_session_cookies_are_not_forwarded_to_flaresolverr(self):
         calls = []
 
