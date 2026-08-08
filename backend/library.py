@@ -204,6 +204,58 @@ _monitor_state: dict = {
     "message": "未启动",
 }
 
+# 按番号聚合的任务摘要：失败记录保留更久，重试同一番号时更新原记录。
+_TASKS_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "scrape_tasks.json"
+_tasks: dict[str, dict] = {}
+_tasks_loaded = False
+_TASK_SUCCESS_MAX = 300
+_TASK_FAILURE_MAX = 2000
+
+
+def _load_tasks() -> None:
+    global _tasks_loaded
+    if _tasks_loaded:
+        return
+    _tasks_loaded = True
+    try:
+        data = json.loads(_TASKS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            _tasks.update({str(k): v for k, v in data.items() if isinstance(v, dict)})
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        _log(f"加载任务记录失败（忽略）：{exc}")
+
+
+def _save_tasks() -> None:
+    try:
+        _TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _TASKS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(_tasks, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_TASKS_FILE)
+    except Exception as exc:
+        _log(f"保存任务记录失败（忽略）：{exc}")
+
+
+def _task_update(code: str, **changes) -> None:
+    code = (code or "").strip() or "未知番号"
+    _load_tasks()
+    previous = _tasks.get(code) or {}
+    item = dict(previous or {"code": code, "created_at": datetime.now().isoformat(timespec="seconds")})
+    filtered = {k: v for k, v in changes.items() if v is not None}
+    if previous and all(previous.get(k) == v for k, v in filtered.items()):
+        return
+    item.update(filtered)
+    item["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    _tasks[code] = item
+    # 成功记录较少保留，失败记录保留更充分，避免失败排查信息被快速淘汰。
+    ordered = sorted(_tasks.values(), key=lambda x: x.get("updated_at", ""), reverse=True)
+    success = [x for x in ordered if x.get("status") == "success"][:_TASK_SUCCESS_MAX]
+    failed = [x for x in ordered if x.get("status") != "success"][:_TASK_FAILURE_MAX]
+    _tasks.clear()
+    _tasks.update({x.get("code", "未知番号"): x for x in success + failed})
+    _save_tasks()
+
 
 # ─────────────────────────────────────────
 # 请求模型
@@ -2595,6 +2647,9 @@ async def _scan_once(config: dict) -> int:
             n_waiting += 1
             _size_history.pop(fp, None)
             progress = float(torrent_task.get("progress") or 0.0) * 100
+            _task_update(_recognize_code(vf, watch) or vf.stem, file=vf.name, filepath=fp,
+                         status="running", current="downloading", download_status="downloading",
+                         download_progress=round(progress, 1))
             _log(f"下载器报告任务未完成，跳过：{vf.name}（{progress:.1f}% / "
                  f"状态 {torrent_task.get('state', '未知')}）")
             continue
@@ -2602,6 +2657,8 @@ async def _scan_once(config: dict) -> int:
         if not torrent_task and _is_incomplete(vf):
             n_incomplete += 1
             _size_history.pop(fp, None)
+            _task_update(_recognize_code(vf, watch) or vf.stem, file=vf.name, filepath=fp,
+                         status="running", current="downloading", download_status="downloading")
             continue
         try:
             st = vf.stat()
@@ -2701,15 +2758,30 @@ async def _scan_once(config: dict) -> int:
                       else f"手动文件大小稳定 {stable_count}次")
         _log(f"判定下载完成（{reason}），准备处理：{vf.name}（{round(size/1024/1024,1)}MB）")
         _monitor_state["message"] = f"正在刮削 {vf.name}"
+        task_code = _recognize_code(vf, watch) or vf.stem
+        _task_update(task_code, file=vf.name, filepath=fp, status="running",
+                     current="scraping", download_status="completed",
+                     scrape_status="running", archive_status="pending")
         rec = None
         try:
             rec = await _process_completed_file(vf, config)
             _record_recent(rec)
+            final_status = "success" if rec.get("scrape_ok") and (
+                rec.get("moved") or rec.get("note") or not config.get("archive_enabled", True)) else "failed"
+            _task_update(rec.get("code") or task_code, file=rec.get("file") or vf.name,
+                         filepath=fp, status=final_status, current="completed",
+                         scrape_status="success" if rec.get("scrape_ok") else "failed",
+                         archive_status="success" if rec.get("moved") else ("skipped" if rec.get("note") else "failed"),
+                         error=rec.get("scrape_error") or rec.get("archive_error") or "",
+                         record=rec)
         except Exception as e:
             _log(f"处理文件异常：{vf.name} — {e}")
-            _record_recent({"file": vf.name, "scrape_ok": False,
-                            "scrape_error": str(e), "moved": False,
-                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+            failed = {"file": vf.name, "scrape_ok": False, "scrape_error": str(e),
+                      "moved": False, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            _record_recent(failed)
+            _task_update(task_code, file=vf.name, filepath=fp, status="failed",
+                         current="failed", scrape_status="failed", archive_status="failed",
+                         error=str(e), record=failed)
         # 进程内始终标记，避免本次运行内重复处理；
         # 仅在「确实归档成功」时才持久化落盘（hardlink/copy 保留原文件→重启后据此跳过）。
         # 归档失败/未开启归档时不落盘：留待重启后重试（避免站点临时不可达被永久跳过；
@@ -2809,6 +2881,31 @@ def ensure_monitor():
 async def api_monitor_status():
     """查看后台刮削监控状态"""
     return dict(_monitor_state)
+
+
+@router.get("/tasks")
+async def api_tasks(status: str = "", limit: int = 200):
+    """返回按番号聚合的任务摘要；只读展示，不影响后台任务。"""
+    _load_tasks()
+    wanted = {x.strip().lower() for x in (status or "").split(",") if x.strip()}
+    rows = sorted(_tasks.values(), key=lambda x: x.get("updated_at", ""), reverse=True)
+    if wanted:
+        rows = [x for x in rows if str(x.get("status", "")).lower() in wanted]
+    return {"success": True, "total": len(rows), "tasks": rows[:max(1, min(int(limit or 200), 2000))]}
+
+
+@router.delete("/tasks")
+async def api_tasks_delete(codes: str = "", status: str = ""):
+    """仅删除任务摘要，不停止任务、不删除源文件或归档文件。"""
+    _load_tasks()
+    code_set = {x.strip() for x in (codes or "").split(",") if x.strip()}
+    status_set = {x.strip().lower() for x in (status or "").split(",") if x.strip()}
+    before = len(_tasks)
+    for code, item in list(_tasks.items()):
+        if (code_set and code in code_set) or (status_set and str(item.get("status", "")).lower() in status_set):
+            _tasks.pop(code, None)
+    _save_tasks()
+    return {"success": True, "deleted": before - len(_tasks)}
 
 
 @router.post("/scrape/monitor/refresh")

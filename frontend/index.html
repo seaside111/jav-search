@@ -530,6 +530,11 @@
   #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px); background: #222234; border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 20px; font-size: 13px; color: var(--text-main); z-index: 500; transition: transform .3s; pointer-events: none; white-space: nowrap; }
   #toast.show { transform: translateX(-50%) translateY(0); }
 
+  .tasks-page { display:none; padding:22px; max-width:1100px; margin:0 auto; }
+  .tasks-page.active { display:block; }
+  .tasks-page-head { display:flex; align-items:center; gap:12px; margin-bottom:16px; }
+  .tasks-page-head h2 { margin:0; font-size:20px; }
+
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -568,7 +573,8 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.8</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.9</div>
+  <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="3"/>
@@ -583,6 +589,24 @@
     退出
   </button>
 </header>
+
+<div class="tasks-page" id="tasksPage">
+  <div class="tasks-page-head">
+    <button class="btn" onclick="closeTasks()">← 返回搜索</button>
+    <h2>任务状态</h2>
+  </div>
+  <div class="settings-panel" style="width:100%;max-width:none;height:auto">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:14px 18px;border-bottom:1px solid var(--border)">
+      <button class="settings-tab active task-filter" data-status="" onclick="loadTasks('')">全部</button>
+      <button class="settings-tab task-filter" data-status="running" onclick="loadTasks('running')">运行中</button>
+      <button class="settings-tab task-filter" data-status="success" onclick="loadTasks('success')">成功</button>
+      <button class="settings-tab task-filter" data-status="failed" onclick="loadTasks('failed')">失败</button>
+      <button class="btn" style="margin-left:auto" onclick="clearTaskLogs('success')">清理成功</button>
+      <button class="btn" onclick="clearTaskLogs('failed')">清理失败</button>
+    </div>
+    <div class="panel-body" id="taskList"><div class="setting-hint">暂无任务记录</div></div>
+  </div>
+</div>
 
 <main>
   <div class="status-bar">
@@ -2506,6 +2530,45 @@ function renderScrapeRecent(recent) {
   }).join('');
 }
 
+let taskTimer = null;
+let taskStatusFilter = '';
+function openTasks() {
+  document.getElementById('tasksPage').classList.add('active');
+  document.querySelector('main').style.display = 'none';
+  loadTasks(taskStatusFilter);
+  if (!taskTimer) taskTimer = setInterval(() => loadTasks(taskStatusFilter), 4000);
+}
+function closeTasks() {
+  document.getElementById('tasksPage').classList.remove('active');
+  document.querySelector('main').style.display = '';
+  if (taskTimer) { clearInterval(taskTimer); taskTimer = null; }
+}
+async function loadTasks(status) {
+  taskStatusFilter = status || '';
+  document.querySelectorAll('.task-filter').forEach(b => b.classList.toggle('active', b.dataset.status === taskStatusFilter));
+  try {
+    const resp = await fetch(`${API}/api/library/tasks?status=${encodeURIComponent(taskStatusFilter)}`, {cache:'no-store'});
+    const data = await safeJson(resp);
+    const box = document.getElementById('taskList');
+    if (!data.tasks?.length) { box.innerHTML = '<div class="setting-hint">暂无任务记录</div>'; return; }
+    const badge = {running:'运行中', success:'成功', failed:'失败'};
+    box.innerHTML = data.tasks.map(t => {
+      const failed = t.status === 'failed';
+      const color = failed ? 'var(--red)' : (t.status === 'success' ? 'var(--green)' : 'var(--accent)');
+      return `<div style="padding:10px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;gap:8px"><strong>${escHtml(t.code || '未知番号')}</strong><span style="color:${color}">${badge[t.status] || t.status || '未知'}</span></div>
+        <div class="setting-hint">${escHtml(t.current || '')} · 刮削 ${escHtml(t.scrape_status || '—')} · 归档 ${escHtml(t.archive_status || '—')} · ${escHtml(t.updated_at || '')}</div>
+        ${failed ? `<div style="color:var(--red);font-size:12px;margin-top:4px">${escHtml(t.error || '任务失败')}</div>` : ''}
+      </div>`;
+    }).join('');
+  } catch (e) { document.getElementById('taskList').innerHTML = `<div class="setting-hint">任务状态获取失败：${escHtml(e.message)}</div>`; }
+}
+async function clearTaskLogs(status) {
+  if (!confirm(`确定清理${status === 'failed' ? '失败' : '成功'}任务记录吗？不会影响后台任务和媒体文件。`)) return;
+  await fetch(`${API}/api/library/tasks?status=${status}`, {method:'DELETE'});
+  loadTasks(taskStatusFilter);
+}
+
 async function runScrapeOnce() {
   const msg = document.getElementById('scrapeRunMsg');
   msg.style.color = 'var(--text-muted)';
@@ -3078,7 +3141,7 @@ async function checkVersion() {
   try {
     const resp = await fetch(`${API}/api/version`, { cache: 'no-store' });
     const d = await safeJson(resp);
-    chip.textContent = 'v' + (d.current || '1.4.6.8');
+    chip.textContent = 'v' + (d.current || '1.4.6.9');
     if (d.update_available && d.latest) {
       chip.classList.add('has-update', 'clickable');
       chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;
