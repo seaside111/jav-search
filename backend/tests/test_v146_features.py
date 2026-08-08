@@ -1285,6 +1285,28 @@ class NamingAndTrackerTests(unittest.TestCase):
         self.assertEqual(name, "ABC-123 中文标题 葵つかさ")
         self.assertIn("葵つかさ", name)
 
+    def test_long_title_uses_last_sentence_boundary_and_keeps_actor(self):
+        config = {"scrape_folder_naming": "code_title_actor",
+                  "scrape_folder_title_translate": True,
+                  "scrape_folder_actor_mode": "first"}
+        with mock.patch.object(library, "_folder_name_limit", return_value=25):
+            name = library._archive_folder_name(
+                "ABC-123", "", "第一段。第二段。第三段很长很长", [{"name": "ActorA"}], config)
+        self.assertLessEqual(len(name), 42)
+        self.assertIn("。...", name)
+        self.assertTrue(name.endswith("ActorA"))
+
+    def test_long_title_falls_back_to_comma_then_character_cut(self):
+        config = {"scrape_folder_naming": "code_title",
+                  "scrape_folder_title_translate": True}
+        with mock.patch.object(library, "_folder_name_limit", return_value=15):
+            comma = library._archive_folder_name("ABC-123", "", "一,二,三,四,五,六", [], config)
+            plain = library._archive_folder_name("ABC-123", "", "abcdefghijklmnopqrstuv", [], config)
+        self.assertLessEqual(len(comma), 20)
+        self.assertIn("...", comma)
+        self.assertEqual(len(plain), 15)
+        self.assertTrue(plain.endswith("..."))
+
     def test_archive_transfer_same_path_never_deletes_movie(self):
         with tempfile.TemporaryDirectory() as raw:
             movie = Path(raw) / "ABC-123.mp4"

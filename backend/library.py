@@ -893,9 +893,44 @@ async def _save_actor_images(movie: dict, config: dict, proxy: Optional[str],
     return saved
 
 
+def _folder_name_limit() -> int:
+    """Return the component-name limit of the current filesystem.
+
+    POSIX exposes this through ``PC_NAME_MAX``.  Windows and filesystems that
+    do not expose it use the common 255-byte component limit.
+    """
+    try:
+        limit = int(os.pathconf(os.getcwd(), "PC_NAME_MAX"))
+        if limit > 0:
+            return limit
+    except (AttributeError, OSError, ValueError):
+        pass
+    return 255
+
+
+def _truncate_title_for_folder(title: str, available: int) -> str:
+    """Shorten a title to *available* characters, preferring sentence breaks."""
+    if available <= 0:
+        return ""
+    if len(title) <= available:
+        return title
+    ellipsis = "..."
+    if available <= len(ellipsis):
+        return ellipsis[:available]
+    keep = available - len(ellipsis)
+    head = title[:keep]
+    # Prefer the last sentence boundary that still fits, then comma-like
+    # boundaries.  Include the punctuation and replace the remaining tail.
+    for marks in ("。．.", "，,"):
+        boundary = max((head.rfind(mark) for mark in marks), default=-1)
+        if boundary >= 0:
+            return title[:boundary + 1].rstrip() + ellipsis
+    return head.rstrip() + ellipsis
+
+
 def _archive_folder_name(code: str, title_original: str, title_translated: str,
                          actors: list, config: dict) -> str:
-    """构造稳定且跨平台安全的影片文件夹名。"""
+    """构造稳定且跨平台安全的影片文件夹名，并处理超长标题。"""
     safe_code = _safe_name(code) if code else "unknown"
     mode = config.get("scrape_folder_naming", "code")
     names = [(a.get("name") or "").strip() for a in (actors or [])]
@@ -905,9 +940,11 @@ def _archive_folder_name(code: str, title_original: str, title_translated: str,
     else:
         names = names[:7]
     suffix = ""
+    title = ""
     if mode == "code_title":
         use_translated = config.get("scrape_folder_title_translate", False)
-        suffix = title_translated if use_translated else title_original
+        title = title_translated if use_translated else title_original
+        suffix = title
     elif mode == "code_title_actor":
         use_translated = config.get("scrape_folder_title_translate", False)
         title = title_translated if use_translated else title_original
@@ -916,10 +953,31 @@ def _archive_folder_name(code: str, title_original: str, title_translated: str,
         suffix = " ".join(names)
     elif mode == "actor":
         actor_name = _safe_name(" ".join(names)) if names else ""
-        return (actor_name or safe_code)[:150].rstrip(" .")
+        return (actor_name or safe_code)[:_folder_name_limit()].rstrip(" .")
     suffix = _safe_name(suffix.strip()) if (suffix or "").strip() else ""
-    # 留出年月及文件名长度；缺元数据时稳定回退纯番号。
-    return (f"{safe_code} {suffix}" if suffix else safe_code)[:150].rstrip(" .")
+    base = safe_code
+    limit = _folder_name_limit()
+    if len(base) >= limit:
+        return base[:limit].rstrip(" .") or safe_code[:limit]
+    if not suffix:
+        return base
+
+    # For title modes reserve the actor portion first.  This makes the
+    # length calculation include actors instead of truncating them by accident.
+    actor_suffix = " ".join(names)
+    if mode == "code_title_actor" and actor_suffix:
+        fixed = len(base) + 1 + len(actor_suffix) + 1
+        title_budget = max(0, limit - fixed)
+        short_title = _truncate_title_for_folder(_safe_name(title.strip()), title_budget)
+        suffix = " ".join(part for part in (short_title, actor_suffix) if part)
+    elif mode == "code_title":
+        title_budget = max(0, limit - len(base) - 1)
+        suffix = _truncate_title_for_folder(suffix, title_budget)
+
+    result = f"{base} {suffix}" if suffix else base
+    if len(result) > limit:
+        result = (result[:max(0, limit - 3)].rstrip(" .") + "...") if limit >= 3 else result[:limit]
+    return result or base[:limit].rstrip(" .")
 
 
 async def _fetch_cover(url: str, proxy: Optional[str]) -> Optional[bytes]:
