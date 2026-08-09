@@ -1,4 +1,4 @@
-# JAV Search · v1.4.6.13
+# JAV Search · v1.4.6.14
 
 运行在群晖 Docker 上的日本成人影片信息检索 Web 应用。支持按番号 / 演员 / 关键词搜索，集成百度·阿里云翻译，接入 **Jackett 资源搜索**，支持 **一键推送 qBittorrent / Transmission 下载** 与 **下载完成自动刮削归档（Emby 兼容 NFO + 封面）**。
 
@@ -75,7 +75,7 @@ docker stop jav-search && docker rm jav-search
 # 再次执行上面的 docker run 命令即可
 ```
 
-> 当前正式版本为 `v1.4.6.13`，也可以将镜像标签 `:latest` 换成固定版本标签 `:v1.4.6.13`。
+> 当前正式版本为 `v1.4.6.14`，也可以将镜像标签 `:latest` 换成固定版本标签 `:v1.4.6.14`。
 
 版本检测读取 GitHub 的最新正式 Release（`/releases/latest`），不是直接读取 GHCR 的 `:latest` 标签。正式版本必须推送版本 tag；GitHub Actions 会自动创建对应 Release，并把 tag 注入镜像的 `/api/version`。Beta Release 不会作为正式版本参与检测。
 

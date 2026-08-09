@@ -3,7 +3,7 @@ FROM python:3.11-slim
 
 # Release builds inject the Git tag here so /api/version always reports the
 # same version as the image tag. Local builds retain the current stable value.
-ARG JAV_SEARCH_VERSION=1.4.6.13
+ARG JAV_SEARCH_VERSION=1.4.6.14
 
 # 设置工作目录
 WORKDIR /app

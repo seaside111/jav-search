@@ -1576,18 +1576,43 @@ async def _run_pending_artwork(config: dict) -> int:
     return 0
 
 
-def _get_file_status(video_path: Path, code: str = "") -> dict:
+def _flat_sidecar_dir(video_path: Path, code: str, config: dict) -> Optional[Path]:
+    """For a video directly in the watch root, isolate its sidecars by code."""
+    watch = (config.get("scrape_watch_dir") or "").strip()
+    if not watch or not code:
+        return None
+    try:
+        if video_path.parent.resolve() != Path(watch).resolve():
+            return None
+    except OSError:
+        return None
+    return video_path.parent / _safe_name(code)
+
+
+def _get_file_status(video_path: Path, code: str = "",
+                     sidecar_dir: Optional[Path] = None) -> dict:
     """检查视频旁是否已有以 番号 命名的 NFO/封面。"""
     folder = video_path.parent
     stem = video_path.stem
-    nfo_path = folder / f"{stem}.nfo"
-    poster_path = folder / "poster.jpg"
-    fanart_path = folder / "fanart.jpg"
+    sidecar_folder = Path(sidecar_dir) if sidecar_dir else folder
+    nfo_path = sidecar_folder / f"{stem}.nfo"
+    artwork_folders = [sidecar_folder]
+    artwork_base = sidecar_folder
+    poster_path = next((item / "poster.jpg" for item in artwork_folders
+                        if (item / "poster.jpg").exists()), artwork_base / "poster.jpg")
+    fanart_path = next((item / "fanart.jpg" for item in artwork_folders
+                        if (item / "fanart.jpg").exists()), artwork_base / "fanart.jpg")
     legacy_stem = code or stem
     if not poster_path.exists():
-        poster_path = folder / f"{legacy_stem}-poster.jpg"
+        poster_path = next((item / f"{legacy_stem}-poster.jpg"
+                            for item in artwork_folders
+                            if (item / f"{legacy_stem}-poster.jpg").exists()),
+                           artwork_base / f"{legacy_stem}-poster.jpg")
     if not fanart_path.exists():
-        fanart_path = folder / f"{legacy_stem}-fanart.jpg"
+        fanart_path = next((item / f"{legacy_stem}-fanart.jpg"
+                            for item in artwork_folders
+                            if (item / f"{legacy_stem}-fanart.jpg").exists()),
+                           artwork_base / f"{legacy_stem}-fanart.jpg")
     return {
         "has_nfo": nfo_path.exists(),
         "has_poster": poster_path.exists(),
@@ -1596,11 +1621,13 @@ def _get_file_status(video_path: Path, code: str = "") -> dict:
     }
 
 
-def _read_existing_nfo_metadata(video_path: Path, code: str) -> dict:
+def _read_existing_nfo_metadata(video_path: Path, code: str,
+                                sidecar_dir: Optional[Path] = None) -> dict:
     """已有刮削结果也可参与自定义文件夹命名，避免跳过刮削后退回纯番号。"""
-    path = video_path.parent / f"{video_path.stem}.nfo"
+    folder = Path(sidecar_dir) if sidecar_dir else video_path.parent
+    path = folder / f"{video_path.stem}.nfo"
     if not path.exists():
-        path = video_path.parent / f"{code}.nfo"
+        path = folder / f"{code}.nfo"
     try:
         root = ET.parse(path).getroot()
         original = (root.findtext("originaltitle") or "").strip()
@@ -1646,17 +1673,26 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             return {"success": False, "filepath": filepath, "error": "无法从文件名提取番号"}
         _log(f"开始刮削：{path.name} → 番号 {code}")
 
-    status = _get_file_status(path, code)
+    sidecar_dir = _flat_sidecar_dir(path, code, config)
+    metadata_dir = sidecar_dir or path.parent
+    try:
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _log(f"无法创建刮削附属文件目录，停止本次刮削：{metadata_dir}：{e}")
+        return {"success": False, "filepath": filepath, "code": code,
+                "error": f"无法创建刮削附属文件目录: {e}"}
+
+    status = _get_file_status(path, code, sidecar_dir=sidecar_dir)
     if (not overwrite and status["has_nfo"] and status["has_poster"]
             and status["has_fanart"]):
-        existing = _read_existing_nfo_metadata(path, code)
+        existing = _read_existing_nfo_metadata(path, code, sidecar_dir)
         actor_images_saved = 0
         if (config.get("scrape_actor_images_enabled", False)
                 or config.get("emby_actor_sync_enabled", False)) and config.get("actor_scrape_auto", True):
             import actor_scraper
             # 当前目录尚未归档到 Emby 媒体库；这里只下载/回写头像，归档成功后再定向同步。
             result = await actor_scraper.process_nfo(
-                path.parent / f"{path.stem}.nfo", config, sync_emby=False)
+                metadata_dir / f"{path.stem}.nfo", config, sync_emby=False)
             actor_images_saved = result.get("saved", 0)
             existing["actors"] = result.get("actors") or existing.get("actors", [])
             _log(f"NFO 和封面已存在，已补查演员头像：{code}（保存 {actor_images_saved} 张）")
@@ -1664,6 +1700,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             _log(f"已存在 NFO 和封面，跳过刮削：{code}")
         return {"success": True, "skipped": True, "filepath": filepath, "code": code,
                 "reason": "NFO 和封面已存在", "actor_images_saved": actor_images_saved,
+                "sidecar_dir": str(sidecar_dir) if sidecar_dir else "",
                 **existing}
 
     proxy = config.get("proxy") or None
@@ -1784,7 +1821,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
 
     if overwrite or not status["has_nfo"]:
         try:
-            nfo_file = folder / f"{path.stem}.nfo"
+            nfo_file = metadata_dir / f"{path.stem}.nfo"
             nfo_file.write_text(_build_nfo(
                 movie, title_for_nfo, plot_zh,
                 config.get("scrape_actor_thumb_in_nfo", True)), encoding="utf-8")
@@ -1809,16 +1846,16 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                 jacket = img
                 img, cropped = _poster_bytes(img, jacket_mode)
                 if overwrite or not status["has_poster"]:
-                    (folder / "poster.jpg").write_bytes(img)
+                    (metadata_dir / "poster.jpg").write_bytes(img)
                     saved_cover = True
                 if jacket_mode and (overwrite or not status["has_fanart"]):
-                    (folder / "fanart.jpg").write_bytes(jacket)
+                    (metadata_dir / "fanart.jpg").write_bytes(jacket)
                     saved_cover = True
                 elif (not jacket_mode and fanart_url == cover_url
                       and (overwrite or not status["has_fanart"])):
                     # No independent sample is required for automatic
                     # scraping: reuse the already downloaded cover bytes.
-                    (folder / "fanart.jpg").write_bytes(jacket)
+                    (metadata_dir / "fanart.jpg").write_bytes(jacket)
                     saved_cover = True
                 if cropped:
                     _log(f"已从完整横向封套右侧裁取标准竖版：{code}-poster.jpg")
@@ -1837,7 +1874,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             fanart, selected_fanart_url = await _fetch_fanart(movie, proxy)
             if fanart:
                 try:
-                    (folder / "fanart.jpg").write_bytes(fanart)
+                    (metadata_dir / "fanart.jpg").write_bytes(fanart)
                     saved_cover = True
                     _log(f"已写入背景图：{code}-fanart.jpg")
                 except Exception as e:
@@ -1861,7 +1898,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             import actor_scraper
             # 当前目录尚未归档到 Emby 媒体库；这里只下载/回写头像，归档成功后再定向同步。
             actor_result = await actor_scraper.process_nfo(
-                folder / f"{path.stem}.nfo", config, sync_emby=False)
+                metadata_dir / f"{path.stem}.nfo", config, sync_emby=False)
             actor_images_saved = actor_result.get("saved", 0)
             if actor_result.get("actors"):
                 movie["actors"] = actor_result["actors"]
@@ -1874,7 +1911,8 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             "folder_title": folder_title, "actors": movie.get("actors") or [],
             "actor_images_saved": actor_images_saved,
             "saved_nfo": saved_nfo, "saved_cover": saved_cover,
-            "artwork": _artwork_context(movie)}
+            "artwork": _artwork_context(movie),
+            "sidecar_dir": str(sidecar_dir) if sidecar_dir else ""}
 
 
 # ─────────────────────────────────────────
@@ -2423,7 +2461,8 @@ def _heal_archived_parts(target_dir: Path, safe_code: str) -> None:
 def _archive_file(video_path: Path, output_dir: str, code: str,
                   mode: str = "hardlink", rename: bool = True,
                   watch_dir: str = "", folder_name: str = "",
-                  by_month: bool = True) -> dict:
+                  by_month: bool = True,
+                  sidecar_dir: Optional[Path] = None) -> dict:
     """
     把视频归档到 归档目录/年月/番号/ 子目录下（Emby 单片单目录布局）。
     rename：开（刮削开）= 视频改名「番号.后缀」、随带番号命名的 NFO/封面；
@@ -2506,10 +2545,21 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
         f"{video_path.stem}-fanart.jpg".lower(): "fanart.jpg",
     }
     found_extras = {}
+    sidecar_roots = []
+    for root in (sidecar_dir, folder):
+        if root:
+            root = Path(root)
+            if root not in sidecar_roots:
+                sidecar_roots.append(root)
     try:
-        for candidate in folder.iterdir():
-            if candidate.is_file() and candidate.name.lower() in expected:
-                found_extras[candidate.name.lower()] = candidate
+        # Prefer the per-video staging directory, then accept legacy sidecars
+        # from the video directory for backward compatibility.
+        for root in sidecar_roots:
+            if not root.is_dir():
+                continue
+            for candidate in root.iterdir():
+                if candidate.is_file() and candidate.name.lower() in expected:
+                    found_extras.setdefault(candidate.name.lower(), candidate)
     except Exception as e:
         _log(f"扫描刮削附属文件失败：{folder} — {e}")
     sub_mode = "move" if mode == "move" else "copy"
@@ -2736,6 +2786,7 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
         keep_bytes = int(config.get("scrape_keep_size_mb", 300)) * 1024 * 1024
         code = scrape_res.get("code", "") or await _resolve_code(video_path, config)
+        sidecar_dir = scrape_res.get("sidecar_dir") or str(video_path.parent)
         folder_name = _archive_folder_name(
             code, scrape_res.get("title_original", ""),
             scrape_res.get("folder_title", ""), scrape_res.get("actors", []), config)
@@ -2745,7 +2796,8 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         rename_video = organize_on and config.get("scrape_video_rename_enabled", True)
         mv = _archive_file(video_path, output_dir, code, mode=mode, rename=rename_video,
                            watch_dir=str(watch_dir), folder_name=folder_name,
-                           by_month=config.get("archive_by_month", True))
+                           by_month=config.get("archive_by_month", True),
+                           sidecar_dir=Path(sidecar_dir))
         record["moved"] = mv.get("archived", False)
         record["archive_mode"] = mode
         record["target_dir"] = mv.get("target_dir", "")
@@ -3213,7 +3265,8 @@ async def api_scrape_single(req: ScrapeRequest):
                     config.get("scrape_video_rename_enabled", True)),
             watch_dir=config.get("scrape_watch_dir", ""),
             folder_name=folder_name,
-            by_month=config.get("archive_by_month", True))
+            by_month=config.get("archive_by_month", True),
+            sidecar_dir=Path(result.get("sidecar_dir") or video_path.parent))
         result["moved"] = mv.get("archived", False)
         result["moved_original"] = mv.get("moved_original", False)
         result["target_dir"] = mv.get("target_dir", "")

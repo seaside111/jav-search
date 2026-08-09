@@ -1373,6 +1373,62 @@ class NamingAndTrackerTests(unittest.TestCase):
             self.assertTrue((root / "archive" / "ABC-123" / original.name).exists())
             self.assertEqual(original.name, "Original Name [ABC-123].MP4")
 
+    def test_flat_watch_videos_use_code_sidecar_folders(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "downloads"
+            output = root / "archive"
+            source.mkdir()
+            first = source / "ABC-001.mp4"
+            second = source / "ABC-002.mp4"
+            first.write_bytes(b"first movie")
+            second.write_bytes(b"second movie")
+
+            config = {"scrape_watch_dir": str(source)}
+            first_stage = library._flat_sidecar_dir(first, "ABC-001", config)
+            second_stage = library._flat_sidecar_dir(second, "ABC-002", config)
+            self.assertEqual(first_stage, source / "ABC-001")
+            self.assertEqual(second_stage, source / "ABC-002")
+            first_stage.mkdir()
+            second_stage.mkdir()
+            (first_stage / "ABC-001.nfo").write_text("first nfo", encoding="utf-8")
+            (second_stage / "ABC-002.nfo").write_text("second nfo", encoding="utf-8")
+            (first_stage / "poster.jpg").write_bytes(b"first poster")
+            (first_stage / "fanart.jpg").write_bytes(b"first fanart")
+            (second_stage / "poster.jpg").write_bytes(b"second poster")
+            (second_stage / "fanart.jpg").write_bytes(b"second fanart")
+
+            # A stale canonical image in the flat source directory must not
+            # satisfy the per-video sidecar check.
+            (source / "poster.jpg").write_bytes(b"stale shared poster")
+            (source / "fanart.jpg").write_bytes(b"stale shared fanart")
+            status = library._get_file_status(second, "ABC-002", second_stage)
+            self.assertTrue(status["has_nfo"])
+            self.assertTrue(status["has_poster"])
+            self.assertTrue(status["has_fanart"])
+
+            first_result = library._archive_file(
+                first, str(output), "ABC-001", mode="hardlink", rename=True,
+                folder_name="ABC-001", by_month=False, sidecar_dir=first_stage)
+            second_result = library._archive_file(
+                second, str(output), "ABC-002", mode="hardlink", rename=True,
+                folder_name="ABC-002", by_month=False, sidecar_dir=second_stage)
+            self.assertTrue(first_result["archived"])
+            self.assertTrue(second_result["archived"])
+            self.assertEqual(
+                (output / "ABC-001" / "poster.jpg").read_bytes(), b"first poster")
+            self.assertEqual(
+                (output / "ABC-002" / "poster.jpg").read_bytes(), b"second poster")
+            self.assertEqual(
+                (output / "ABC-001" / "fanart.jpg").read_bytes(), b"first fanart")
+            self.assertEqual(
+                (output / "ABC-002" / "fanart.jpg").read_bytes(), b"second fanart")
+
+            nested = source / "nested" / "ABC-003.mp4"
+            nested.parent.mkdir()
+            nested.write_bytes(b"nested movie")
+            self.assertIsNone(library._flat_sidecar_dir(nested, "ABC-003", config))
+
     def test_failed_copy_cleans_partial_target_and_preserves_source(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
