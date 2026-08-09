@@ -17,7 +17,7 @@ DEFAULT_CONFIG = {
     "javdb_flaresolverr_url": "",        # FlareSolverr 地址（如 http://192.168.1.100:8191），填了则 JavDB 走它过 CF 盾
     "javdb_flaresolverr_use_proxy": True, # FlareSolverr 是否复用主代理；其自带出口（如 WARP）时应关掉走直连
     "javdb_cookie": "",                  # 手动填入浏览器导出的 JavDB Cookie（如 cf_clearance=xxx; _jdb_session=yyy）
-    "javdb_prefetch_extras": False,      # 翻页预取时是否顺带预取合并卡的 JavDB 样品图/磁力（默认关，开则更耗资源）
+    "javdb_prefetch_extras": False,      # 兼容旧配置；首页不再自动预取 JavDB 补充详情
     # V1.4.3：FC2-PPV 数据源（fc2ppvdb.com，强制 Cloudflare Turnstile，必须走 FlareSolverr）
     "fc2_flaresolverr_url": "",          # FC2 专用 FlareSolverr 地址；留空则复用 javdb_flaresolverr_url
     "fc2_flaresolverr_use_proxy": True,  # FlareSolverr 是否复用主代理；其自带出口时关掉走直连

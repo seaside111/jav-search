@@ -534,6 +534,22 @@
   .tasks-page.active { display:block; }
   .tasks-page-head { display:flex; align-items:center; gap:12px; margin-bottom:16px; }
   .tasks-page-head h2 { margin:0; font-size:20px; }
+  .tasks-page .btn { padding:8px 14px; font-size:13px; }
+  .task-table-wrap { overflow-x:auto; }
+  .task-table { width:100%; min-width:820px; border-collapse:collapse; font-size:12px; }
+  .task-table th { padding:10px 12px; text-align:left; color:var(--text-muted); font-weight:600; background:rgba(255,255,255,.025); border-bottom:1px solid var(--border); white-space:nowrap; }
+  .task-table td { padding:10px 12px; color:var(--text-main); border-bottom:1px solid var(--border); vertical-align:top; }
+  .task-table tbody tr:hover { background:var(--bg-hover); }
+  .task-code { font-weight:700; color:var(--accent); white-space:nowrap; }
+  .task-file { display:block; max-width:240px; margin-top:3px; color:var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .task-time { color:var(--text-muted); white-space:nowrap; }
+  .task-badge { display:inline-block; padding:2px 7px; border:1px solid var(--border); border-radius:999px; white-space:nowrap; font-size:11px; }
+  .task-badge.running { color:var(--accent); border-color:rgba(232,160,32,.45); background:rgba(232,160,32,.1); }
+  .task-badge.success { color:var(--green); border-color:rgba(80,190,120,.45); background:rgba(80,190,120,.1); }
+  .task-badge.failed { color:var(--red); border-color:rgba(204,51,68,.45); background:rgba(204,51,68,.1); }
+  .task-badge.pending, .task-badge.skipped { color:var(--text-muted); }
+  .task-result { min-width:180px; max-width:320px; color:var(--text-muted); line-height:1.5; word-break:break-word; }
+  .task-result.error { color:var(--red); }
 
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -573,7 +589,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.11</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.12</div>
   <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -701,11 +717,6 @@
             <label class="setting-label">JavDB Cookie</label>
             <input class="setting-input" id="cfgJavdbCookie" type="text" placeholder="cf_clearance=xxx; _jdb_session=yyy">
             <span class="setting-hint">可选，供增强直连使用。浏览器导出的 cf_clearance 与浏览器指纹/出口 IP 绑定，不会转交给 FlareSolverr；FlareSolverr 会自行建立匹配其浏览器的通行状态</span>
-          </div>
-          <div class="setting-row">
-            <label class="setting-label">样品图预取</label>
-            <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgJavdbPrefetch"> 翻页时预取合并卡的 JavDB 样品图/磁力</label>
-            <span class="setting-hint">默认关：点开「JavBus+JavDB」详情时才补抓样品图（省资源）。开启后翻页就后台提前抓好，点开即时显示，但 FlareSolverr 请求更多、更耗资源</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">连通测试</label>
@@ -1189,8 +1200,6 @@
 <script>
 const API = '';
 let currentProvider = 'baidu';
-// 是否在翻页预取时顺带预取合并卡的 JavDB 样品图/磁力（默认关；开则点开详情即时显示，但后台请求更多）
-let prefetchJavdbExtras = false;
 let translatingCards = new Set();
 const cardProviders = {};
 // 每张卡片已加载的资源缓存
@@ -1217,7 +1226,7 @@ let configuredSources = [];        // 配置里启用的全部刮削来源（详
 let configuredLatestSources = [];  // 配置里启用的首页最新来源
 // V1.4.3：走 FlareSolverr 的「慢源」（详情按需单条补全，不批量预取，避免压垮 FlareSolverr）
 let lazyDetailSources = [];
-// 条目的主来源是否属于慢源（合并卡的主来源是 JavBus 等快源 → 不算慢，JavDB 独有字段仍按需补抓）
+// 条目的主来源是否属于慢源（合并卡的主来源是 JavBus 等快源 → 不算慢）
 function isLazyItem(m) {
   const src = (m.source || '').toLowerCase();
   return lazyDetailSources.includes(src);
@@ -1424,18 +1433,8 @@ function showPage(p) {
   // 只补全「当前页」详情（演员/标签等），完成后就地升级卡片。不再向前预取多页详情。
   ensurePageDetails(currentPage).then(() => {
     if (currentPage === p) upgradePageCards(currentPage);
-    if (prefetchJavdbExtras) prefetchJavdbExtrasForPage(currentPage);
   });
-}
-
-// 开启「预取补抓」时：后台串行把本页合并卡的 JavDB 样品图/磁力提前抓好
-async function prefetchJavdbExtrasForPage(p) {
-  for (const i of pageIndices(p)) {
-    const m = currentResults[i];
-    if (m && detailExtraSources(m).length) {
-      await ensureExtraDetails(i);  // 串行，避免同时打太多详情请求
-    }
-  }
+  ensureMissingJavdbCovers(currentPage);
 }
 
 function renderPage(scroll = true) {
@@ -1480,7 +1479,7 @@ function mergeDetail(base, d) {
   }
   out.sources = base.sources || out.sources;
   out.detail_loaded = true;
-  // 保持对象引用稳定：主详情与 JAV321/JavDB 补抓可能并行返回，原地合并可避免
+  // 保持对象引用稳定：主详情与 JAV321 补抓可能并行返回，原地合并可避免
   // 较晚完成的一方把另一方刚写入的样品图或详情状态覆盖掉。
   Object.assign(base, out);
   return base;
@@ -1529,6 +1528,33 @@ function ensurePageDetails(p) {
   })();
   pageEnrichPromise[p] = promise;
   return promise;
+}
+
+// JavDB 作为主来源且列表未解析出封面时的唯一封面兜底。
+// 只处理当前可见页、每条目最多尝试一次；不为 JavBus/FC2/AVSOX 卡片调用 JavDB。
+async function ensureMissingJavdbCovers(p) {
+  const idxs = pageIndices(p).filter(i => {
+    const m = currentResults[i];
+    return m && normalizedSource(m.source) === 'javdb' && !m.cover && !m._javdb_cover_attempted;
+  });
+  for (const i of idxs) {
+    const m = currentResults[i];
+    m._javdb_cover_attempted = true;
+    try {
+      const resp = await fetch(`${API}/api/details`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: [{ url: m.url, source: m.source }] }),
+      });
+      const data = await safeJson(resp);
+      if (data.success && data.results && data.results[0]) {
+        mergeDetail(m, data.results[0]);
+        if (currentPage === p) upgradePageCards(p);
+      }
+    } catch (e) {
+      // 封面兜底失败不影响列表；本次会话不重复请求，避免持续触发过盾。
+    }
+  }
 }
 
 // 详情到达后，就地升级当前页未被「翻译/已展开资源」占用的卡片正文
@@ -2040,20 +2066,20 @@ function detailSourceUrl(m, source) {
   return hit ? hit[1] : '';
 }
 
-// 详情补充来源固定以 JAV321 为先（直连、样品图多），再尝试需要过盾的 JavDB。
-// 即使合并卡里没有该来源 URL，也可由后端按番号搜索后解析详情。
+// 详情补充来源只保留 JAV321：直连、样品图多，且仅在用户点开详情时按需请求。
+// JavDB 不再作为普通 JavBus/FC2/AVSOX 卡片的自动补充来源。
 function detailExtraSources(m) {
   if (!m || !m.code) return [];
   const enabled = new Set((configuredSources.length ? configuredSources : ['javbus', 'jav321', 'javdb'])
     .map(normalizedSource));
   const primary = normalizedSource(m.source);
   const state = m._extra_detail_state || {};
-  return ['jav321', 'javdb'].filter(source =>
+  return ['jav321'].filter(source =>
     enabled.has(source) && source !== primary && !state[source]);
 }
 
 // 详情里「磁力 / 样品图」区块是否仍在后台补抓中（显示「抓取中」用）：
-//  ① 合并卡待补抓 JavDB 独有字段；或
+//  ① 合并卡待补抓 JAV321 样品图；或
 //  ② 慢源（JavDB/FC2 走 FlareSolverr）单条详情尚未加载完
 //     —— 此时封面/标题已用列表级数据先行展示，只有磁力/样品图等待补全。
 function detailExtraPending(m) {
@@ -2062,7 +2088,7 @@ function detailExtraPending(m) {
     (isLazyItem(m) && !m.detail_loaded);
 }
 
-// 渲染详情里的「磁力 + 样品图」区块（JavDB 独有）；补抓中时显示提示
+// 渲染详情里的「磁力 + 样品图」区块；补抓中时显示提示
 function renderDetailExtra(m, idx) {
   const di = (typeof idx === 'number') ? idx : -1;
   const samplesHtml = (m.samples || []).map(s => {
@@ -2099,12 +2125,12 @@ function renderDetailExtra(m, idx) {
     </div>`;
   }).join('');
   let html = '';
-  if (magnetsHtml) html += `<div><div class="detail-section-label">磁力资源（JavDB）</div><div class="detail-magnets">${magnetsHtml}</div></div>`;
+  if (magnetsHtml) html += `<div><div class="detail-section-label">磁力资源</div><div class="detail-magnets">${magnetsHtml}</div></div>`;
   if (samplesHtml) html += `<div><div class="detail-section-label">样品图</div><div class="detail-samples">${samplesHtml}</div></div>`;
   // 还没补抓且当前没有样品图/磁力时，显示加载提示。
   if (detailExtraPending(m) && !samplesHtml && !magnetsHtml) {
     html += `<div><div class="detail-section-label">磁力链 / 样品图</div>
-      <div style="color:var(--text-dim);font-size:13px"><span class="drawer-spinner"></span> 正在补充详情 / 样品图（优先 JAV321，必要时再尝试 JavDB）…</div></div>`;
+      <div style="color:var(--text-dim);font-size:13px"><span class="drawer-spinner"></span> 正在补充详情 / 样品图（JAV321 按需获取）…</div></div>`;
   }
   return html;
 }
@@ -2120,7 +2146,7 @@ function mergeExtraDetail(m, d, source, resolvedUrl) {
   });
   if (resolvedUrl) {
     m.source_urls = Object.assign({}, m.source_urls || {});
-    const label = source === 'jav321' ? 'JAV321' : 'JavDB';
+    const label = source === 'jav321' ? 'JAV321' : source;
     m.source_urls[label] = resolvedUrl;
   }
 }
@@ -2272,7 +2298,7 @@ async function openDetail(idx) {
   document.getElementById('detailModal').scrollTop = 0;
   document.getElementById('detailOverlay').classList.add('open');
 
-  // 样品图补抓与主来源详情并行启动，避免先等主来源超时后才去请求更快的 JAV321。
+  // JAV321 样品图补抓与主来源详情并行启动，避免先等主来源详情后才请求更快的 JAV321。
   if (detailExtraSources(m0).length) ensureExtraDetails(idx);
 
   // ② 详情未加载的慢源（JavDB/FC2 走 FlareSolverr）：后台补抓完整详情，
@@ -2283,7 +2309,7 @@ async function openDetail(idx) {
     refreshDetailContent(idx);
   }
 
-  // ③ 其他来源已在弹窗打开时按 JAV321 → JavDB 的顺序于后台补抓。
+  // ③ JAV321 已在弹窗打开时按需补抓样品图。
 }
 
 function closeDetail() {
@@ -2370,7 +2396,6 @@ async function openSettings() {
     document.getElementById('cfgJavdbFlare').value  = cfg.javdb_flaresolverr_url || '';
     document.getElementById('cfgJavdbFlareProxy').checked = cfg.javdb_flaresolverr_use_proxy !== false;
     document.getElementById('cfgJavdbCookie').value = cfg.javdb_cookie || '';
-    document.getElementById('cfgJavdbPrefetch').checked = cfg.javdb_prefetch_extras === true;
     // V1.4.3 FC2 数据源
     document.getElementById('cfgFc2Flare').value  = cfg.fc2_flaresolverr_url || '';
     document.getElementById('cfgFc2FlareProxy').checked = cfg.fc2_flaresolverr_use_proxy !== false;
@@ -2558,15 +2583,31 @@ async function loadTasks(status) {
     const box = document.getElementById('taskList');
     if (!data.tasks?.length) { box.innerHTML = '<div class="setting-hint">暂无任务记录</div>'; return; }
     const badge = {running:'运行中', success:'成功', failed:'失败'};
-    box.innerHTML = data.tasks.map(t => {
-      const failed = t.status === 'failed';
-      const color = failed ? 'var(--red)' : (t.status === 'success' ? 'var(--green)' : 'var(--accent)');
-      return `<div style="padding:10px 0;border-bottom:1px solid var(--border)">
-        <div style="display:flex;justify-content:space-between;gap:8px"><strong>${escHtml(t.code || '未知番号')}</strong><span style="color:${color}">${badge[t.status] || t.status || '未知'}</span></div>
-        <div class="setting-hint">${escHtml(t.current || '')} · 刮削 ${escHtml(t.scrape_status || '—')} · 归档 ${escHtml(t.archive_status || '—')} · ${escHtml(t.updated_at || '')}</div>
-        ${failed ? `<div style="color:var(--red);font-size:12px;margin-top:4px">${escHtml(t.error || '任务失败')}</div>` : ''}
-      </div>`;
-    }).join('');
+    const phase = {downloading:'下载中', scraping:'刮削中', completed:'已完成', failed:'失败'};
+    const resultLabel = {running:'处理中', success:'成功', failed:'失败', pending:'等待', skipped:'跳过'};
+    const statusBadge = (value, fallback = '—') => {
+      const key = String(value || '').toLowerCase();
+      const text = resultLabel[key] || badge[key] || phase[key] || value || fallback;
+      const cls = ['running', 'downloading', 'scraping'].includes(key) ? 'running'
+        : (['success', 'completed'].includes(key) ? 'success'
+        : (['failed', 'pending', 'skipped'].includes(key) ? key : ''));
+      return `<span class="task-badge ${cls}">${escHtml(text)}</span>`;
+    };
+    box.innerHTML = `<div class="task-table-wrap"><table class="task-table"><thead><tr>
+        <th>任务</th><th>当前阶段</th><th>总状态</th><th>刮削结果</th><th>归档结果</th><th>更新时间</th><th>结果 / 说明</th>
+      </tr></thead><tbody>${data.tasks.map(row => {
+        const rowFailed = row.status === 'failed' || row.scrape_status === 'failed' || row.archive_status === 'failed';
+        const rowResult = row.error || (row.status === 'success' ? '任务已完成' : (row.current ? `当前：${row.current}` : '—'));
+        return `<tr>
+          <td><span class="task-code">${escHtml(row.code || '未知番号')}</span><span class="task-file" title="${escAttr(row.file || '')}">${escHtml(row.file || '')}</span></td>
+          <td>${statusBadge(row.current, '—')}</td>
+          <td>${statusBadge(row.status, '未知')}</td>
+          <td>${statusBadge(row.scrape_status)}</td>
+          <td>${statusBadge(row.archive_status)}</td>
+          <td class="task-time">${escHtml(row.updated_at || '—')}</td>
+          <td class="task-result${rowFailed ? ' error' : ''}">${escHtml(rowResult)}</td>
+        </tr>`;
+      }).join('')}</tbody></table></div>`;
   } catch (e) { document.getElementById('taskList').innerHTML = `<div class="setting-hint">任务状态获取失败：${escHtml(e.message)}</div>`; }
 }
 async function clearTaskLogs(status) {
@@ -2816,7 +2857,6 @@ async function saveSettings() {
     javdb_flaresolverr_url: document.getElementById('cfgJavdbFlare').value.trim(),
     javdb_flaresolverr_use_proxy: document.getElementById('cfgJavdbFlareProxy').checked,
     javdb_cookie: document.getElementById('cfgJavdbCookie').value.trim(),
-    javdb_prefetch_extras: document.getElementById('cfgJavdbPrefetch').checked,
     // V1.4.3 FC2 数据源
     fc2_flaresolverr_url: document.getElementById('cfgFc2Flare').value.trim(),
     fc2_flaresolverr_use_proxy: document.getElementById('cfgFc2FlareProxy').checked,
@@ -2899,7 +2939,6 @@ async function saveSettings() {
     archive_enabled: document.getElementById('cfgArchiveEnabled').checked,
   };
   currentProvider = payload.default_translate_provider;
-  prefetchJavdbExtras = payload.javdb_prefetch_extras === true;
   const msg = document.getElementById('saveMsg');
   msg.style.color = 'var(--text-muted)';
   msg.textContent = '保存中…';
@@ -2978,7 +3017,7 @@ function mergeLatestBatch(items) {
       it.sources = (it.sources && it.sources.length) ? it.sources : [it.source];
       // 记录各来源各自的详情页 URL（首页最新是前端按番号合并，后端不给 source_urls，
       // 这里得自己补——否则 JavBus+JavDB 合并卡缺 source_urls['JavDB']，详情页就抓不到
-      // JavDB 样品图/磁力。单源卡也一并记上，保证后续被合并时不丢自己的 URL）。
+      // 补充来源详情页 URL。单源卡也一并记上，保证后续被合并时不丢自己的 URL）。
       it.source_urls = it.source_urls || {};
       if (it.source && it.url) it.source_urls[it.source] = it.url;
       latestCodeIndex[key] = currentResults.length;
@@ -3047,6 +3086,7 @@ function tryRestoreLatest() {
       `<a href="#" onclick="loadLatest();return false;" style="color:var(--accent)">刷新</a>`;
     // 当前页详情按需补全（缓存里可能未补全）
     ensurePageDetails(currentPage).then(() => upgradePageCards(currentPage));
+    ensureMissingJavdbCovers(currentPage);
     return true;
   } catch (e) { return false; }
 }
@@ -3099,6 +3139,7 @@ async function loadLatest() {
         ensurePageDetails(currentPage).then(() => {
           if (token === latestLoadToken) upgradePageCards(currentPage);
         });
+        ensureMissingJavdbCovers(currentPage);
       }
     } catch (e) {
       /* 单源失败不影响其它源 */
@@ -3133,13 +3174,12 @@ async function loadLatest() {
 // ══════════════════════════════════════════
 // 启动
 // ══════════════════════════════════════════
-// 启动时读取少量影响浏览行为的运行配置（如 JavDB 样品图预取开关）
+// 启动时读取少量影响浏览行为的运行配置
 let showLatestCfg = true;
 async function loadRuntimeConfig() {
   try {
     const resp = await fetch(`${API}/api/config`, { cache: 'no-store' });
     const cfg = await safeJson(resp);
-    prefetchJavdbExtras = cfg.javdb_prefetch_extras === true;
     currentProvider = cfg.default_translate_provider || currentProvider;
     showLatestCfg = cfg.show_latest !== false;
     configuredSources = (cfg.sources && cfg.sources.length)
@@ -3163,7 +3203,7 @@ async function checkVersion() {
   try {
     const resp = await fetch(`${API}/api/version`, { cache: 'no-store' });
     const d = await safeJson(resp);
-    chip.textContent = 'v' + (d.current || '1.4.6.11');
+      chip.textContent = 'v' + (d.current || '1.4.6.12');
     if (d.update_available && d.latest) {
       chip.classList.add('has-update', 'clickable');
       chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;
