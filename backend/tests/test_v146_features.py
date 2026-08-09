@@ -1522,6 +1522,51 @@ class NamingAndTrackerTests(unittest.TestCase):
                 (root / "archive" / "ABC-123" / "Original.Name.ABC-123.MP4").read_bytes(),
                 b"movie")
 
+    def test_keep_video_name_renames_sidecars_to_original_video_stem(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "downloads"
+            source.mkdir()
+            original = source / "Original.Name.ABC-123.MP4"
+            original.write_bytes(b"movie")
+            # The scraper writes sidecars with the recognized code before
+            # archiving; they must follow the preserved video name in output.
+            (source / "ABC-123.nfo").write_text("<movie/>", encoding="utf-8")
+            (source / "ABC-123-poster.jpg").write_bytes(b"poster")
+            (source / "ABC-123-fanart.jpg").write_bytes(b"fanart")
+
+            result = library._archive_file(
+                original, str(root / "archive"), "ABC-123", mode="move",
+                rename=False, folder_name="ABC-123", by_month=False)
+
+            target = root / "archive" / "ABC-123"
+            self.assertTrue(result["archived"])
+            self.assertTrue((target / "Original.Name.ABC-123.MP4").exists())
+            self.assertTrue((target / "Original.Name.ABC-123.nfo").exists())
+            self.assertTrue((target / "Original.Name.ABC-123-poster.jpg").exists())
+            self.assertTrue((target / "Original.Name.ABC-123-fanart.jpg").exists())
+            self.assertFalse((target / "ABC-123.nfo").exists())
+
+    def test_archive_sidecar_sync_repairs_existing_archive_without_touching_video(self):
+        with tempfile.TemporaryDirectory() as raw:
+            archive = Path(raw) / "archive"
+            folder = archive / "ABC-123"
+            folder.mkdir(parents=True)
+            video = folder / "Original.Name.ABC-123.MP4"
+            video.write_bytes(b"movie")
+            (folder / "ABC-123.nfo").write_text("<movie/>", encoding="utf-8")
+            (folder / "ABC-123-poster.jpg").write_bytes(b"poster")
+            (folder / "ABC-123-fanart.jpg").write_bytes(b"fanart")
+
+            changed = library._sync_archive_sidecars(str(archive))
+
+            self.assertEqual(changed, 3)
+            self.assertEqual(video.read_bytes(), b"movie")
+            self.assertTrue((folder / "Original.Name.ABC-123.nfo").exists())
+            self.assertTrue((folder / "Original.Name.ABC-123-poster.jpg").exists())
+            self.assertTrue((folder / "Original.Name.ABC-123-fanart.jpg").exists())
+            self.assertFalse((folder / "ABC-123.nfo").exists())
+
     def test_same_path_move_is_not_reported_as_source_removed(self):
         with tempfile.TemporaryDirectory() as raw:
             output = Path(raw)

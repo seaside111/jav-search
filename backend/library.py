@@ -2113,6 +2113,53 @@ def _build_archive_index(output_dir: str) -> dict:
     return idx
 
 
+def _sync_archive_sidecars(output_dir: str) -> int:
+    """Repair legacy sidecar names in the archive without touching videos.
+
+    Older archives may contain ``CODE.nfo``/``CODE-poster.jpg`` next to a
+    video whose original name was preserved. Emby matches these sidecars by
+    the video's stem, so rename only the known sidecars to that stem.
+    Existing targets are never overwritten.
+    """
+    if not output_dir:
+        return 0
+    root = Path(output_dir)
+    if not root.is_dir():
+        return 0
+    changed = 0
+    try:
+        videos = (p for p in root.rglob("*")
+                  if p.is_file() and p.suffix.lower() in VIDEO_EXTS)
+        for video in videos:
+            code = _code_from_name(video.stem) or _code_from_name(video.parent.name)
+            if not code:
+                continue
+            source_stem = _safe_name(code)
+            target_stem = video.stem
+            if source_stem.lower() == target_stem.lower():
+                continue
+            try:
+                siblings = {p.name.lower(): p for p in video.parent.iterdir()
+                            if p.is_file()}
+            except OSError as e:
+                _log(f"扫描归档配套文件失败：{video.parent} — {e}")
+                continue
+            for suffix in (".nfo", "-poster.jpg", "-fanart.jpg"):
+                source = siblings.get(f"{source_stem}{suffix}".lower())
+                target = video.parent / f"{target_stem}{suffix}"
+                if not source or target.exists():
+                    continue
+                try:
+                    source.rename(target)
+                    changed += 1
+                    _log(f"归档配套文件已按视频名同步：{source.name} → {target.name}")
+                except OSError as e:
+                    _log(f"归档配套文件同步失败：{source} → {target} — {e}")
+    except OSError as e:
+        _log(f"扫描归档目录配套文件失败：{root} — {e}")
+    return changed
+
+
 def _is_already_archived(video_path: Path, size: int, code: str, idx: dict) -> bool:
     """该文件是否已存在于归档目录（用 _build_archive_index 的索引判定）。"""
     if not idx:
@@ -2293,11 +2340,23 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
         _heal_archived_parts(target_dir, safe_code)
 
     # 2) NFO/封面：Linux 大小写敏感，按小写文件名匹配后统一用番号命名落地。
+    # When the video keeps its original name, Emby requires sidecar files to
+    # use that same stem. Scraping may have created them with the code stem,
+    # so accept both source naming conventions and always use the media stem
+    # in the archive.
+    media_stem = safe_code if (rename and code) else video_path.stem
+    media_stem = _safe_name(media_stem) or video_path.stem
     expected = {
-        f"{safe_code}.nfo".lower(): f"{safe_code}.nfo",
-        f"{safe_code}-poster.jpg".lower(): f"{safe_code}-poster.jpg",
-        f"{safe_code}-fanart.jpg".lower(): f"{safe_code}-fanart.jpg",
+        f"{safe_code}.nfo".lower(): f"{media_stem}.nfo",
+        f"{safe_code}-poster.jpg".lower(): f"{media_stem}-poster.jpg",
+        f"{safe_code}-fanart.jpg".lower(): f"{media_stem}-fanart.jpg",
     }
+    if not (rename and code):
+        expected.update({
+            f"{media_stem}.nfo".lower(): f"{media_stem}.nfo",
+            f"{media_stem}-poster.jpg".lower(): f"{media_stem}-poster.jpg",
+            f"{media_stem}-fanart.jpg".lower(): f"{media_stem}-fanart.jpg",
+        })
     found_extras = {}
     try:
         for candidate in folder.iterdir():
@@ -2923,6 +2982,20 @@ async def api_run_once():
         raise HTTPException(status_code=400, detail="未配置监控目录")
     n = await _scan_once(config)
     return {"success": True, "processed": n, "recent": _monitor_state["recent"][:10]}
+
+
+@router.post("/scrape/archive/sync-sidecars")
+async def api_sync_archive_sidecars():
+    """Manually repair archived NFO/artwork names without touching videos."""
+    config = load_config()
+    output_dir = (config.get("scrape_output_dir") or "").strip()
+    if not output_dir:
+        raise HTTPException(status_code=400, detail="未配置归档目录")
+    root = Path(output_dir)
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"归档目录不存在：{output_dir}")
+    changed = _sync_archive_sidecars(output_dir)
+    return {"success": True, "changed": changed, "directory": output_dir}
 
 
 @router.post("/scan")

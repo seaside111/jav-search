@@ -573,7 +573,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.9</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.10</div>
   <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -1036,6 +1036,12 @@
             <label class="setting-label">归档目录（监控 &amp; 发种共用，供 EMBY 扫）</label>
             <input class="setting-input" id="cfgScrapeOutput" type="text" placeholder="/data/media/emby">
             <span class="setting-hint">刮削/发种后按所选文件夹命名规则在此生成目录。硬链接需与下载目录<b>同一卷</b>（跨卷自动退化为复制）</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">历史归档配套文件修复</label>
+            <button type="button" class="jackett-test-btn" style="margin-left:0" onclick="syncArchiveSidecars()">手动同步 NFO/图片文件名</button>
+            <span class="setting-hint">仅扫描上面的归档目录，将旧的番号命名 NFO、poster、fanart 改为与视频文件名一致；不会自动执行，也不会修改视频文件。</span>
+            <span class="setting-hint" id="archiveSidecarSyncMsg"></span>
           </div>
           <div class="setting-row">
             <label class="setting-label">归档方式</label>
@@ -2587,6 +2593,22 @@ async function runScrapeOnce() {
   }
 }
 
+async function syncArchiveSidecars() {
+  const msg = document.getElementById('archiveSidecarSyncMsg');
+  msg.style.color = 'var(--text-muted)';
+  msg.textContent = '正在检查归档目录…';
+  try {
+    const resp = await fetch(`${API}/api/library/scrape/archive/sync-sidecars`, { method: 'POST' });
+    const data = await safeJson(resp);
+    if (!resp.ok || !data.success) throw new Error(data.detail || '同步失败');
+    msg.style.color = 'var(--green)';
+    msg.textContent = `已同步 ${data.changed} 个配套文件`;
+  } catch (e) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = '同步失败：' + e.message;
+  }
+}
+
 async function runActorScrape(overwrite) {
   const status = document.getElementById('actorScrapeStatus');
   status.textContent = '正在启动独立演员头像任务…';
@@ -3141,7 +3163,7 @@ async function checkVersion() {
   try {
     const resp = await fetch(`${API}/api/version`, { cache: 'no-store' });
     const d = await safeJson(resp);
-    chip.textContent = 'v' + (d.current || '1.4.6.9');
+    chip.textContent = 'v' + (d.current || '1.4.6.10');
     if (d.update_available && d.latest) {
       chip.classList.add('has-update', 'clickable');
       chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;
