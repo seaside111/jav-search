@@ -38,7 +38,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from config_manager import load as load_config
-from scrapers import search, SEARCH_MODE_CODE
+from scrapers import search, search_source_status, SEARCH_MODE_CODE
 from translator import translate
 
 router = APIRouter(prefix="/api/library")
@@ -1049,11 +1049,42 @@ async def _fetch_cover(url: str, proxy: Optional[str]) -> Optional[bytes]:
 
 
 def _artwork_urls(movie: dict) -> tuple[str, str]:
-    """Select independent source images for poster and fanart; never synthesize one."""
+    """Select poster/fanart URLs, reusing the cover when no sample is available."""
     poster = (movie.get("cover") or "").strip()
     fanart = next(((url or "").strip() for url in (movie.get("samples") or [])
                    if (url or "").strip() and (url or "").strip() != poster), "")
-    return poster, fanart
+    return poster, fanart or poster
+
+
+def _source_item_for_code(rows: list[dict], code: str) -> Optional[dict]:
+    wanted = _norm(code)
+    for row in rows or []:
+        if _norm(row.get("code", "")) == wanted:
+            return row
+    return None
+
+
+async def _ensure_cover(movie: dict, code: str, proxy: Optional[str]) -> dict:
+    """Fill only a missing cover: JAV321 first, shielded JavDB last.
+
+    This is intentionally a one-shot fallback used during the initial scrape.
+    It does not fetch samples or create a persistent artwork retry task.
+    """
+    if movie.get("cover"):
+        return movie
+    for source in ("jav321", "javdb"):
+        rows, status = await search_source_status(
+            code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=3)
+        item = _source_item_for_code(rows, code)
+        cover = (item or {}).get("cover", "")
+        if not cover:
+            continue
+        movie["cover"] = cover
+        movie["poster_source"] = source
+        movie.setdefault("source_urls", {})[source] = item.get("url", "")
+        _log(f"封面兜底命中：{code} ← {source}")
+        return movie
+    return movie
 
 
 def _use_jacket_artwork(config: dict, movie: dict, cover_url: str) -> bool:
@@ -1646,9 +1677,26 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                 _log(f"原源补抓失败（用已有内容继续）：{code}: {e}")
         _log(f"用推送元数据刮削：{code} 标题《{(movie.get('title') or '')[:40]}》来源 {movie.get('source','')}")
     else:
-        _log(f"搜索元数据：{code}（数据源 javbus/javdb，代理 {'有' if proxy else '无'}）")
+        _log(f"搜索元数据：{code}（首选 JavBus，代理 {'有' if proxy else '无'}）")
         results = await search(query=code, mode=SEARCH_MODE_CODE, proxy=proxy,
-                               sources=["javbus", "javdb"])
+                               sources=["javbus"])
+        if not results:
+            # Automatic scraping keeps the shielded source out of the normal
+            # path. JAV321 is a lightweight metadata/cover fallback; JavDB is
+            # used only when both the primary and lightweight fallback fail.
+            for source in ("jav321", "javdb"):
+                rows, source_status = await search_source_status(
+                    code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=5)
+                candidate = _source_item_for_code(rows, code)
+                if candidate:
+                    if source == "jav321":
+                        # JAV321 samples are an explicit detail-page action;
+                        # automatic scraping only consumes its cover fallback.
+                        candidate = dict(candidate)
+                        candidate["samples"] = []
+                    results = [candidate]
+                    _log(f"自动刮削兜底命中：{code} ← {source}（状态 {source_status}）")
+                    break
         if not results:
             _log(f"未找到影片信息：{code}（站点不可达或无该番号）")
             return {"success": False, "filepath": filepath, "code": code, "error": "未找到影片信息"}
@@ -1656,7 +1704,8 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         # 列表条目可能缺详情，补全第一条
         movie = results[0]
         _log(f"命中影片：{code} 标题《{(movie.get('title') or '')[:40]}》来源 {movie.get('source','')}")
-        if not movie.get("actors") and movie.get("url"):
+        if (movie.get("source", "").lower() != "jav321"
+                and not movie.get("actors") and movie.get("url")):
             try:
                 from scrapers import enrich
                 enriched = await enrich([{"url": movie["url"], "source": movie.get("source", "")}], proxy=proxy)
@@ -1669,9 +1718,10 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             except Exception as e:
                 _log(f"详情补全失败 {code}: {e}")
 
-    # 图片齐全时零额外请求；仅缺 poster/fanart 时按有限来源逐个补查，命中即停。
-    if not movie.get("cover") or not movie.get("samples"):
-        await _backfill_artwork(movie, code, config, proxy)
+    # Automatic scraping only falls back for a missing cover. Once a cover is
+    # available, poster/fanart are generated locally according to the jacket
+    # setting; no background sample-art search is scheduled.
+    await _ensure_cover(movie, code, proxy)
 
     # ── 标题/简介翻译 ──
     # 番号（字母+数字）不翻译，仅作前缀；只对真正的日文片名/简介长句翻译。
@@ -1730,12 +1780,14 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     cover_url, fanart_url = _artwork_urls(movie)
     jacket_mode = _use_jacket_artwork(config, movie, cover_url)
     if cover_url and (overwrite or not status["has_poster"]
-                      or (jacket_mode and not status["has_fanart"])
-                      or (fanart_url and not status["has_fanart"])):
+                      or not status["has_fanart"]):
         # 优先复用首页/详情已缓存的封面（命中即零上游请求）；未命中再回源（含 FC2 防盗链兜底）
         _log(f"获取封面（优先复用缓存）：{code} ← {cover_url[:60]}")
-        img = await _fetch_cover(cover_url, proxy) if (
-            overwrite or not status["has_poster"] or (jacket_mode and not status["has_fanart"])) else None
+        need_cover_bytes = (
+            overwrite or not status["has_poster"]
+            or (fanart_url == cover_url and not status["has_fanart"])
+            or (jacket_mode and not status["has_fanart"]))
+        img = await _fetch_cover(cover_url, proxy) if need_cover_bytes else None
         if img:
             try:
                 jacket = img
@@ -1746,6 +1798,12 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                 if jacket_mode and (overwrite or not status["has_fanart"]):
                     (folder / f"{code}-fanart.jpg").write_bytes(jacket)
                     saved_cover = True
+                elif (not jacket_mode and fanart_url == cover_url
+                      and (overwrite or not status["has_fanart"])):
+                    # No independent sample is required for automatic
+                    # scraping: reuse the already downloaded cover bytes.
+                    (folder / f"{code}-fanart.jpg").write_bytes(jacket)
+                    saved_cover = True
                 if cropped:
                     _log(f"已从完整横向封套右侧裁取标准竖版：{code}-poster.jpg")
                 else:
@@ -1753,12 +1811,12 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             except Exception as e:
                 _log(f"封面保存失败 {filepath}: {e}")
         elif overwrite or not status["has_poster"]:
-            movie.setdefault("_artwork_pending_sources", []).append("_download")
             _log(f"封面获取失败：{code}")
 
-        # fanart/backdrop 必须来自独立且尺寸合格的横向样品图或宣传图。
-        # 没有独立来源时宁可缺省，也不复制 poster 制造背景图。
-        if not jacket_mode and fanart_url and (overwrite or not status["has_fanart"]):
+        # Use an independent sample when one was supplied by a detail result.
+        # If there is no sample, the branch above has already reused the cover.
+        if (not jacket_mode and fanart_url and fanart_url != cover_url
+                and (overwrite or not status["has_fanart"])):
             _log(f"获取背景图（独立样品/宣传图）：{code} ← {fanart_url[:60]}")
             fanart, selected_fanart_url = await _fetch_fanart(movie, proxy)
             if fanart:
@@ -1769,10 +1827,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                 except Exception as e:
                     _log(f"背景图保存失败 {filepath}: {e}")
             else:
-                movie.setdefault("_artwork_pending_sources", []).append("_download")
-                _log(f"背景图获取失败，不复制封面兜底：{code}")
-        elif not jacket_mode and not fanart_url:
-            _log(f"无独立背景图来源，仅保存 poster：{code}")
+                _log(f"独立背景图获取失败，保留已有图片：{code}")
 
     folder_title = name_zh
     # 文件夹标题单独开启翻译时，只把 name_part（纯标题）交给翻译器；演员列表始终保持源站原名，
@@ -2578,10 +2633,6 @@ async def _process_completed_file(video_path: Path, config: dict) -> dict:
         record["moved"] = mv.get("archived", False)
         record["archive_mode"] = mode
         record["target_dir"] = mv.get("target_dir", "")
-        if (mv.get("archived") and scrape_meta and mv.get("target_dir")
-                and scrape_res.get("artwork") is not None):
-            _queue_artwork_backfill(
-                Path(mv["target_dir"]), code, scrape_res.get("artwork"), config)
         if (mv.get("archived") and config.get("emby_actor_sync_enabled", False)
                 and scrape_res.get("actor_images_saved", 0)):
             try:
@@ -2648,8 +2699,8 @@ async def _scan_once(config: dict) -> int:
     # 以归档目录现有内容为准的兜底去重索引（签名文件缺失时仍能跳过早已归档的原文件）。
     archive_idx = _build_archive_index(out_dir)
     # 归档图片补全与视频处理解耦：每轮最多一个到期任务，直接写最终归档目录。
-    await _run_pending_artwork(config)
-    _discover_legacy_archive_artwork(archive_idx, config)
+    # Artwork is completed during the initial scrape. The periodic directory
+    # scan does not perform poster/fanart source lookups or retries.
     now = time.time()
     processed = 0
     n_total = n_done_before = n_incomplete = n_small = n_waiting = n_extra = n_publish = 0

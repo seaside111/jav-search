@@ -953,7 +953,7 @@ class VideoClassificationTests(unittest.TestCase):
         )
         self.assertEqual(
             library._artwork_urls({"cover": "https://img/poster.jpg", "samples": []}),
-            ("https://img/poster.jpg", ""),
+            ("https://img/poster.jpg", "https://img/poster.jpg"),
         )
 
     def test_artwork_merge_fills_missing_fields_without_overwrite(self):
