@@ -420,6 +420,15 @@ def _part_index(stem: str, code: str = "") -> Optional[int]:
             mm = re.search(flex + r'[-_.\s]+([a-e])\s*$', s, re.IGNORECASE)
             if mm:
                 return ord(mm.group(1).lower()) - ord('a') + 1
+            # Also accept compact names such as ATID215A/ATID215B.
+            compact_code = re.sub(r'[^a-z0-9]', '', code.lower())
+            compact_stem = re.sub(r'[^a-z0-9]', '', s.lower())
+            tail = compact_stem[len(compact_code):] if compact_stem.startswith(compact_code) else ""
+            if re.fullmatch(r'[a-e]', tail):
+                return ord(tail) - ord('a') + 1
+            if re.fullmatch(r'\d{1,2}', tail):
+                n = int(tail)
+                return n if n >= 1 else None
     return None
 
 
@@ -1402,8 +1411,8 @@ def _queue_artwork_backfill(target_dir: Path, code: str, movie: Optional[dict],
     if not code or int(config.get("scrape_artwork_fallback_limit", 2)) <= 0:
         return False
     target_dir = Path(target_dir)
-    poster = target_dir / f"{code}-poster.jpg"
-    fanart = target_dir / f"{code}-fanart.jpg"
+    poster = target_dir / "poster.jpg"
+    fanart = target_dir / "fanart.jpg"
     if poster.exists() and fanart.exists():
         return False
     _load_artwork_pending()
@@ -1491,8 +1500,8 @@ async def _run_pending_artwork(config: dict) -> int:
         _artwork_pending.pop(key, None)
         _save_artwork_pending()
         return 0
-    poster_path = target / f"{code}-poster.jpg"
-    fanart_path = target / f"{code}-fanart.jpg"
+    poster_path = target / "poster.jpg"
+    fanart_path = target / "fanart.jpg"
     if poster_path.exists() and fanart_path.exists():
         _artwork_pending.pop(key, None)
         _save_artwork_pending()
@@ -1570,10 +1579,15 @@ async def _run_pending_artwork(config: dict) -> int:
 def _get_file_status(video_path: Path, code: str = "") -> dict:
     """检查视频旁是否已有以 番号 命名的 NFO/封面。"""
     folder = video_path.parent
-    stem = code or video_path.stem
+    stem = video_path.stem
     nfo_path = folder / f"{stem}.nfo"
-    poster_path = folder / f"{stem}-poster.jpg"
-    fanart_path = folder / f"{stem}-fanart.jpg"
+    poster_path = folder / "poster.jpg"
+    fanart_path = folder / "fanart.jpg"
+    legacy_stem = code or stem
+    if not poster_path.exists():
+        poster_path = folder / f"{legacy_stem}-poster.jpg"
+    if not fanart_path.exists():
+        fanart_path = folder / f"{legacy_stem}-fanart.jpg"
     return {
         "has_nfo": nfo_path.exists(),
         "has_poster": poster_path.exists(),
@@ -1584,7 +1598,9 @@ def _get_file_status(video_path: Path, code: str = "") -> dict:
 
 def _read_existing_nfo_metadata(video_path: Path, code: str) -> dict:
     """已有刮削结果也可参与自定义文件夹命名，避免跳过刮削后退回纯番号。"""
-    path = video_path.parent / f"{code}.nfo"
+    path = video_path.parent / f"{video_path.stem}.nfo"
+    if not path.exists():
+        path = video_path.parent / f"{code}.nfo"
     try:
         root = ET.parse(path).getroot()
         original = (root.findtext("originaltitle") or "").strip()
@@ -1640,7 +1656,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             import actor_scraper
             # 当前目录尚未归档到 Emby 媒体库；这里只下载/回写头像，归档成功后再定向同步。
             result = await actor_scraper.process_nfo(
-                path.parent / f"{code}.nfo", config, sync_emby=False)
+                path.parent / f"{path.stem}.nfo", config, sync_emby=False)
             actor_images_saved = result.get("saved", 0)
             existing["actors"] = result.get("actors") or existing.get("actors", [])
             _log(f"NFO 和封面已存在，已补查演员头像：{code}（保存 {actor_images_saved} 张）")
@@ -1768,7 +1784,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
 
     if overwrite or not status["has_nfo"]:
         try:
-            nfo_file = folder / f"{code}.nfo"
+            nfo_file = folder / f"{path.stem}.nfo"
             nfo_file.write_text(_build_nfo(
                 movie, title_for_nfo, plot_zh,
                 config.get("scrape_actor_thumb_in_nfo", True)), encoding="utf-8")
@@ -1793,16 +1809,16 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                 jacket = img
                 img, cropped = _poster_bytes(img, jacket_mode)
                 if overwrite or not status["has_poster"]:
-                    (folder / f"{code}-poster.jpg").write_bytes(img)
+                    (folder / "poster.jpg").write_bytes(img)
                     saved_cover = True
                 if jacket_mode and (overwrite or not status["has_fanart"]):
-                    (folder / f"{code}-fanart.jpg").write_bytes(jacket)
+                    (folder / "fanart.jpg").write_bytes(jacket)
                     saved_cover = True
                 elif (not jacket_mode and fanart_url == cover_url
                       and (overwrite or not status["has_fanart"])):
                     # No independent sample is required for automatic
                     # scraping: reuse the already downloaded cover bytes.
-                    (folder / f"{code}-fanart.jpg").write_bytes(jacket)
+                    (folder / "fanart.jpg").write_bytes(jacket)
                     saved_cover = True
                 if cropped:
                     _log(f"已从完整横向封套右侧裁取标准竖版：{code}-poster.jpg")
@@ -1821,7 +1837,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             fanart, selected_fanart_url = await _fetch_fanart(movie, proxy)
             if fanart:
                 try:
-                    (folder / f"{code}-fanart.jpg").write_bytes(fanart)
+                    (folder / "fanart.jpg").write_bytes(fanart)
                     saved_cover = True
                     _log(f"已写入背景图：{code}-fanart.jpg")
                 except Exception as e:
@@ -1845,7 +1861,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             import actor_scraper
             # 当前目录尚未归档到 Emby 媒体库；这里只下载/回写头像，归档成功后再定向同步。
             actor_result = await actor_scraper.process_nfo(
-                folder / f"{code}.nfo", config, sync_emby=False)
+                folder / f"{path.stem}.nfo", config, sync_emby=False)
             actor_images_saved = actor_result.get("saved", 0)
             if actor_result.get("actors"):
                 movie["actors"] = actor_result["actors"]
@@ -2168,7 +2184,7 @@ def _build_archive_index(output_dir: str) -> dict:
     return idx
 
 
-def _sync_archive_sidecars(output_dir: str) -> int:
+def _sync_archive_sidecars_legacy(output_dir: str) -> int:
     """Repair legacy sidecar names in the archive without touching videos.
 
     Older archives may contain ``CODE.nfo``/``CODE-poster.jpg`` next to a
@@ -2191,17 +2207,18 @@ def _sync_archive_sidecars(output_dir: str) -> int:
                 continue
             source_stem = _safe_name(code)
             target_stem = video.stem
-            if source_stem.lower() == target_stem.lower():
-                continue
             try:
                 siblings = {p.name.lower(): p for p in video.parent.iterdir()
                             if p.is_file()}
             except OSError as e:
                 _log(f"扫描归档配套文件失败：{video.parent} — {e}")
                 continue
-            for suffix in (".nfo", "-poster.jpg", "-fanart.jpg"):
+            for suffix, target_name in (
+                    (".nfo", f"{target_stem}.nfo"),
+                    ("-poster.jpg", "poster.jpg"),
+                    ("-fanart.jpg", "fanart.jpg")):
                 source = siblings.get(f"{source_stem}{suffix}".lower())
-                target = video.parent / f"{target_stem}{suffix}"
+                target = video.parent / target_name
                 if not source or target.exists():
                     continue
                 try:
@@ -2212,6 +2229,81 @@ def _sync_archive_sidecars(output_dir: str) -> int:
                     _log(f"归档配套文件同步失败：{source} → {target} — {e}")
     except OSError as e:
         _log(f"扫描归档目录配套文件失败：{root} — {e}")
+    return changed
+
+
+def _sync_archive_sidecars(output_dir: str) -> int:
+    """Normalize archive sidecars without touching video files."""
+    if not output_dir:
+        return 0
+    root = Path(output_dir)
+    if not root.is_dir():
+        return 0
+    changed = 0
+    folders = {}
+    try:
+        for video in root.rglob("*"):
+            if video.is_file() and video.suffix.lower() in VIDEO_EXTS:
+                folders.setdefault(video.parent, []).append(video)
+    except OSError as e:
+        _log(f"归档目录扫描失败：{root} — {e}")
+        return 0
+
+    for folder, videos in folders.items():
+        videos.sort(key=lambda p: p.name.lower())
+        code = _code_from_name(folder.name)
+        if not code:
+            code = next((_code_from_name(video.stem) for video in videos), "")
+        if not code:
+            continue
+        source_stem = _safe_name(code)
+        try:
+            siblings = {p.name.lower(): p for p in folder.iterdir() if p.is_file()}
+        except OSError as e:
+            _log(f"归档配套文件扫描失败：{folder} — {e}")
+            continue
+
+        # Every segment needs its own NFO.  Rename the legacy code NFO for
+        # the first missing segment, then copy it to the remaining segments.
+        nfo_source = siblings.get(f"{source_stem}.nfo".lower())
+        for video in videos:
+            target = folder / f"{video.stem}.nfo"
+            if target.exists() or not nfo_source:
+                continue
+            try:
+                if nfo_source.resolve() == target.resolve():
+                    continue
+                if nfo_source.name.lower() == f"{source_stem}.nfo".lower():
+                    nfo_source.rename(target)
+                else:
+                    shutil.copy2(nfo_source, target)
+                changed += 1
+                _log(f"归档 NFO 已按视频名同步：{nfo_source.name} → {target.name}")
+                nfo_source = target
+            except OSError as e:
+                _log(f"归档 NFO 同步失败：{nfo_source} → {target} — {e}")
+
+        for suffix, target_name in (("-poster.jpg", "poster.jpg"),
+                                    ("-fanart.jpg", "fanart.jpg")):
+            target = folder / target_name
+            if target.exists():
+                continue
+            source = siblings.get(f"{source_stem}{suffix}".lower())
+            if not source:
+                source = next((siblings.get(f"{video.stem}{suffix}".lower())
+                               for video in videos
+                               if siblings.get(f"{video.stem}{suffix}".lower())), None)
+            if not source:
+                continue
+            try:
+                source.rename(target)
+                if not target.is_file() or source.exists():
+                    raise OSError("标准图片落地校验失败，旧图片保留")
+                changed += 1
+                _log(f"归档图片已统一命名并清理旧名：{source.name} → {target.name}")
+            except OSError as e:
+                _log(f"归档图片同步失败：{source} → {target} — {e}")
+
     return changed
 
 
@@ -2271,9 +2363,10 @@ def _discover_legacy_archive_artwork(archive_idx: dict, config: dict) -> bool:
         if not code:
             continue
         # 只接管已有 NFO/poster、但缺 fanart 的旧归档；其它不完整归档不在这里重刮。
-        if ((folder / f"{code}.nfo").exists()
-                and (folder / f"{code}-poster.jpg").exists()
-                and not (folder / f"{code}-fanart.jpg").exists()):
+        has_nfo = (folder / f"{code}.nfo").exists()
+        has_poster = (folder / "poster.jpg").exists() or (folder / f"{code}-poster.jpg").exists()
+        has_fanart = (folder / "fanart.jpg").exists() or (folder / f"{code}-fanart.jpg").exists()
+        if has_nfo and has_poster and not has_fanart:
             return _queue_artwork_backfill(folder, code, None, config)
     return False
 
@@ -2399,19 +2492,19 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
     # use that same stem. Scraping may have created them with the code stem,
     # so accept both source naming conventions and always use the media stem
     # in the archive.
-    media_stem = safe_code if (rename and code) else video_path.stem
-    media_stem = _safe_name(media_stem) or video_path.stem
+    # Sidecars are normalized independently of the video naming policy:
+    # artwork is shared by the folder, while every video gets its own NFO.
+    media_stem = _safe_name(video_dst.stem) or video_path.stem
     expected = {
+        f"{video_path.stem}.nfo".lower(): f"{media_stem}.nfo",
         f"{safe_code}.nfo".lower(): f"{media_stem}.nfo",
-        f"{safe_code}-poster.jpg".lower(): f"{media_stem}-poster.jpg",
-        f"{safe_code}-fanart.jpg".lower(): f"{media_stem}-fanart.jpg",
+        "poster.jpg": "poster.jpg",
+        "fanart.jpg": "fanart.jpg",
+        f"{safe_code}-poster.jpg".lower(): "poster.jpg",
+        f"{safe_code}-fanart.jpg".lower(): "fanart.jpg",
+        f"{video_path.stem}-poster.jpg".lower(): "poster.jpg",
+        f"{video_path.stem}-fanart.jpg".lower(): "fanart.jpg",
     }
-    if not (rename and code):
-        expected.update({
-            f"{media_stem}.nfo".lower(): f"{media_stem}.nfo",
-            f"{media_stem}-poster.jpg".lower(): f"{media_stem}-poster.jpg",
-            f"{media_stem}-fanart.jpg".lower(): f"{media_stem}-fanart.jpg",
-        })
     found_extras = {}
     try:
         for candidate in folder.iterdir():
@@ -2428,6 +2521,29 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
             # 多分段第二段处理时，附属文件可能已随第一段归档。
             continue
         else:
+            # In move mode, the first segment may already have consumed the
+            # source sidecars. When original names are preserved, copy the
+            # existing sidecar so every segment has stem-matching metadata.
+            if dst_name.lower().endswith(".nfo"):
+                suffix = ".nfo"
+                sibling = next((p for p in target_dir.iterdir()
+                                if p.is_file() and p.name.lower().endswith(suffix)
+                                and p.name.lower() != dst_name.lower()), None)
+                if sibling and _transfer(sibling, target_dir / dst_name, "copy"):
+                    done.append(dst_name)
+                    continue
+            elif dst_name.lower() in {"poster.jpg", "fanart.jpg"}:
+                # Artwork is deliberately shared; an earlier segment may
+                # already have moved it into the final folder.
+                continue
+            else:
+                suffix = dst_name[len(media_stem):].lower()
+                sibling = next((p for p in target_dir.iterdir()
+                                if p.is_file() and p.name.lower().endswith(suffix)
+                                and p.name.lower() != dst_name.lower()), None)
+                if sibling and _transfer(sibling, target_dir / dst_name, "copy"):
+                    done.append(dst_name)
+                    continue
             _log(f"归档提示：未找到附属文件 {dst_name}")
 
     # 3) 演员头像本地缓存始终随影片归档；它是保底缓存，不依赖 Emby 全局 people 映射。
@@ -2813,7 +2929,13 @@ async def _scan_once(config: dict) -> int:
                     _sibling_videos(vf), watch, min_bytes, keep_bytes)
             except Exception as e:
                 _log(f"广告分类失败，保守保留全部文件：{vf.parent.name} — {e}")
-        if vf in drop_set:
+        # A classifier result is only a deletion candidate after an
+        # independent proof that this file is an extra: recognizable codes,
+        # compact/explicit part markers, and uncertain names are never
+        # deleted.  This second gate is intentional defence in depth.
+        if vf in drop_set and _is_extra_video(vf, watch) \
+                and not _code_from_name(vf.stem) \
+                and not _has_cd_marker(vf.stem):
             try:
                 vf.unlink()
                 n_extra += 1

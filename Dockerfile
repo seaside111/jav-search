@@ -1,6 +1,10 @@
 # ── JAV Search — Dockerfile ──
 FROM python:3.11-slim
 
+# Release builds inject the Git tag here so /api/version always reports the
+# same version as the image tag. Local builds retain the current stable value.
+ARG JAV_SEARCH_VERSION=1.4.6.13
+
 # 设置工作目录
 WORKDIR /app
 
@@ -23,6 +27,7 @@ EXPOSE 8085
 # 环境变量
 ENV CONFIG_DIR=/config
 ENV PORT=8085
+ENV JAV_SEARCH_VERSION=${JAV_SEARCH_VERSION}
 ENV PYTHONUNBUFFERED=1
 # 保证中文日志在任意宿主机环境下都能正常输出，不因编码报错中断流程
 ENV PYTHONIOENCODING=utf-8

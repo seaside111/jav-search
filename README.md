@@ -1,4 +1,4 @@
-# JAV Search · v1.4.6.12
+# JAV Search · v1.4.6.13
 
 运行在群晖 Docker 上的日本成人影片信息检索 Web 应用。支持按番号 / 演员 / 关键词搜索，集成百度·阿里云翻译，接入 **Jackett 资源搜索**，支持 **一键推送 qBittorrent / Transmission 下载** 与 **下载完成自动刮削归档（Emby 兼容 NFO + 封面）**。
 
@@ -75,7 +75,9 @@ docker stop jav-search && docker rm jav-search
 # 再次执行上面的 docker run 命令即可
 ```
 
-> 当前正式版本为 `v1.4.6.12`，也可以将镜像标签 `:latest` 换成固定版本标签 `:V1.4.6.12`。
+> 当前正式版本为 `v1.4.6.13`，也可以将镜像标签 `:latest` 换成固定版本标签 `:v1.4.6.13`。
+
+版本检测读取 GitHub 的最新正式 Release（`/releases/latest`），不是直接读取 GHCR 的 `:latest` 标签。正式版本必须推送版本 tag；GitHub Actions 会自动创建对应 Release，并把 tag 注入镜像的 `/api/version`。Beta Release 不会作为正式版本参与检测。
 
 ### FlareSolverr（JavDB / FC2 过 Cloudflare 盾用 · 留空自动探测 / 也可手填）
 
@@ -209,7 +211,7 @@ volumes:
 - **完成判定**：跳过 qB 未完成分片（`.!qB`）；文件静置超过阈值即处理（手动放入的文件也能快速识别）；大小连续不变作兜底。
 - **NFO 标题**：番号（字母+数字）不翻译，作为前缀；仅日文片名/简介调用翻译，结果形如 `MOON-057 中文片名`。
 - **重命名**：视频改名为 `番号.后缀`，去掉广告网址等无关字符。
-- **归档布局**：`归档目录/YYYYMM/番号/`（含 `番号.mp4 / .nfo / -poster.jpg / -fanart.jpg`，Emby 单片单目录）。
+- **归档布局**：`归档目录/YYYYMM/番号/`；图片统一为 `poster.jpg / fanart.jpg`（不带番号），每个视频的 NFO 与视频文件同名（分段视频分别对应各自 NFO），Emby 单片单目录。
 - **清理原目录**：视频移走后，若原下载子目录已无其它达标视频，则整目录删除（含遗留样板/广告文件）。
 
 ---

@@ -1506,6 +1506,53 @@ class NamingAndTrackerTests(unittest.TestCase):
             self.assertEqual((output / "ABC-123" / "ABC-123-cd1.mp4").read_bytes(), b"part one")
             self.assertEqual((output / "ABC-123" / "ABC-123-cd2.mp4").read_bytes(), b"part two")
 
+    def test_move_multipart_with_original_names_copies_sidecars_to_each_segment(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "downloads"
+            output = root / "archive"
+            source.mkdir(parents=True)
+            cd1 = source / "ABC-123-CD1.avi"
+            cd2 = source / "ABC-123-CD2.wmv"
+            cd1.write_bytes(b"part one")
+            cd2.write_bytes(b"part two")
+            (source / "ABC-123.nfo").write_text("<movie/>", encoding="utf-8")
+            (source / "ABC-123-poster.jpg").write_bytes(b"poster")
+            (source / "ABC-123-fanart.jpg").write_bytes(b"fanart")
+
+            library._archive_file(cd1, str(output), "ABC-123", mode="move",
+                                  rename=False, folder_name="ABC-123", by_month=False)
+            library._archive_file(cd2, str(output), "ABC-123", mode="move",
+                                  rename=False, folder_name="ABC-123", by_month=False)
+
+            target = output / "ABC-123"
+            for stem in ("ABC-123-CD1", "ABC-123-CD2"):
+                self.assertTrue((target / f"{stem}.nfo").exists())
+            self.assertTrue((target / "poster.jpg").exists())
+            self.assertTrue((target / "fanart.jpg").exists())
+
+    def test_compact_letter_parts_never_collide_during_archive(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "downloads" / "ATID215"
+            output = root / "archive"
+            source.mkdir(parents=True)
+            part_a = source / "ATID215A.wmv"
+            part_b = source / "ATID215B.wmv"
+            part_a.write_bytes(b"part a")
+            part_b.write_bytes(b"part b")
+
+            for part in (part_a, part_b):
+                result = library._archive_file(
+                    part, str(output), "ATID-215", mode="move", rename=True,
+                    watch_dir=str(root / "downloads"), folder_name="ATID-215",
+                    by_month=False)
+                self.assertTrue(result["archived"])
+
+            target = output / "ATID-215"
+            self.assertEqual((target / "ATID-215-cd1.wmv").read_bytes(), b"part a")
+            self.assertEqual((target / "ATID-215-cd2.wmv").read_bytes(), b"part b")
+
     def test_move_with_organize_off_keeps_original_archive_name(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -1543,8 +1590,8 @@ class NamingAndTrackerTests(unittest.TestCase):
             self.assertTrue(result["archived"])
             self.assertTrue((target / "Original.Name.ABC-123.MP4").exists())
             self.assertTrue((target / "Original.Name.ABC-123.nfo").exists())
-            self.assertTrue((target / "Original.Name.ABC-123-poster.jpg").exists())
-            self.assertTrue((target / "Original.Name.ABC-123-fanart.jpg").exists())
+            self.assertTrue((target / "poster.jpg").exists())
+            self.assertTrue((target / "fanart.jpg").exists())
             self.assertFalse((target / "ABC-123.nfo").exists())
 
     def test_archive_sidecar_sync_repairs_existing_archive_without_touching_video(self):
@@ -1563,9 +1610,34 @@ class NamingAndTrackerTests(unittest.TestCase):
             self.assertEqual(changed, 3)
             self.assertEqual(video.read_bytes(), b"movie")
             self.assertTrue((folder / "Original.Name.ABC-123.nfo").exists())
-            self.assertTrue((folder / "Original.Name.ABC-123-poster.jpg").exists())
-            self.assertTrue((folder / "Original.Name.ABC-123-fanart.jpg").exists())
+            self.assertTrue((folder / "poster.jpg").exists())
+            self.assertTrue((folder / "fanart.jpg").exists())
             self.assertFalse((folder / "ABC-123.nfo").exists())
+            self.assertFalse((folder / "ABC-123-poster.jpg").exists())
+            self.assertFalse((folder / "ABC-123-fanart.jpg").exists())
+
+    def test_archive_sidecar_sync_gives_each_segment_its_own_nfo_and_shared_artwork(self):
+        with tempfile.TemporaryDirectory() as raw:
+            folder = Path(raw) / "archive" / "ATID-215"
+            folder.mkdir(parents=True)
+            videos = [folder / "ATID-215-cd1.wmv", folder / "ATID-215-cd2.wmv"]
+            for video in videos:
+                video.write_bytes(video.name.encode())
+            (folder / "ATID-215.nfo").write_text("<movie/>", encoding="utf-8")
+            (folder / "ATID-215-poster.jpg").write_bytes(b"poster")
+            (folder / "ATID-215-fanart.jpg").write_bytes(b"fanart")
+
+            changed = library._sync_archive_sidecars(str(folder.parent))
+
+            self.assertEqual(changed, 4)
+            self.assertTrue((folder / "ATID-215-cd1.nfo").exists())
+            self.assertTrue((folder / "ATID-215-cd2.nfo").exists())
+            self.assertTrue((folder / "poster.jpg").exists())
+            self.assertTrue((folder / "fanart.jpg").exists())
+            self.assertFalse((folder / "ATID-215.nfo").exists())
+            self.assertFalse((folder / "ATID-215-poster.jpg").exists())
+            self.assertFalse((folder / "ATID-215-fanart.jpg").exists())
+            self.assertEqual(videos[0].read_bytes(), b"ATID-215-cd1.wmv")
 
     def test_same_path_move_is_not_reported_as_source_removed(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -1765,8 +1837,8 @@ class NamingAndTrackerTests(unittest.TestCase):
             target = output / "SAN-475 ActorA"
             self.assertTrue(result["archived"])
             self.assertTrue((target / "SAN-475.nfo").exists())
-            self.assertTrue((target / "SAN-475-poster.jpg").exists())
-            self.assertTrue((target / "SAN-475-fanart.jpg").exists())
+            self.assertTrue((target / "poster.jpg").exists())
+            self.assertTrue((target / "fanart.jpg").exists())
             self.assertTrue((target / "actors" / "ActorA.jpg").exists())
 
     def test_non_fc2_artwork_search_skips_fc2_source(self):
@@ -1859,7 +1931,7 @@ class NamingAndTrackerTests(unittest.TestCase):
                 actor_scraper.notify_emby_folder = original_notify
             self.assertEqual(result, 1)
             self.assertTrue(library._is_fanart_image(
-                (target / "DLDSS-509-fanart.jpg").read_bytes()))
+                    (target / "fanart.jpg").read_bytes()))
             self.assertEqual(notified, [target])
 
     def test_confirmed_no_fanart_does_not_enter_persistent_queue(self):

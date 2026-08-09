@@ -24,7 +24,7 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write         # 构建正式 tag 时同步创建 GitHub Release
       packages: write          # 推送到 GHCR 需要 packages 写权限
     steps:
       - name: 检出代码
@@ -74,7 +74,25 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            JAV_SEARCH_VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '1.4.6.13' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  release:
+    name: 同步 GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 创建或更新 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'Beta') }}
+          make_latest: ${{ !(contains(github.ref_name, 'beta') || contains(github.ref_name, 'Beta')) }}
