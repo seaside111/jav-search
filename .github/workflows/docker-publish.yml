@@ -76,11 +76,18 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
-            JAV_SEARCH_VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '1.4.6.17' }}
+            JAV_SEARCH_VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '1.4.6.18' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: 正式版本强制同步 latest 标签
+        if: startsWith(github.ref, 'refs/tags/') && !(contains(github.ref_name, 'beta') || contains(github.ref_name, 'Beta'))
+        run: |
+          docker buildx imagetools create \
+            --tag "${{ steps.img.outputs.name }}:latest" \
+            "${{ steps.img.outputs.name }}:${{ github.ref_name }}"
 
   release:
     name: 同步 GitHub Release
