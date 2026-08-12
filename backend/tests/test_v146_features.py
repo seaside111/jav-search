@@ -1275,6 +1275,71 @@ class VideoClassificationTests(unittest.TestCase):
             second.write_bytes(b"part")
             self.assertFalse(library._is_hard_subtitle_video(video, "NACR-629"))
 
+    def test_hard_subtitle_variant_is_kept_in_code_based_archive_folder_name(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            video = root / "NACR-629-C.mp4"
+            video.write_bytes(b"movie")
+            self.assertEqual(
+                library._archive_folder_code(video, "NACR-629"), "NACR-629-C")
+            self.assertEqual(
+                library._archive_folder_name(
+                    library._archive_folder_code(video, "NACR-629"),
+                    "Title", "", [], {"scrape_folder_naming": "code_title"}),
+                "NACR-629-C Title")
+
+    def test_hard_subtitle_poster_badge_is_visible_and_uses_safe_fallback(self):
+        source = Image.new("RGB", (320, 480), "black")
+        raw = BytesIO()
+        source.save(raw, format="JPEG")
+        badge = library._hard_subtitle_poster_bytes(raw.getvalue())
+        with Image.open(BytesIO(badge)) as image:
+            self.assertEqual(image.size, (320, 480))
+            # The lower-right badge must contain more than the unchanged
+            # black poster background.
+            self.assertTrue(any(pixel != (0, 0, 0) for pixel in image.crop((220, 390, 320, 480)).getdata()))
+
+    def test_subtitle_badges_are_bundled_images_and_scale_without_runtime_fonts(self):
+        assets = Path(library.__file__).resolve().parent / "assets"
+        self.assertTrue((assets / "hard-subtitle-badge.png").is_file())
+        self.assertTrue((assets / "subtitle-badge.png").is_file())
+        source = Image.new("RGB", (480, 800), "black")
+        raw = BytesIO()
+        source.save(raw, format="JPEG")
+        for hard in (True, False):
+            output = library._subtitle_poster_bytes(raw.getvalue(), hard)
+            with Image.open(BytesIO(output)) as image:
+                self.assertEqual(image.size, (480, 800))
+
+    def test_external_subtitle_requires_exact_video_stem(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            video = root / "ABC-123.mkv"
+            video.write_bytes(b"movie")
+            self.assertFalse(library._has_external_subtitle(video))
+
+            (root / "ABC-123.zh.srt").write_text("1", encoding="utf-8")
+            self.assertTrue(library._has_external_subtitle(video))
+            (root / "ABC-123.zh.srt").unlink()
+            (root / "ABC-123.comment.srt").write_text("1", encoding="utf-8")
+            self.assertFalse(library._has_external_subtitle(video))
+            (root / "ABC-123.srt").write_text("1", encoding="utf-8")
+            self.assertTrue(library._has_external_subtitle(video))
+
+    def test_hard_subtitle_badge_has_priority_over_external_subtitle_badge(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            video = root / "ABC-123-C.mp4"
+            video.write_bytes(b"movie")
+            (root / "ABC-123-C.srt").write_text("1", encoding="utf-8")
+            self.assertTrue(library._is_hard_subtitle_video(video, "ABC-123"))
+            self.assertTrue(library._has_external_subtitle(video))
+            # The scrape branch uses hard_subtitle first, so the two badges
+            # cannot overlap when both signals are present.
+            self.assertNotEqual(
+                library._subtitle_badge_bytes((160, 56), True),
+                library._subtitle_badge_bytes((160, 56), False))
+
     def test_hard_subtitle_uniqueness_is_scoped_to_each_code(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

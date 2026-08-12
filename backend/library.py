@@ -62,6 +62,7 @@ def _log(msg: str):
 
 # 支持的视频扩展名
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".wmv", ".mov", ".ts", ".m2ts", ".rmvb", ".flv", ".iso"}
+SUBTITLE_EXTS = {".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx"}
 
 # 文件名里常见的站点/广告前缀噪声（会污染番号识别），如
 #   hhd800.com@ / [javbus.com] / www.xxx.cc- / (98tang.com)
@@ -797,6 +798,49 @@ def _is_hard_subtitle_video(video_path: Path, code: str) -> bool:
     return bool(re.fullmatch(pattern, video_path.stem, re.IGNORECASE))
 
 
+def _has_external_subtitle(video_path: Path) -> bool:
+    """Match only a sidecar subtitle with the exact video stem.
+
+    A random subtitle elsewhere in a torrent directory must not mark every
+    video.  ``.idx`` is accepted together with its usual ``.sub`` companion;
+    either exact-stem file is sufficient to identify an external subtitle.
+    """
+    stem = video_path.stem.casefold()
+    language_suffix = re.compile(
+        r"^(?:[a-z]{2,3}(?:[-_][a-z]{2,4})?|chs?|cht|sc|tc)"
+        r"(?:[._-](?:forced|sdh|full|default))?$",
+        re.IGNORECASE,
+    )
+    try:
+        return any(
+            item.is_file()
+            and item.suffix.casefold() in SUBTITLE_EXTS
+            and (
+                item.stem.casefold() == stem
+                or (
+                    item.stem.casefold().startswith(stem + ".")
+                    and language_suffix.fullmatch(item.stem[len(stem) + 1:])
+                )
+            )
+            for item in video_path.parent.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def _archive_folder_code(video_path: Path, code: str) -> str:
+    """Return the code form used in a custom archive folder name.
+
+    ``CODE-C`` is a variant of the same movie, not a different scrape code.
+    Keep the base code for metadata/video naming, but preserve the ``-C``
+    marker when the folder naming rule includes the code.
+    """
+    code = (code or "").strip()
+    if code and _is_hard_subtitle_video(video_path, code):
+        return f"{code}-C"
+    return code
+
+
 def _nfo_has_tag(path: Path, value: str) -> bool:
     try:
         root = ET.parse(path).getroot()
@@ -956,40 +1000,54 @@ def _hard_subtitle_font(size: int):
                 return ImageFont.truetype(str(path), size)
         except Exception:
             continue
-    return ImageFont.load_default()
+    # Do not return Pillow's default bitmap font here.  It accepts CJK text
+    # but renders missing glyphs as identical tofu boxes, which makes a
+    # normal textbbox() call look successful while producing a bad badge.
+    return None
+
+
+def _subtitle_badge_bytes(size: tuple[int, int], hard_subtitle: bool) -> bytes:
+    """Load a bundled badge and scale it without using a runtime font."""
+    asset = Path(__file__).resolve().parent / "assets" / (
+        "hard-subtitle-badge.png" if hard_subtitle else "subtitle-badge.png")
+    with Image.open(asset) as source:
+        badge = source.convert("RGBA")
+        badge = badge.resize(size, Image.Resampling.LANCZOS)
+    output = BytesIO()
+    badge.save(output, format="PNG")
+    return output.getvalue()
+
+
+def _subtitle_badge_path(hard_subtitle: bool) -> Path:
+    return Path(__file__).resolve().parent / "assets" / (
+        "hard-subtitle-badge.png" if hard_subtitle else "subtitle-badge.png")
+
+
+def _subtitle_poster_bytes(data: bytes, hard_subtitle: bool) -> bytes:
+    """Paint a bundled subtitle badge onto the poster image."""
+    with Image.open(BytesIO(data)) as source:
+        image = source.convert("RGBA")
+    width, height = image.size
+    # Use the shorter image edge as the scale reference.  A landscape cover
+    # must not receive a portrait-sized badge that obscures its subject.
+    short_edge = min(width, height)
+    badge_h = max(40, min(88, round(short_edge * 0.145)))
+    with Image.open(_subtitle_badge_path(hard_subtitle)) as asset:
+        asset_ratio = asset.width / max(asset.height, 1)
+    badge_w = max(1, round(badge_h * asset_ratio))
+    margin = max(14, short_edge // 25)
+    badge = Image.open(BytesIO(_subtitle_badge_bytes(
+        (badge_w, badge_h), hard_subtitle))).convert("RGBA")
+    x0 = max(0, width - badge_w - margin)
+    y0 = max(0, height - badge_h - margin)
+    image.alpha_composite(badge, (x0, y0))
+    output = BytesIO()
+    image.convert("RGB").save(output, format="JPEG", quality=95)
+    return output.getvalue()
 
 
 def _hard_subtitle_poster_bytes(data: bytes) -> bytes:
-    """Paint the hard-subtitle badge onto the poster image."""
-    with Image.open(BytesIO(data)) as source:
-        image = source.convert("RGB")
-    draw = ImageDraw.Draw(image)
-    width, height = image.size
-    font_size = max(18, min(48, width // 12))
-    font = _hard_subtitle_font(font_size)
-    label = "硬字幕"
-    try:
-        left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
-    except (UnicodeEncodeError, ValueError):
-        # A minimal runtime without a CJK font still gets a visible badge;
-        # normal deployments use one of the Chinese fonts above.
-        label = "SUB"
-        left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
-    pad_x = max(12, width // 45)
-    pad_y = max(7, height // 80)
-    box_w = right - left + pad_x * 2
-    box_h = bottom - top + pad_y * 2
-    margin = max(12, width // 35)
-    x0 = max(0, width - box_w - margin)
-    y0 = max(0, height - box_h - margin)
-    radius = max(8, box_h // 4)
-    draw.rounded_rectangle((x0, y0, x0 + box_w, y0 + box_h),
-                           radius=radius, fill=(35, 165, 125))
-    draw.text((x0 + pad_x - left, y0 + pad_y - top), label,
-              font=font, fill=(255, 255, 255))
-    output = BytesIO()
-    image.save(output, format="JPEG", quality=95)
-    return output.getvalue()
+    return _subtitle_poster_bytes(data, hard_subtitle=True)
 
 
 def _cover_referer(cover_url: str) -> str:
@@ -1847,12 +1905,14 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                 "error": f"无法创建刮削附属文件目录: {e}"}
 
     hard_subtitle = _is_hard_subtitle_video(path, code)
+    external_subtitle = _has_external_subtitle(path)
     status = _get_file_status(path, code, sidecar_dir=sidecar_dir)
     nfo_path = metadata_dir / f"{path.stem}.nfo"
     hard_subtitle_repair = hard_subtitle and not _nfo_has_tag(nfo_path, "硬字幕")
     if (not overwrite and status["has_nfo"] and status["has_poster"]
             and status["has_fanart"]
-            and not hard_subtitle_repair):
+            and not hard_subtitle_repair
+            and not external_subtitle):
         existing = _read_existing_nfo_metadata(path, code, sidecar_dir)
         actor_images_saved = 0
         if (config.get("scrape_actor_images_enabled", False)
@@ -2002,11 +2062,13 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     cover_url, fanart_url = _artwork_urls(movie)
     jacket_mode = _use_jacket_artwork(config, movie, cover_url)
     if cover_url and (overwrite or not status["has_poster"] or hard_subtitle_repair
+                      or external_subtitle
                       or not status["has_fanart"]):
         # 优先复用首页/详情已缓存的封面（命中即零上游请求）；未命中再回源（含 FC2 防盗链兜底）
         _log(f"获取封面（优先复用缓存）：{code} ← {cover_url[:60]}")
         need_cover_bytes = (
             overwrite or not status["has_poster"] or hard_subtitle_repair
+            or external_subtitle
             or (fanart_url == cover_url and not status["has_fanart"])
             or (jacket_mode and not status["has_fanart"]))
         img = await _fetch_cover(cover_url, proxy) if need_cover_bytes else None
@@ -2016,6 +2078,8 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                 img, cropped = _poster_bytes(img, jacket_mode)
                 if hard_subtitle:
                     img = _hard_subtitle_poster_bytes(img)
+                elif external_subtitle:
+                    img = _subtitle_poster_bytes(img, hard_subtitle=False)
                 if overwrite or not status["has_poster"] or hard_subtitle_repair:
                     (metadata_dir / "poster.jpg").write_bytes(img)
                     saved_cover = True
@@ -3048,8 +3112,9 @@ async def _process_completed_file(video_path: Path, config: dict,
         keep_bytes = int(config.get("scrape_keep_size_mb", 300)) * 1024 * 1024
         code = scrape_res.get("code", "") or await _resolve_code(video_path, config)
         sidecar_dir = scrape_res.get("sidecar_dir") or str(video_path.parent)
+        folder_code = _archive_folder_code(video_path, code)
         folder_name = _archive_folder_name(
-            code, scrape_res.get("title_original", ""),
+            folder_code, scrape_res.get("title_original", ""),
             scrape_res.get("folder_title", ""), scrape_res.get("actors", []), config)
         src_parent = video_path.parent
         # V1.5 统一：归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
@@ -3580,8 +3645,9 @@ async def api_scrape_single(req: ScrapeRequest):
     if req.move and config.get("scrape_output_dir"):
         video_path = Path(req.filepath)
         code = result.get("code", "") or await _resolve_code(video_path, config)
+        folder_code = _archive_folder_code(video_path, code)
         folder_name = _archive_folder_name(
-            code, result.get("title_original", ""), result.get("folder_title", ""),
+            folder_code, result.get("title_original", ""), result.get("folder_title", ""),
             result.get("actors", []), config)
         mv = _archive_file(
             video_path, config["scrape_output_dir"], code,
