@@ -44,8 +44,8 @@ _VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
 try:
     _IMAGE_VERSION = _VERSION_FILE.read_text(encoding="utf-8").strip()
 except (OSError, UnicodeError):
-    _IMAGE_VERSION = "1.4.6.20"
-APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.20"
+    _IMAGE_VERSION = "1.4.6.21"
+APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.21"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -343,6 +343,7 @@ class ConfigUpdateRequest(BaseModel):
     scrape_folder_naming: Optional[str] = None
     scrape_folder_title_translate: Optional[bool] = None
     scrape_folder_actor_mode: Optional[str] = None
+    scrape_actor_subfolder_naming: Optional[str] = None
     scrape_jacket_artwork_enabled: Optional[bool] = None
     scrape_actor_images_enabled: Optional[bool] = None
     scrape_actor_thumb_in_nfo: Optional[bool] = None

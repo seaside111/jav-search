@@ -1505,6 +1505,15 @@ class NamingAndTrackerTests(unittest.TestCase):
             "ABC-123", "", "", [], {"scrape_folder_naming": "actor"})
         self.assertEqual(name, "ABC-123")
 
+    def test_actor_only_archive_subfolder_name(self):
+        self.assertEqual(library._archive_actor_subfolder_name(
+            "ABC-123", "Original title", "中文标题",
+            {"scrape_actor_subfolder_naming": "code"}), "ABC-123")
+        self.assertEqual(library._archive_actor_subfolder_name(
+            "ABC-123", "Original title", "中文标题",
+            {"scrape_actor_subfolder_naming": "code_title",
+             "scrape_folder_title_translate": True}), "ABC-123 中文标题")
+
     def test_jacket_artwork_mode_requires_confirmed_horizontal_cover(self):
         movie = {
             "source": "JavBus",

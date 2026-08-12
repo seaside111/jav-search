@@ -589,7 +589,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.20</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.21</div>
   <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -1031,6 +1031,8 @@
             </select>
             <label class="source-chk"><input type="checkbox" id="cfgFolderTitleTranslate"> 标题用于文件夹时翻译为中文</label>
             <select class="setting-input" id="cfgFolderActorMode"><option value="first">多人时只用第一位演员</option><option value="all">加入全部演员（最多前 7 位）</option></select>
+            <select class="setting-input" id="cfgActorSubfolderNaming"><option value="code">演员目录下二级目录：只用番号</option><option value="code_title">演员目录下二级目录：番号 + 标题</option></select>
+            <span class="setting-hint">仅在选择“只用演员”时生效，用于避免同一演员的不同影片互相覆盖。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
@@ -2465,6 +2467,7 @@ async function openSettings() {
     document.getElementById('cfgFolderNaming').value = ['code','actor','code_title','code_actor','code_title_actor'].includes(cfg.scrape_folder_naming) ? cfg.scrape_folder_naming : 'code';
     document.getElementById('cfgFolderTitleTranslate').checked = !!cfg.scrape_folder_title_translate;
     document.getElementById('cfgFolderActorMode').value = cfg.scrape_folder_actor_mode === 'all' ? 'all' : 'first';
+    document.getElementById('cfgActorSubfolderNaming').value = cfg.scrape_actor_subfolder_naming === 'code_title' ? 'code_title' : 'code';
     document.getElementById('cfgActorImagesEnabled').checked = !!cfg.scrape_actor_images_enabled;
     document.getElementById('cfgActorThumbInNfo').checked = cfg.scrape_actor_thumb_in_nfo !== false;
     document.getElementById('cfgActorImagesDir').value = cfg.scrape_actor_images_dir || '';
@@ -2922,6 +2925,7 @@ async function saveSettings() {
     scrape_folder_naming: document.getElementById('cfgFolderNaming').value,
     scrape_folder_title_translate: document.getElementById('cfgFolderTitleTranslate').checked,
     scrape_folder_actor_mode: document.getElementById('cfgFolderActorMode').value,
+    scrape_actor_subfolder_naming: document.getElementById('cfgActorSubfolderNaming').value,
     scrape_actor_images_enabled: document.getElementById('cfgActorImagesEnabled').checked,
     scrape_actor_thumb_in_nfo: document.getElementById('cfgActorThumbInNfo').checked,
     scrape_actor_images_dir: document.getElementById('cfgActorImagesDir').value.trim(),

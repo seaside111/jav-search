@@ -1263,6 +1263,17 @@ def _archive_folder_name(code: str, title_original: str, title_translated: str,
     return result or base[:limit].rstrip(" .")
 
 
+def _archive_actor_subfolder_name(code: str, title_original: str,
+                                  title_translated: str, config: dict) -> str:
+    mode = config.get("scrape_actor_subfolder_naming", "code")
+    if mode not in {"code", "code_title"}:
+        mode = "code"
+    return _archive_folder_name(
+        code, title_original, title_translated, [],
+        {"scrape_folder_naming": mode,
+         "scrape_folder_title_translate": config.get("scrape_folder_title_translate", False)})
+
+
 async def _fetch_cover(url: str, proxy: Optional[str]) -> Optional[bytes]:
     """获取封面字节。
 
@@ -2718,7 +2729,8 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
                   sidecar_dir: Optional[Path] = None,
                   min_bytes: int = 100 * 1024 * 1024,
                   keep_bytes: int = 300 * 1024 * 1024,
-                  multipart_parts: Optional[list] = None) -> dict:
+                  multipart_parts: Optional[list] = None,
+                  subfolder_name: str = "") -> dict:
     """
     把视频归档到 归档目录/年月/番号/ 子目录下（Emby 单片单目录布局）。
     rename：开（刮削开）= 视频改名「番号.后缀」、随带番号命名的 NFO/封面；
@@ -2732,6 +2744,8 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
     out = Path(output_dir)
     month_dir = out / datetime.now().strftime("%Y%m") if by_month else out
     target_dir = month_dir / (folder_name or safe_code)
+    if subfolder_name:
+        target_dir /= subfolder_name
     # 同番号已经归档时复用原目录，避免标题翻译变化制造重复影片目录。
     try:
         safe_low = safe_code.lower()
@@ -3134,12 +3148,17 @@ async def _process_completed_file(video_path: Path, config: dict,
         folder_name = _archive_folder_name(
             folder_code, scrape_res.get("title_original", ""),
             scrape_res.get("folder_title", ""), scrape_res.get("actors", []), config)
+        subfolder_name = (_archive_actor_subfolder_name(
+            folder_code, scrape_res.get("title_original", ""),
+            scrape_res.get("folder_title", ""), config)
+            if config.get("scrape_folder_naming", "code") == "actor" else "")
         src_parent = video_path.parent
         # V1.5 统一：归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
         mode = (config.get("archive_mode") or "hardlink").lower()
         rename_video = organize_on and config.get("scrape_video_rename_enabled", True)
         mv = _archive_file(video_path, output_dir, code, mode=mode, rename=rename_video,
                            watch_dir=str(watch_dir), folder_name=folder_name,
+                           subfolder_name=subfolder_name,
                            by_month=config.get("archive_by_month", True),
                            sidecar_dir=Path(sidecar_dir),
                            min_bytes=min_bytes, keep_bytes=keep_bytes,
@@ -3667,6 +3686,10 @@ async def api_scrape_single(req: ScrapeRequest):
         folder_name = _archive_folder_name(
             folder_code, result.get("title_original", ""), result.get("folder_title", ""),
             result.get("actors", []), config)
+        subfolder_name = (_archive_actor_subfolder_name(
+            folder_code, result.get("title_original", ""),
+            result.get("folder_title", ""), config)
+            if config.get("scrape_folder_naming", "code") == "actor" else "")
         mv = _archive_file(
             video_path, config["scrape_output_dir"], code,
             mode=(config.get("archive_mode") or "hardlink").lower(),
@@ -3674,6 +3697,7 @@ async def api_scrape_single(req: ScrapeRequest):
                     config.get("scrape_video_rename_enabled", True)),
             watch_dir=config.get("scrape_watch_dir", ""),
             folder_name=folder_name,
+            subfolder_name=subfolder_name,
             by_month=config.get("archive_by_month", True),
             sidecar_dir=Path(result.get("sidecar_dir") or video_path.parent),
             min_bytes=int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024,

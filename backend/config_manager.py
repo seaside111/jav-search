@@ -152,6 +152,7 @@ DEFAULT_CONFIG = {
     "scrape_folder_naming": "code",      # code | actor | code_title | code_actor | code_title_actor
     "scrape_folder_title_translate": False,
     "scrape_folder_actor_mode": "first", # first | all
+    "scrape_actor_subfolder_naming": "code", # code | code_title
     "scrape_jacket_artwork_enabled": True, # 封套同时生成裁切 poster 与完整横向 fanart；关闭则不裁切
     "scrape_actor_images_enabled": False,
     "scrape_actor_thumb_in_nfo": True,  # 在 NFO actor/thumb 中写入远程头像地址（Kodi/可移植性）
