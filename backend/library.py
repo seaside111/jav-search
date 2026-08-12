@@ -34,7 +34,7 @@ from xml.dom import minidom
 
 import httpx
 from fastapi import APIRouter, HTTPException
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 from pydantic import BaseModel
 
 from config_manager import load as load_config
@@ -2576,6 +2576,24 @@ def _sync_archive_sidecars(output_dir: str) -> int:
                 _log(f"归档图片已统一命名并清理旧名：{source.name} → {target.name}")
             except OSError as e:
                 _log(f"归档图片同步失败：{source} → {target} — {e}")
+
+        # A subtitle may be added manually after the movie was archived.
+        # Rebuild the existing local poster from its current bytes so this
+        # repair action needs no network metadata lookup.  Hard subtitle is
+        # deliberately checked first when both signals exist.
+        poster = folder / "poster.jpg"
+        if poster.is_file():
+            hard = any(_is_hard_subtitle_video(video, code) for video in videos)
+            external = any(_has_external_subtitle(video) for video in videos)
+            if hard or external:
+                try:
+                    poster.write_bytes(_subtitle_poster_bytes(
+                        poster.read_bytes(), hard_subtitle=hard))
+                    changed += 1
+                    label = "硬字幕" if hard else "外挂字幕"
+                    _log(f"归档封面已按字幕状态重新生成角标：{folder.name}（{label}）")
+                except (OSError, UnidentifiedImageError, ValueError) as e:
+                    _log(f"归档字幕角标修复失败：{poster} — {e}")
 
     return changed
 

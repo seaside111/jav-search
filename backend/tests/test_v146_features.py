@@ -1918,6 +1918,24 @@ class NamingAndTrackerTests(unittest.TestCase):
             self.assertTrue((folder / "fanart.jpg").exists())
             self.assertFalse((folder / "ABC-123.nfo").exists())
             self.assertFalse((folder / "ABC-123-poster.jpg").exists())
+
+    def test_archive_sidecar_sync_rebuilds_poster_for_manually_added_subtitle(self):
+        with tempfile.TemporaryDirectory() as raw:
+            archive = Path(raw) / "archive"
+            folder = archive / "ABC-123"
+            folder.mkdir(parents=True)
+            video = folder / "ABC-123.mp4"
+            video.write_bytes(b"movie")
+            (folder / "ABC-123.zh.srt").write_text("1", encoding="utf-8")
+            source = Image.new("RGB", (480, 800), "black")
+            source.save(folder / "poster.jpg", format="JPEG")
+
+            changed = library._sync_archive_sidecars(str(archive))
+
+            self.assertGreaterEqual(changed, 1)
+            with Image.open(folder / "poster.jpg") as poster:
+                self.assertEqual(poster.size, (480, 800))
+                self.assertNotEqual(poster.getpixel((450, 740)), (0, 0, 0))
             self.assertFalse((folder / "ABC-123-fanart.jpg").exists())
 
     def test_archive_sidecar_sync_gives_each_segment_its_own_nfo_and_shared_artwork(self):

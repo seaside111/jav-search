@@ -589,7 +589,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.18</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.20</div>
   <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -1051,7 +1051,7 @@
           <div class="setting-row">
             <label class="setting-label">历史归档配套文件修复</label>
             <button type="button" class="jackett-test-btn" style="margin-left:0" onclick="syncArchiveSidecars()">手动同步 NFO/图片文件名</button>
-            <span class="setting-hint">仅扫描上面的归档目录：每个视频补齐同名 NFO，图片统一为 poster.jpg / fanart.jpg；不会自动执行，也不会修改视频文件。</span>
+            <span class="setting-hint">仅扫描上面的归档目录：每个视频补齐同名 NFO，图片统一为 poster.jpg / fanart.jpg；同时按归档目录内的视频与外挂字幕文件重新生成字幕角标；不会自动执行，也不会修改视频文件。</span>
             <span class="setting-hint" id="archiveSidecarSyncMsg"></span>
           </div>
           <div class="setting-row">
