@@ -76,7 +76,10 @@ class JavDbFlareSolverrTests(unittest.TestCase):
         html = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
             encoding="utf-8")
         self.assertIn("/api/details/resolve", html)
-        self.assertIn("['jav321', 'javdb'].filter", html)
+        # 当前设计：JAV321 仅在打开详情时按需补抓；JavDB 不作为普通卡片的
+        # 自动补抓来源，避免无必要地触发 FlareSolverr。
+        self.assertIn("['jav321'].filter", html)
+        self.assertNotIn("['jav321', 'javdb'].filter", html)
         self.assertNotIn("m._javdb_extra_loaded = true", html)
         self.assertNotIn("idxs.forEach(i => { if (currentResults[i]) currentResults[i].detail_loaded = true; })", html)
 
@@ -868,6 +871,45 @@ class VideoClassificationTests(unittest.TestCase):
                        "completed": False}
             self.assertIs(library._match_downloader_torrent(video, watch, [tr_task]), tr_task)
 
+    def test_downloader_state_prefers_api_without_temp_suffix(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw)
+            video = watch / "ABC-123.mp4"
+            video.write_bytes(b"movie")
+            pending = {"name": "ABC-123", "completed": False}
+            done = {"name": "ABC-123", "completed": True}
+            state, task = library._file_download_state(video, watch, [pending])
+            self.assertEqual(state, "downloading")
+            self.assertIs(task, pending)
+            state, task = library._file_download_state(video, watch, [done])
+            self.assertEqual(state, "completed")
+            self.assertIs(task, done)
+
+    def test_downloader_state_matches_single_file_by_stem(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw)
+            video = watch / "ABC-123.mp4"
+            video.write_bytes(b"movie")
+            task = {"name": "ABC-123.mkv", "completed": False}
+            self.assertEqual(
+                library._file_download_state(video, watch, [task])[0],
+                "downloading")
+
+    def test_downloader_query_failure_is_not_empty_task_list(self):
+        async def failed_list(_config):
+            return None
+
+        original = library._download_state_snapshot
+        async def snapshot(_config):
+            tasks = await failed_list(_config)
+            return (False, []) if tasks is None else (True, tasks)
+        library._download_state_snapshot = snapshot
+        try:
+            self.assertEqual(asyncio.run(library._download_state_snapshot({})),
+                             (False, []))
+        finally:
+            library._download_state_snapshot = original
+
     def test_keeps_unique_and_large_videos_and_drops_small_ad(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -1107,6 +1149,111 @@ class VideoClassificationTests(unittest.TestCase):
             with mock.patch.object(library, "_probe_video", return_value={}):
                 self.assertEqual(library._part_suffix(first, "ABC-123", str(root)), "")
                 self.assertEqual(library._part_suffix(second, "ABC-123", str(root)), "")
+
+    def test_single_code_c_is_not_treated_as_cd3(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            video = root / "NACR-629-C.mp4"
+            video.write_bytes(b"movie")
+            self.assertEqual(library._part_suffix(video, "NACR-629", str(root)), "")
+            self.assertFalse(library._multipart_parts(video, "NACR-629", str(root)))
+
+            result = library._archive_file(
+                video, str(root / "archive"), "NACR-629", mode="copy",
+                rename=True, watch_dir=str(root), folder_name="NACR-629",
+                by_month=False, min_bytes=100, keep_bytes=500)
+            self.assertTrue(result["archived"])
+            self.assertTrue((root / "archive" / "NACR-629" / "NACR-629-C.mp4").exists())
+
+    def test_multipart_requires_complete_same_code_sequence_after_ad_filtering(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            videos = [root / f"ABC-123-{suffix}.mp4" for suffix in ("A", "B", "C")]
+            for video in videos:
+                video.write_bytes(b"x" * 1000)
+            self.assertEqual(library._part_suffix(videos[2], "ABC-123", str(root),
+                                                   min_bytes=100, keep_bytes=500), "-cd3")
+
+            videos[1].unlink()
+            self.assertEqual(library._part_suffix(videos[2], "ABC-123", str(root),
+                                                   min_bytes=100, keep_bytes=500), "")
+
+    def test_multipart_rejects_mixed_code_effective_videos(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            first = root / "ABC-123-A.mp4"
+            second = root / "ABC-123-B.mp4"
+            other = root / "XYZ-999.mp4"
+            for video in (first, second, other):
+                video.write_bytes(b"x" * 1000)
+            self.assertEqual(library._part_suffix(first, "ABC-123", str(root),
+                                                   min_bytes=100, keep_bytes=500), "")
+
+    def test_incomplete_qbittorrent_segment_is_not_multipart_evidence(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            first = root / "ABC-123-A.mp4"
+            second = root / "ABC-123-B.mp4"
+            first.write_bytes(b"part one")
+            second.write_bytes(b"part two")
+            (root / "ABC-123-B.mp4.!qB").write_bytes(b"")
+            self.assertEqual(library._part_suffix(first, "ABC-123", str(root),
+                                                   min_bytes=100, keep_bytes=500), "")
+
+    def test_untracked_preallocated_file_requires_observation_window(self):
+        with tempfile.TemporaryDirectory() as raw:
+            video = Path(raw) / "ABC-123.mp4"
+            video.write_bytes(b"x" * 1000)
+            st = video.stat()
+            library._size_history.pop(str(video), None)
+            settled, count, observed = library._manual_file_stability(
+                video, st, stable_needed=2, settle_seconds=60, now=1000)
+            self.assertFalse(settled)
+            self.assertEqual(count, 1)
+            self.assertEqual(observed, 0)
+
+            settled, count, observed = library._manual_file_stability(
+                video, st, stable_needed=2, settle_seconds=60, now=1060)
+            self.assertTrue(settled)
+            self.assertEqual(count, 2)
+            self.assertEqual(observed, 60)
+
+            video.write_bytes(b"y" * 1001)
+            changed = video.stat()
+            settled, count, _ = library._manual_file_stability(
+                video, changed, stable_needed=2, settle_seconds=60, now=1120)
+            self.assertFalse(settled)
+            self.assertEqual(count, 1)
+
+    def test_unique_code_c_is_hard_subtitle_and_nfo_can_mark_it(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            video = root / "NACR-629-c.mp4"
+            video.write_bytes(b"movie")
+            self.assertTrue(library._is_hard_subtitle_video(video, "NACR-629"))
+            nfo = library._build_nfo({"code": "NACR-629"}, "NACR-629", "",
+                                     hard_subtitle=True)
+            self.assertIn("<tag>硬字幕</tag>", nfo)
+
+            second = root / "NACR-629-A.mp4"
+            second.write_bytes(b"part")
+            self.assertFalse(library._is_hard_subtitle_video(video, "NACR-629"))
+
+    def test_hard_subtitle_uniqueness_is_scoped_to_each_code(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            first = root / "NACR-629-C.mp4"
+            other = root / "SSIS-461-c.mp4"
+            first.write_bytes(b"first")
+            other.write_bytes(b"other")
+
+            self.assertTrue(library._is_hard_subtitle_video(first, "NACR-629"))
+            self.assertTrue(library._is_hard_subtitle_video(other, "SSIS-461"))
+
+            same_code_part = root / "NACR-629-A.mp4"
+            same_code_part.write_bytes(b"part")
+            self.assertFalse(library._is_hard_subtitle_video(first, "NACR-629"))
+            self.assertTrue(library._is_hard_subtitle_video(other, "SSIS-461"))
 
     def test_jav321_parser_keeps_cover_and_sample_separate(self):
         html = """
@@ -1560,7 +1707,7 @@ class NamingAndTrackerTests(unittest.TestCase):
             library._cleanup_source(source, watch, 1)
             self.assertFalse(source.exists())
             self.assertEqual((output / "ABC-123" / "ABC-123-cd1.mp4").read_bytes(), b"part one")
-            self.assertEqual((output / "ABC-123" / "ABC-123-cd2.mp4").read_bytes(), b"part two")
+            self.assertEqual((output / "ABC-123" / "ABC-123-CD2.mp4").read_bytes(), b"part two")
 
     def test_move_multipart_with_original_names_copies_sidecars_to_each_segment(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -1607,7 +1754,7 @@ class NamingAndTrackerTests(unittest.TestCase):
 
             target = output / "ATID-215"
             self.assertEqual((target / "ATID-215-cd1.wmv").read_bytes(), b"part a")
-            self.assertEqual((target / "ATID-215-cd2.wmv").read_bytes(), b"part b")
+            self.assertEqual((target / "ATID215B.wmv").read_bytes(), b"part b")
 
     def test_move_with_organize_off_keeps_original_archive_name(self):
         with tempfile.TemporaryDirectory() as raw:

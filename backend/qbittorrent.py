@@ -382,7 +382,7 @@ def _torrent_completed(item: dict) -> bool:
 
 
 async def list_torrents(qb_url: str, username: str, password: str,
-                        timeout: int = 15) -> list:
+                        timeout: int = 15) -> Optional[list]:
     """
     列出 qB 所有种子的关键信息，用于刮削时按 infohash 反查推送时记录的番号。
     返回 [{hash, name, content_path, save_path}]。失败返回 []。
@@ -394,11 +394,11 @@ async def list_torrents(qb_url: str, username: str, password: str,
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             ok, _msg = await _login(client, qb_url, username, password)
             if not ok:
-                return []
+                return None
             resp = await client.get(f"{base}/api/v2/torrents/info",
                                     headers=_headers(qb_url))
             if resp.status_code != 200:
-                return []
+                return None
             data = resp.json()
             # 统一字段（与 transmission.list_torrents 对齐，供辅种比对/种子管理共用）
             return [{
@@ -420,7 +420,7 @@ async def list_torrents(qb_url: str, username: str, password: str,
             } for t in data if isinstance(t, dict)]
     except Exception as e:
         print(f"[qB] 列种子失败: {e}", flush=True)
-        return []
+        return None
 
 
 async def add_torrent(

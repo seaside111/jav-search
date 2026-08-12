@@ -40,7 +40,7 @@ import actor_scraper
 import auth
 import logging
 
-APP_VERSION = (os.environ.get("JAV_SEARCH_VERSION") or "1.4.6.14").strip().lstrip("vV")
+APP_VERSION = (os.environ.get("JAV_SEARCH_VERSION") or "1.4.6.15").strip().lstrip("vV")
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 

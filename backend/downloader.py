@@ -67,7 +67,7 @@ async def get_status(config: dict) -> dict:
     return res
 
 
-async def list_torrents(config: dict) -> list:
+async def list_torrents(config: dict) -> Optional[list]:
     """列出当前下载器全部种子（统一字段结构）。"""
     t = active_type(config)
     url, user, pwd = _conn(config, t)

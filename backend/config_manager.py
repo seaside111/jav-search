@@ -130,8 +130,8 @@ DEFAULT_CONFIG = {
     "scrape_watch_dir": "",              # 监控目录（下载器保存的目录，容器内视角）
     "scrape_output_dir": "",             # 刮削后归档目录（按 YYYYMM 建子目录存放）
     "scrape_interval": 300,              # 监控轮询间隔（秒）
-    "scrape_settle_seconds": 60,         # 文件 mtime 静置超过此秒数即判定下载完成（快速通道）
-    "scrape_stable_checks": 2,           # 兜底：大小连续多少次不变视为完成（mtime 不可靠时）
+    "scrape_settle_seconds": 60,         # 非下载器文件至少观察静置此秒数，并结合连续稳定检查后才完成
+    "scrape_stable_checks": 2,           # 非下载器文件大小/时间连续稳定次数；qB/TR 匹配任务优先使用 API
     "scrape_min_size_mb": 100,           # 小于此大小（MB）的视频忽略（样板/预告）
     "scrape_keep_size_mb": 300,          # 达到此大小一律视为正片，绝不作为广告删除
     "scrape_translate_enabled": True,    # 刮削时是否翻译标题/简介；关闭则直接用日文原标题写入 NFO

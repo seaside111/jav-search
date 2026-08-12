@@ -98,7 +98,7 @@ def _torrent_completed(item: dict) -> bool:
 
 
 async def list_torrents(tr_url: str, username: str, password: str,
-                        timeout: int = 15) -> list:
+                        timeout: int = 15) -> Optional[list]:
     """
     列出全部种子的关键信息（供辅种比对 / 种子管理使用）。
     返回 [{hash, name, content_path, save_path, ratio, seeding_time, progress, state, category}]。
@@ -116,7 +116,7 @@ async def list_torrents(tr_url: str, username: str, password: str,
         if err or not data:
             if err:
                 print(f"[TR] 列种子失败: {err}", flush=True)
-            return []
+            return None
         out = []
         for t in (data.get("arguments") or {}).get("torrents", []):
             if not isinstance(t, dict):
