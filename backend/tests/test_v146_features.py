@@ -16,6 +16,7 @@ import actor_scraper
 import emby
 import qbittorrent
 import transmission
+import downloader
 import main
 import intake
 from scrapers import _javu_base, _javbus_base, _fsgate, jav321, dmm, javdb
@@ -63,6 +64,41 @@ class JavDbFlareSolverrTests(unittest.TestCase):
         self.assertEqual(saved["samples"], ["https://img.jav321/sample-1.jpg"])
         self.assertEqual(saved["source_urls"]["JAV321"], "https://www.jav321.com/search")
         self.assertEqual(saved["score_count"], "100")
+
+    def test_downloader_completion_requires_whole_torrent_state(self):
+        self.assertFalse(downloader.is_download_complete(
+            {"downloader_type": "qb"},
+            {"state": "downloading", "progress": 1.0}))
+        self.assertTrue(downloader.is_download_complete(
+            {"downloader_type": "qb"},
+            {"state": "stalledUP", "progress": 1.0}))
+        self.assertFalse(downloader.is_download_complete(
+            {"downloader_type": "transmission"},
+            {"state": 4, "progress": 1.0}))
+        self.assertTrue(downloader.is_download_complete(
+            {"downloader_type": "transmission"},
+            {"state": 6, "progress": 0.35}))
+
+    def test_intake_does_not_delete_torrent_on_progress_only(self):
+        original_file = intake._FILE
+        with tempfile.TemporaryDirectory() as raw:
+            intake._FILE = Path(raw) / "pushed_intake.json"
+            try:
+                intake.register("ABC123", {"code": "ABC-123"}, True)
+                incomplete = {
+                    "hash": "abc123", "name": "ABC-123",
+                    "content_path": "", "progress": 1.0,
+                    "state": "downloading", "completed": False,
+                }
+                with mock.patch.object(downloader, "list_torrents",
+                                        new=mock.AsyncMock(return_value=[incomplete])), \
+                     mock.patch.object(downloader, "delete_torrents",
+                                        new=mock.AsyncMock()) as delete:
+                    asyncio.run(intake.poll({"downloader_type": "qb",
+                                             "magnet_delete_completed": True}))
+                    delete.assert_not_awaited()
+            finally:
+                intake._FILE = original_file
 
     def test_scrape_artwork_reuses_detail_image_cache_bytes(self):
         cached = mock.AsyncMock(return_value=(b"cached-image", "image/jpeg"))

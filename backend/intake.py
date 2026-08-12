@@ -189,7 +189,10 @@ async def poll(config: dict) -> None:
             e["_name"] = nm
             e["_tname"] = t.get("name", "") or nm
             changed = True
-        done = float(t.get("progress") or 0) >= 0.999
+        # The downloader state is authoritative. Do not use aggregate
+        # progress: a multi-file torrent can have an advertisement complete
+        # while the feature video is still downloading.
+        done = downloader.is_download_complete(config, t)
         if done and not e.get("_done"):
             e["_done"] = True
             changed = True

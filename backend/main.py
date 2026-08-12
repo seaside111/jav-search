@@ -44,8 +44,8 @@ _VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
 try:
     _IMAGE_VERSION = _VERSION_FILE.read_text(encoding="utf-8").strip()
 except (OSError, UnicodeError):
-    _IMAGE_VERSION = "1.4.6.16"
-APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.16"
+    _IMAGE_VERSION = "1.4.6.17"
+APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.17"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 

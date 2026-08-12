@@ -130,3 +130,33 @@ async def delete_torrents(config: dict, hashes: list,
     if t == TRANSMISSION:
         return await transmission.delete_torrents(url, user, pwd, hashes, delete_files)
     return await qbittorrent.delete_torrents(url, user, pwd, hashes, delete_files)
+
+
+# qBittorrent's UP states mean that the complete torrent is in its upload/
+# seeding phase. Checking the state avoids treating a misleading aggregate
+# progress value as proof that every file in a multi-file torrent is done.
+_QB_DONE_STATES = {"uploading", "completed"}
+_TR_SEEDING_STATES = {5, 6}  # seed-wait / seeding
+
+
+def is_download_complete(config: dict, torrent: dict) -> bool:
+    """Return whether the downloader reports the whole torrent as complete.
+
+    Do not use file size or ``progress`` as the primary signal: a multi-file
+    torrent may expose a completed advertisement file while the feature video
+    is still downloading, and selected-file/paused states can also report a
+    misleading progress value.
+    """
+    if active_type(config) == TRANSMISSION:
+        try:
+            state = int(torrent.get("state"))
+        except (TypeError, ValueError):
+            return False
+        if state in _TR_SEEDING_STATES:
+            return True
+        # Transmission can be stopped after a complete download. In this
+        # state progress is only a secondary confirmation.
+        return state == 0 and float(torrent.get("progress") or 0.0) >= 0.999
+
+    state = (torrent.get("state") or "").strip()
+    return state in _QB_DONE_STATES or state.endswith("UP")
