@@ -2,12 +2,12 @@
 JAV Search — FastAPI 后端主程序
 """
 import os
+from pathlib import Path
 import re
 import sys
 import json
 import time
 import hashlib
-from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -40,7 +40,12 @@ import actor_scraper
 import auth
 import logging
 
-APP_VERSION = (os.environ.get("JAV_SEARCH_VERSION") or "1.4.6.15").strip().lstrip("vV")
+_VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
+try:
+    _IMAGE_VERSION = _VERSION_FILE.read_text(encoding="utf-8").strip()
+except (OSError, UnicodeError):
+    _IMAGE_VERSION = "1.4.6.16"
+APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.16"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 

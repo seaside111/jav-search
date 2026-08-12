@@ -1,9 +1,10 @@
 # ── JAV Search — Dockerfile ──
 FROM python:3.11-slim
 
-# Release builds inject the Git tag here so /api/version always reports the
-# same version as the image tag. Local builds retain the current stable value.
-ARG JAV_SEARCH_VERSION=1.4.6.15
+# Release builds write the Git tag into the image so /api/version always reports
+# the same version as the image tag. It is intentionally not a runtime ENV:
+# Portainer may retain old container environment variables during a recreate.
+ARG JAV_SEARCH_VERSION=1.4.6.16
 
 # 设置工作目录
 WORKDIR /app
@@ -18,6 +19,10 @@ COPY backend/ /app/backend/
 # 复制前端
 COPY frontend/ /app/frontend/
 
+# Keep the build version inside the image, without exposing it as a runtime
+# environment variable that can be accidentally carried over between updates.
+RUN printf '%s' "$JAV_SEARCH_VERSION" > /app/VERSION
+
 # 配置目录（持久化挂载）
 RUN mkdir -p /config
 
@@ -27,7 +32,6 @@ EXPOSE 8085
 # 环境变量
 ENV CONFIG_DIR=/config
 ENV PORT=8085
-ENV JAV_SEARCH_VERSION=${JAV_SEARCH_VERSION}
 ENV PYTHONUNBUFFERED=1
 # 保证中文日志在任意宿主机环境下都能正常输出，不因编码报错中断流程
 ENV PYTHONIOENCODING=utf-8
