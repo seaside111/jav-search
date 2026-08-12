@@ -60,12 +60,13 @@ jobs:
             latest=false
           # 始终打上「具体版本号」标签（取自 git tag）
           # beta tag 额外打移动标签 :beta（不动 :latest）；正式 tag 才额外打 :latest
+          # latest 仅允许正式版本 tag 推进，main 分支构建不能覆盖它。
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
             type=sha,prefix=sha-
             type=raw,value=beta,enable=${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'Beta') }}
-            type=raw,value=latest,enable=${{ !(contains(github.ref_name, 'beta') || contains(github.ref_name, 'Beta')) }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') && !(contains(github.ref_name, 'beta') || contains(github.ref_name, 'Beta')) }}
 
       - name: 构建并推送（amd64 + arm64）
         uses: docker/build-push-action@v6
