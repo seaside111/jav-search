@@ -39,13 +39,14 @@ def _parse(html: str, query: str = "", url: str = "") -> Optional[dict]:
     title = title_node.get_text(" ", strip=True) if title_node else ""
     text = soup.get_text("\n", strip=True)
     code = (query or "").upper().strip()
-    if query:
-        wanted = re.sub(r'[^a-z0-9]', '', query.lower())
-        if wanted not in re.sub(r'[^a-z0-9]', '', text.lower()):
-            return None
+    wanted = re.sub(r'[^a-z0-9]', '', query.lower()) if query else ""
     match = re.search(r'(?:品番|番號|番号)\s*[:：]?\s*([A-Z0-9]+(?:[-_][A-Z0-9]+)+)', text, re.I)
     if match:
         code = match.group(1).upper().replace("_", "-")
+    # JAV321 can return a nearby fuzzy result. Validate the parsed 品番 itself;
+    # a query substring elsewhere in the page is not sufficient evidence.
+    if wanted and re.sub(r'[^a-z0-9]', '', code.lower()) != wanted:
+        return None
     if not code and not title:
         return None
 

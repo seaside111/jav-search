@@ -10,7 +10,6 @@ CONFIG_PATH = Path(os.getenv("CONFIG_DIR", "/config")) / "settings.json"
 DEFAULT_CONFIG = {
     "proxy": "",                         # HTTP代理，如 http://192.168.1.1:7890
     "sources": ["javbus", "javdb"],      # 可选: javbus/javdb/avsox/avmoo/jav321/dmm
-    "scrape_artwork_fallback_limit": 2,   # 最多几个有效图片源响应（超时/异常不计，0=关闭）
     "dmm_api_id": "",                    # DMM/FANZA 官方联盟 API ID
     "dmm_affiliate_id": "",              # DMM/FANZA Affiliate ID
     # V1.4.2：JavDB 反爬增强
@@ -83,46 +82,6 @@ DEFAULT_CONFIG = {
     "tr_password": "",                   # RPC 密码（可空）
     "tr_save_path": "",                  # 推送任务保存目录（TR 主机视角），留空用 TR 默认
     "tr_category": "jav",                # 任务标签（labels），便于筛选；留空不打标签
-    # V1.5：M-Team PT 站（辅种/发种）。开发期连测试站，正式接口后续替换。
-    "mteam_api_base": "https://test2.m-team.cc/api",  # API 根地址（测试站）
-    "mteam_api_key": "",                 # M-Team API 密钥（控制台→实验室→API密钥生成）
-    "mteam_uid": "",                     # M-Team 用户 uid（个人页 URL 里的数字；监控全局数据用）
-    "mteam_source_flag": "M-Team",       # 制种 source 标记（影响 infohash，发种用）
-    "crossseed_category": "mteam",       # 发种做种打的分类/标签（受种子管理保护，永不自动删）
-    # V1.5：发种流水线（seed-in-place + 硬链接归档）
-    # 刮削目录＝本项目容器(/data)里、实际指向下载器保存数据同一物理目录的挂载名：
-    #   规整在此目录原地完成、做种也留原地。下载器的下载目录沿用全局下载器设置(qb_save_path 等)，
-    #   首次下磁力与最后重新做种由下载器按它自己的保存目录处理，发种这里不再单独设。
-    # 【1.5 统一·已迁移到全局「刮削 & 归档」】下载/工作目录、归档目录、归档模式、按年月
-    #   现统一取全局 scrape_watch_dir / scrape_output_dir / archive_mode / archive_by_month，
-    #   下列 publish_* 目录键仅作旧配置兼容兜底（启动时自动迁移到全局键），UI 不再单独编辑。
-    "publish_work_dir": "",              # 【已统一→scrape_watch_dir】旧配置兼容兜底
-    "publish_work_dir_host": "",         # 【已弃用·可留空】做种 save_path 兜底；现优先取种子自报 save_path
-    "publish_scrape_enabled": True,      # 【已统一→scrape_meta_enabled】旧配置兼容兜底
-    "publish_archive_enabled": True,     # 【已统一→archive_enabled】旧配置兼容兜底
-    "publish_archive_mode": "hardlink",  # 【已统一→archive_mode】旧配置兼容兜底
-    "publish_archive_by_month": True,    # 【已统一→archive_by_month】旧配置兼容兜底
-    "publish_archive_dir": "",           # 【已统一→scrape_output_dir】旧配置兼容兜底
-    "publish_archive_dir_host": "",      # 【已弃用】seed-in-place 后做种不再经归档目录，此项不再使用
-    "publish_max_active": 3,             # 同时活跃任务数（含做种）；超限排队
-    "publish_stop_ratio": 0,             # 做种停止：分享率达此值（0=不按分享率停，默认不自动停做种）
-    "publish_stop_hours": 72,            # 做种停止：做种时长达此小时（0=不按时长停）
-    "publish_delete_after_stop": False,  # 停止后是否删除做种任务
-    "publish_delete_files": False,       # 删除做种时是否连同文件（危险，默认否）
-    "publish_screenshot_count": 6,       # 发种截图张数
-    # 优先图床：发种简介图按此图床优先上传，失败自动兜底其它。
-    #   catbox(免key,但封机房/代理IP) / pixhost(免key,部分代理不通) / imgbb(需key,机房代理最稳)
-    "image_host": "catbox",              # imgbb | imgchest | freeimage | catbox | pixhost（postimage 已移除：key 版接口被官方停用）
-    "image_imgbb_key": "",               # imgbb API Key（https://api.imgbb.com 免费申请）
-    "image_imgchest_token": "",          # imgchest 个人 access token（imgchest.com 账号→API 生成）；允许 NSFW、直链走 Cloudflare
-    "image_freeimage_key": "",           # freeimage.host API key，留空用内置公开 key；直链 iili.io 走 Cloudflare
-    "image_postimage_key": "",           # 【已弃用·保留兼容】postimage 已移除，此项不再使用
-    "publish_auto": False,               # 发布闸门：False=人工确认，True=复查通过自动发布
-    "publish_anonymous": False,          # 是否匿名发布
-    "publish_category": "",              # 发布分类 id（必填，从 /torrent/categoryList 取）；手填优先于智能识别
-    "publish_countries": "",             # 国家/地区 id（createOredit countries 字段，从 /system/countryList 取）
-    "publish_poll_interval": 30,         # 发种 worker 轮询间隔（秒）
-    "publish_upload_limit_kbps": 0,      # 单个发种种子的上传限速(KB/s)，0=不限。防超 PT 单种限速被封
     # V1.5：日志详略。True=详细(每步+每次API,beta排查用)；定型后设 False 只看主要动作
     "log_verbose": True,
     # V1.4：媒体库刮削（监控下载目录 → 刮削 → 移动归档）
@@ -130,21 +89,19 @@ DEFAULT_CONFIG = {
     "scrape_watch_dir": "",              # 监控目录（下载器保存的目录，容器内视角）
     "scrape_output_dir": "",             # 刮削后归档目录（按 YYYYMM 建子目录存放）
     "scrape_interval": 300,              # 监控轮询间隔（秒）
-    "scrape_settle_seconds": 60,         # 非下载器文件至少观察静置此秒数，并结合连续稳定检查后才完成
+    "scrape_settle_seconds": 300,        # 非下载器整目录至少连续静置此秒数；兼容迅雷预分配且无临时后缀
     "scrape_stable_checks": 2,           # 非下载器文件大小/时间连续稳定次数；qB/TR 匹配任务优先使用 API
     "scrape_min_size_mb": 100,           # 小于此大小（MB）的视频忽略（样板/预告）
     "scrape_keep_size_mb": 300,          # 达到此大小一律视为正片，绝不作为广告删除
     "scrape_translate_enabled": True,    # 刮削时是否翻译标题/简介；关闭则直接用日文原标题写入 NFO
     "scrape_translate_provider": "",     # 刮削翻译服务，留空用默认翻译服务
     "scrape_move_on_fail": True,         # 刮削失败也照常归档
-    # V1.5：刮削归档统一（监控 & 发种共用同一目录与归档行为；见上方 publish_* 已迁移说明）
-    #   scrape_watch_dir  = 全局下载/工作目录（监控扫它、发种也在此原地规整/做种）
-    #   scrape_output_dir = 全局归档目录（监控与发种都归档到此，供 EMBY 扫）
+    # 刮削归档统一：监控目录中的成品按同一套规则写入媒体库目录。
     "archive_mode": "hardlink",          # hardlink | copy | move —— 监控孤儿下载的归档方式：
                                          #   hardlink/copy 保留原文件；move 移动并清理原下载目录。
-                                         #   发种文件因需原地做种，恒按 hardlink/copy（选 move 自动降级为 hardlink）
-    "archive_by_month": True,            # 归档是否按年月建子目录（归档目录/YYYYMM/所选文件夹名/），监控 & 发种共用
-    # 刮削/归档总开关（监控 & 发种共用，全局唯一）：
+                                         #   hardlink/copy 保留原文件；move 移走后安全清理空目录
+    "archive_by_month": True,            # 归档是否按年月建子目录（归档目录/YYYYMM/所选文件夹名/）
+    # 刮削/归档总开关：
     "scrape_meta_enabled": True,         # 刮削：写 NFO/封面；视频是否改名由独立开关控制
     "scrape_organize_enabled": True,     # 规整命名总开关；与刮削、广告删除独立
     "scrape_video_rename_enabled": True, # 关闭时归档仍执行，但视频保留原文件名
@@ -172,11 +129,26 @@ DEFAULT_CONFIG = {
     "emby_actor_sync_enabled": False,
     "public_trackers": "",               # 用户自定义；每行或逗号一个，非空时覆盖自动列表
     "public_trackers_auto_update": True,  # 自动抓取在线 best 列表并缓存 7 天
-    "archive_enabled": True,             # 归档：刮削/发种成品放进归档目录(供 EMBY)；关=不归档(发种仍原地做种)
+    "archive_enabled": True,             # 归档：把监控目录成品放进归档目录供 EMBY 使用
 }
 
 # 列表抓取硬上限，防止配置过大拖垮服务
 MAX_RESULTS_HARD_CAP = 500
+
+# 已从当前版本移除的无效补图设置及发种/图床配置。读取旧 settings.json 时
+# 先使用其中少量目录/开关别名完成一次迁移，再剔除全部旧键。
+REMOVED_CONFIG_KEYS = {
+    "scrape_artwork_fallback_limit",
+    "mteam_api_base", "mteam_api_key", "mteam_uid", "mteam_source_flag",
+    "crossseed_category", "publish_work_dir", "publish_work_dir_host",
+    "publish_max_active", "publish_stop_ratio", "publish_stop_hours",
+    "publish_delete_after_stop", "publish_delete_files", "publish_screenshot_count",
+    "image_host", "image_imgbb_key", "image_imgchest_token", "image_freeimage_key",
+    "image_postimage_key", "publish_auto", "publish_anonymous", "publish_category",
+    "publish_countries", "publish_poll_interval", "publish_upload_limit_kbps",
+    "publish_scrape_enabled", "publish_archive_enabled", "publish_archive_mode",
+    "publish_archive_by_month", "publish_archive_dir", "publish_archive_dir_host",
+}
 
 
 # 环境变量兜底：键 -> 环境变量名。当 settings.json 里该项为空时用环境变量填充，
@@ -225,12 +197,17 @@ def _migrate_unify_archive(config: dict, saved: dict) -> dict:
     return config
 
 
+def _without_removed_keys(config: dict) -> dict:
+    return {key: value for key, value in config.items()
+            if key not in REMOVED_CONFIG_KEYS}
+
+
 def load() -> dict:
     try:
         if CONFIG_PATH.exists():
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-            config = {**DEFAULT_CONFIG, **saved}
+            config = {**DEFAULT_CONFIG, **_without_removed_keys(saved)}
             config = _migrate_unify_archive(config, saved)
             return _apply_env_fallbacks(config)
     except Exception as e:
@@ -241,7 +218,7 @@ def load() -> dict:
 def save(config: dict) -> bool:
     try:
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        merged = {**DEFAULT_CONFIG, **config}
+        merged = {**DEFAULT_CONFIG, **_without_removed_keys(config)}
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(merged, f, ensure_ascii=False, indent=2)
         return True

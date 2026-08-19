@@ -40,7 +40,17 @@ _SOURCE_PRIORITY = {"javbus": 0, "jav321": 1, "javdb": 2, "dmm": 3,
 
 
 def _normalize_code(code: str) -> str:
-    return (code or "").upper().strip().replace(" ", "-")
+    """Canonical comparison key retaining every letter and digit."""
+    return re.sub(r"[^A-Z0-9]", "", (code or "").upper())
+
+
+def _exact_code_rows(rows: list[dict], query: str) -> list[dict]:
+    """Keep only exact, case-insensitive code matches for a code search."""
+    wanted = _normalize_code(query)
+    if not wanted:
+        return []
+    return [row for row in (rows or [])
+            if _normalize_code(row.get("code", "")) == wanted]
 
 
 def _merge_lists(lists_by_source: list[tuple[str, list[dict]]]) -> list[dict]:
@@ -134,6 +144,8 @@ async def search(
     for item in paired:
         if isinstance(item, tuple):
             label, res = item
+            if isinstance(res, list) and mode == SEARCH_MODE_CODE:
+                res = _exact_code_rows(res, query)
             if isinstance(res, list) and res:
                 collected.append((label, res))
 
@@ -162,6 +174,8 @@ async def search_source_status(query: str, mode: str, source: str,
         rows = await asyncio.wait_for(
             mod.search_list(query, mode, proxy, max_results),
             timeout=timeout)
+        if isinstance(rows, list) and mode == SEARCH_MODE_CODE:
+            rows = _exact_code_rows(rows, query)
         return (rows if isinstance(rows, list) else []), "ok"
     except asyncio.TimeoutError:
         print(f"[source] {source} 超时（>{timeout}s），留待有限重试")
@@ -297,6 +311,8 @@ def detect_search_mode(query: str) -> str:
     query = query.strip()
     # FC2 番号：FC2-PPV-1234567 / FC2PPV1234567 / FC2-1234567（含中间数字，不被通用番号正则覆盖）
     if re.match(r'^(?i:fc2)[-\s]?(?i:ppv)?[-\s]?\d{5,7}$', query):
+        return SEARCH_MODE_CODE
+    if re.match(r'^[A-Za-z]{1,8}\d{1,4}[-_\s]\d{2,6}[.]?$', query):
         return SEARCH_MODE_CODE
     if re.match(r'^[A-Za-z]{2,8}[-\s]?\d{2,6}$', query):
         return SEARCH_MODE_CODE

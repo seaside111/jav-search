@@ -4,7 +4,7 @@ FROM python:3.11-slim
 # Release builds write the Git tag into the image so /api/version always reports
 # the same version as the image tag. It is intentionally not a runtime ENV:
 # Portainer may retain old container environment variables during a recreate.
-ARG JAV_SEARCH_VERSION=1.4.6.21
+ARG JAV_SEARCH_VERSION=1.4.6.22
 
 # 设置工作目录
 WORKDIR /app

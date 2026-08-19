@@ -44,8 +44,8 @@ _VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
 try:
     _IMAGE_VERSION = _VERSION_FILE.read_text(encoding="utf-8").strip()
 except (OSError, UnicodeError):
-    _IMAGE_VERSION = "1.4.6.21"
-APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.21"
+    _IMAGE_VERSION = "1.4.6.22"
+APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.22"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -229,11 +229,10 @@ class JackettSearchRequest(BaseModel):
 class ConfigUpdateRequest(BaseModel):
     # 注意：所有字段默认必须是 None。保存接口用 req.dict(exclude_none=True) 合并，
     # 只有 None 才会被排除。若默认给 "" / "baidu" / 12 之类的非 None 值，则当某个
-    # 设置页（如「发种中心」/publish）保存时未提交这些字段，Pydantic 会用默认值填上，
+    # 设置页保存时未提交这些字段，Pydantic 会用默认值填上，
     # exclude_none 排不掉，从而把用户已存的 proxy / jackett / 翻译密钥等悄悄清空。
     proxy: Optional[str] = None
     sources: Optional[list[str]] = None
-    scrape_artwork_fallback_limit: Optional[int] = None
     dmm_api_id: Optional[str] = None
     dmm_affiliate_id: Optional[str] = None
     # V1.4.2 JavDB 反爬增强
@@ -287,38 +286,6 @@ class ConfigUpdateRequest(BaseModel):
     tr_password: Optional[str] = None
     tr_save_path: Optional[str] = None
     tr_category: Optional[str] = None
-    # V1.5 M-Team PT
-    mteam_api_base: Optional[str] = None
-    mteam_api_key: Optional[str] = None
-    mteam_uid: Optional[str] = None
-    mteam_source_flag: Optional[str] = None
-    crossseed_category: Optional[str] = None
-    # V1.5 发种流水线
-    publish_work_dir: Optional[str] = None
-    publish_work_dir_host: Optional[str] = None
-    publish_max_active: Optional[int] = None
-    publish_stop_ratio: Optional[float] = None
-    publish_stop_hours: Optional[float] = None
-    publish_delete_after_stop: Optional[bool] = None
-    publish_delete_files: Optional[bool] = None
-    publish_screenshot_count: Optional[int] = None
-    image_host: Optional[str] = None
-    image_imgbb_key: Optional[str] = None
-    image_imgchest_token: Optional[str] = None
-    image_freeimage_key: Optional[str] = None
-    image_postimage_key: Optional[str] = None
-    publish_auto: Optional[bool] = None
-    publish_anonymous: Optional[bool] = None
-    publish_category: Optional[str] = None
-    publish_countries: Optional[str] = None
-    publish_poll_interval: Optional[int] = None
-    publish_upload_limit_kbps: Optional[int] = None
-    publish_scrape_enabled: Optional[bool] = None
-    publish_archive_enabled: Optional[bool] = None
-    publish_archive_mode: Optional[str] = None
-    publish_archive_by_month: Optional[bool] = None
-    publish_archive_dir: Optional[str] = None
-    publish_archive_dir_host: Optional[str] = None
     # V1.5 日志详略
     log_verbose: Optional[bool] = None
     # V1.4 刮削
@@ -333,7 +300,7 @@ class ConfigUpdateRequest(BaseModel):
     scrape_translate_enabled: Optional[bool] = None
     scrape_translate_provider: Optional[str] = None
     scrape_move_on_fail: Optional[bool] = None
-    # V1.5 统一归档（监控 & 发种共用）
+    # 统一归档设置
     archive_mode: Optional[str] = None        # hardlink | copy | move
     archive_by_month: Optional[bool] = None
     scrape_meta_enabled: Optional[bool] = None   # 刮削总开关：改名番号+写NFO/封面
@@ -968,7 +935,7 @@ async def api_get_config():
     config = load_config()
     # 脱敏返回（隐藏密钥）
     safe_config = dict(config)
-    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "mteam_api_key", "javdb_cookie", "fc2_cookie", "dmm_api_id", "dmm_affiliate_id", "image_imgbb_key", "image_imgchest_token", "image_freeimage_key", "image_postimage_key", "emby_api_key"]:
+    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "javdb_cookie", "fc2_cookie", "dmm_api_id", "dmm_affiliate_id", "emby_api_key"]:
         if safe_config.get(key):
             v = safe_config[key]
             safe_config[key] = "***" + v[-4:] if len(v) > 4 else "****"
@@ -982,7 +949,7 @@ async def api_set_config(req: ConfigUpdateRequest):
 
     update = req.dict(exclude_none=True)
     # 如果是脱敏值则不更新
-    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "mteam_api_key", "javdb_cookie", "fc2_cookie", "dmm_api_id", "dmm_affiliate_id", "image_imgbb_key", "image_imgchest_token", "image_freeimage_key", "image_postimage_key", "emby_api_key"]:
+    for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "javdb_cookie", "fc2_cookie", "dmm_api_id", "dmm_affiliate_id", "emby_api_key"]:
         v = update.get(key, "")
         if v and v.startswith("***"):
             update.pop(key, None)

@@ -19,11 +19,35 @@ import transmission
 import downloader
 import main
 import intake
+import config_manager
 from scrapers import _javu_base, _javbus_base, _fsgate, jav321, dmm, javdb
 from config_manager import DEFAULT_CONFIG
 
 
 class JavDbFlareSolverrTests(unittest.TestCase):
+    def test_removed_publish_config_is_filtered_after_legacy_migration(self):
+        saved = {
+            "publish_work_dir": "/old/watch",
+            "publish_archive_dir": "/old/archive",
+            "publish_archive_mode": "copy",
+            "publish_archive_by_month": False,
+            "publish_scrape_enabled": False,
+            "publish_archive_enabled": False,
+            "mteam_api_key": "secret",
+            "image_host": "imgbb",
+        }
+        current = {**DEFAULT_CONFIG,
+                   **config_manager._without_removed_keys(saved)}
+        migrated = config_manager._migrate_unify_archive(current, saved)
+        self.assertEqual(migrated["scrape_watch_dir"], "/old/watch")
+        self.assertEqual(migrated["scrape_output_dir"], "/old/archive")
+        self.assertEqual(migrated["archive_mode"], "copy")
+        self.assertFalse(migrated["archive_by_month"])
+        self.assertFalse(migrated["scrape_meta_enabled"])
+        self.assertFalse(migrated["archive_enabled"])
+        for key in config_manager.REMOVED_CONFIG_KEYS:
+            self.assertNotIn(key, migrated)
+
     def test_detail_resolver_prefers_jav321_code_search_over_non_durable_url(self):
         import scrapers
         detail = {
@@ -79,6 +103,22 @@ class JavDbFlareSolverrTests(unittest.TestCase):
             {"downloader_type": "transmission"},
             {"state": 6, "progress": 0.35}))
 
+    def test_ambiguous_downloader_file_match_is_never_treated_as_complete(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw)
+            video = watch / "unknown" / "video.mp4"
+            video.parent.mkdir()
+            video.write_bytes(b"data")
+            tasks = [
+                {"name": "first", "files": ["video.mp4"], "completed": True},
+                {"name": "second", "files": ["video.mp4"], "completed": True},
+            ]
+            task = library._match_downloader_torrent(video, watch, tasks)
+            self.assertIsNotNone(task)
+            self.assertTrue(task.get("ambiguous"))
+            state, _ = library._file_download_state(video, watch, tasks)
+            self.assertEqual(state, "downloading")
+
     def test_intake_does_not_delete_torrent_on_progress_only(self):
         original_file = intake._FILE
         with tempfile.TemporaryDirectory() as raw:
@@ -112,10 +152,9 @@ class JavDbFlareSolverrTests(unittest.TestCase):
         html = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
             encoding="utf-8")
         self.assertIn("/api/details/resolve", html)
-        # 当前设计：JAV321 仅在打开详情时按需补抓；JavDB 不作为普通卡片的
-        # 自动补抓来源，避免无必要地触发 FlareSolverr。
-        self.assertIn("['jav321'].filter", html)
-        self.assertNotIn("['jav321', 'javdb'].filter", html)
+        # JAV321 优先；没有样品图才继续回退 JavDB，且失败保持可重试。
+        self.assertIn("['jav321', 'javdb'].filter", html)
+        self.assertIn("if (m.samples && m.samples.length) break", html)
         self.assertNotIn("m._javdb_extra_loaded = true", html)
         self.assertNotIn("idxs.forEach(i => { if (currentResults[i]) currentResults[i].detail_loaded = true; })", html)
 
@@ -1186,6 +1225,55 @@ class VideoClassificationTests(unittest.TestCase):
                 self.assertEqual(library._part_suffix(first, "ABC-123", str(root)), "")
                 self.assertEqual(library._part_suffix(second, "ABC-123", str(root)), "")
 
+    def test_explicit_filename_code_wins_over_repeated_outer_folder_code(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw)
+            video = watch / "XYZ-999" / "XYZ-999" / "ABC-123.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"movie")
+            self.assertEqual(library._recognize_code(video, str(watch)), "ABC-123")
+
+    def test_bare_part01_inherits_folder_code(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw)
+            folder = watch / "ABC-123"
+            folder.mkdir()
+            first = folder / "PART01.mp4"
+            second = folder / "PART02.mp4"
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+            self.assertEqual(library._recognize_code(first, str(watch)), "ABC-123")
+            self.assertEqual(library._part_suffix(first, "ABC-123", str(watch)), "-cd1")
+            self.assertEqual(library._part_suffix(second, "ABC-123", str(watch)), "-cd2")
+
+    def test_explicit_extra_marker_detection_is_conservative(self):
+        self.assertFalse(library._has_explicit_extra_marker(Path("video2.mp4")))
+        self.assertTrue(library._has_explicit_extra_marker(Path("site-promo.mp4")))
+        self.assertTrue(library._has_explicit_extra_marker(Path("广告.mp4")))
+
+    def test_configured_small_file_rule_keeps_segment_protection(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw)
+            folder = watch / "ABC-123"
+            folder.mkdir()
+            main = folder / "ABC-123.mp4"
+            small = folder / "video2.mp4"
+            large_unknown = folder / "video-extra.mp4"
+            segment = folder / "PART02.mp4"
+            main.write_bytes(b"m" * 1000)
+            small.write_bytes(b"s" * 50)
+            large_unknown.write_bytes(b"u" * 200)
+            segment.write_bytes(b"p" * 50)
+            _keep, drop = library.classify_videos(
+                [main, small, large_unknown, segment], str(watch),
+                min_bytes=100, keep_bytes=500)
+            self.assertTrue(library._should_delete_extra(
+                small, str(watch), 50, 100, drop))
+            self.assertFalse(library._should_delete_extra(
+                large_unknown, str(watch), 200, 100, drop))
+            self.assertFalse(library._should_delete_extra(
+                segment, str(watch), 50, 100, {segment}))
+
     def test_single_code_c_is_not_treated_as_cd3(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -1261,6 +1349,103 @@ class VideoClassificationTests(unittest.TestCase):
             self.assertFalse(settled)
             self.assertEqual(count, 1)
 
+    def test_untracked_multipart_folder_restarts_quiet_window_for_new_segment(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            first = root / "ABC-123-CD1.mp4"
+            first.write_bytes(b"part one")
+            key = "test:multipart"
+            library._folder_history.pop(key, None)
+            ready, count, _ = library._manual_group_stability(
+                key, [(first, first.stat())], 2, 60, now=1000)
+            self.assertFalse(ready)
+            self.assertEqual(count, 1)
+
+            ready, count, observed = library._manual_group_stability(
+                key, [(first, first.stat())], 2, 60, now=1300)
+            self.assertTrue(ready)
+            self.assertEqual(observed, 300)
+
+            second = root / "ABC-123-CD2.mp4"
+            second.write_bytes(b"part two")
+            ready, count, observed = library._manual_group_stability(
+                key, [(first, first.stat()), (second, second.stat())],
+                2, 60, now=1301)
+            self.assertFalse(ready)
+            self.assertEqual(count, 1)
+            self.assertEqual(observed, 0)
+
+    def test_nested_segments_share_top_level_download_batch(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw) / "watch"
+            first = watch / "ABC-123" / "disc1" / "A.mp4"
+            second = watch / "ABC-123" / "disc2" / "B.mp4"
+            first.parent.mkdir(parents=True)
+            second.parent.mkdir(parents=True)
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+            self.assertEqual(
+                library._manual_group_key(first, watch),
+                library._manual_group_key(second, watch))
+
+    def test_root_segments_with_same_code_share_download_batch(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw)
+            first = watch / "ABC-123-CD1.mp4"
+            second = watch / "ABC-123-CD2.mp4"
+            self.assertEqual(
+                library._manual_group_key(first, watch),
+                library._manual_group_key(second, watch))
+
+    def test_unfinished_artifact_blocks_batch_before_final_video_appears(self):
+        with tempfile.TemporaryDirectory() as raw:
+            folder = Path(raw) / "ABC-123"
+            folder.mkdir()
+            (folder / "ABC-123-CD2.mp4.xltd").write_bytes(b"downloading")
+            self.assertTrue(library._has_download_artifact(folder))
+
+    def test_scan_never_deletes_extra_before_manual_folder_is_stable(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw) / "watch"
+            folder = watch / "ABC-123"
+            folder.mkdir(parents=True)
+            movie = folder / "ABC-123.mp4"
+            extra = folder / "video2.mp4"
+            movie.write_bytes(b"main")
+            extra.write_bytes(b"promo")
+            process = mock.AsyncMock(return_value={"scrape_ok": True, "moved": False})
+            config = {
+                "scrape_watch_dir": str(watch),
+                "scrape_output_dir": "",
+                "scrape_stable_checks": 2,
+                "scrape_settle_seconds": 300,
+                "scrape_min_size_mb": 0,
+                "scrape_keep_size_mb": 1,
+                "scrape_organize_enabled": True,
+                "scrape_delete_extras": True,
+            }
+            with mock.patch.object(library, "_download_state_snapshot",
+                                   new=mock.AsyncMock(return_value=(True, []))), \
+                    mock.patch.object(library, "_process_completed_file", process), \
+                    mock.patch.object(library.time, "time", return_value=1000):
+                count = asyncio.run(library._scan_once(config))
+            self.assertEqual(count, 0)
+            self.assertTrue(movie.exists())
+            self.assertTrue(extra.exists())
+            process.assert_not_awaited()
+
+            # Even after the directory becomes eligible, an unmarked smaller
+            # video is retained/processed rather than destructively guessed as
+            # an advertisement or missing segment.
+            with mock.patch.object(library, "_download_state_snapshot",
+                                   new=mock.AsyncMock(return_value=(True, []))), \
+                    mock.patch.object(library, "_process_completed_file", process), \
+                    mock.patch.object(library.time, "time", return_value=1300):
+                count = asyncio.run(library._scan_once(config))
+            self.assertEqual(count, 2)
+            self.assertTrue(movie.exists())
+            self.assertTrue(extra.exists())
+
     def test_unique_code_c_is_hard_subtitle_and_nfo_can_mark_it(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -1274,6 +1459,17 @@ class VideoClassificationTests(unittest.TestCase):
             second = root / "NACR-629-A.mp4"
             second.write_bytes(b"part")
             self.assertFalse(library._is_hard_subtitle_video(video, "NACR-629"))
+
+    def test_letter_digit_code_c_keeps_hard_subtitle_semantics(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            video = root / "T28-304-C.mp4"
+            video.write_bytes(b"movie")
+            code = library._recognize_code(video)
+            self.assertEqual(code, "T28-304")
+            self.assertTrue(library._is_hard_subtitle_video(video, code))
+            self.assertEqual(library._archive_folder_code(video, code), "T28-304-C")
+            self.assertEqual(library._part_suffix(video, code, str(root)), "")
 
     def test_hard_subtitle_variant_is_kept_in_code_based_archive_folder_name(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -1366,6 +1562,35 @@ class VideoClassificationTests(unittest.TestCase):
         item = jav321._parse(html, query="ABC-123", url="https://www.jav321.com/video/abc-123")
         self.assertEqual(item["cover"], "https://www.jav321.com/images/cover.jpg")
         self.assertEqual(item["samples"], ["https://www.jav321.com/images/sample1.jpg"])
+
+    def test_jav321_rejects_nearby_fuzzy_code(self):
+        html = """
+        <html><h3>ABC-123X Nearby result</h3><div>品番：ABC-123X</div>
+        <div class="col-md-3"><img src="/images/wrong.jpg"></div></html>
+        """
+        self.assertIsNone(jav321._parse(
+            html, query="abc-123", url="https://www.jav321.com/search"))
+
+    def test_letter_digit_dash_number_code_is_detected_exactly(self):
+        import scrapers
+        self.assertEqual(library._extract_code("T28-304.mp4"), "T28-304")
+        self.assertEqual(library._extract_code("t28-304.CD1.mp4"), "T28-304")
+        self.assertEqual(scrapers.detect_search_mode("T28-304."), "code")
+
+    def test_code_search_filters_nearby_results(self):
+        import scrapers
+
+        async def fake_search(*_args, **_kwargs):
+            return [
+                {"code": "ABC-123X", "source": "JavBus"},
+                {"code": "abc_123", "source": "JavBus"},
+            ]
+
+        with mock.patch.object(scrapers.javbus, "search_list", fake_search):
+            rows, status = asyncio.run(scrapers.search_source_status(
+                "ABC-123", "code", "javbus", max_results=3))
+        self.assertEqual(status, "ok")
+        self.assertEqual([row["code"] for row in rows], ["abc_123"])
 
     def test_jav321_parser_reads_current_wide_column_gallery(self):
         html = """
@@ -1550,7 +1775,7 @@ class NamingAndTrackerTests(unittest.TestCase):
             name = library._archive_folder_name(
                 "ABC-123", "", "第一段。第二段。第三段很长很长", [{"name": "ActorA"}], config)
         self.assertLessEqual(len(name), 42)
-        self.assertIn("。...", name)
+        self.assertIn("...", name)
         self.assertTrue(name.endswith("ActorA"))
 
     def test_long_title_falls_back_to_comma_then_character_cut(self):
@@ -1563,6 +1788,14 @@ class NamingAndTrackerTests(unittest.TestCase):
         self.assertIn("...", comma)
         self.assertEqual(len(plain), 15)
         self.assertTrue(plain.endswith("..."))
+
+    def test_archive_folder_limit_is_utf8_bytes_and_has_synology_headroom(self):
+        name = library._archive_folder_name(
+            "ABC-123", "", "很长的中文标题" * 30, [],
+            {"scrape_folder_naming": "code_title",
+             "scrape_folder_title_translate": True})
+        self.assertLessEqual(len(name.encode("utf-8")), 180)
+        self.assertLessEqual(library._folder_name_limit(), 180)
 
     def test_archive_transfer_same_path_never_deletes_movie(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -1866,6 +2099,32 @@ class NamingAndTrackerTests(unittest.TestCase):
             self.assertEqual((target / "ATID-215-cd1.wmv").read_bytes(), b"part a")
             self.assertEqual((target / "ATID215B.wmv").read_bytes(), b"part b")
 
+    def test_staggered_ambiguous_same_code_video_keeps_original_name_on_collision(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "downloads" / "ABC-123"
+            output = root / "archive"
+            source.mkdir(parents=True)
+            first = source / "ABC-123 main.mp4"
+            first.write_bytes(b"first")
+            one = library._archive_file(
+                first, str(output), "ABC-123", mode="move", rename=True,
+                watch_dir=str(root / "downloads"), folder_name="ABC-123",
+                by_month=False)
+            self.assertTrue(one["archived"])
+            self.assertTrue((output / "ABC-123" / "ABC-123.mp4").exists())
+
+            second = source / "ABC-123 alternate.mp4"
+            second.write_bytes(b"second")
+            two = library._archive_file(
+                second, str(output), "ABC-123", mode="move", rename=True,
+                watch_dir=str(root / "downloads"), folder_name="ABC-123",
+                by_month=False)
+            self.assertTrue(two["archived"])
+            self.assertEqual(
+                (output / "ABC-123" / "ABC-123 alternate.mp4").read_bytes(),
+                b"second")
+
     def test_move_with_organize_off_keeps_original_archive_name(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -2023,8 +2282,52 @@ class NamingAndTrackerTests(unittest.TestCase):
                 keep_bytes=300 * 1024 * 1024)
             self.assertEqual(short_video.read_bytes(), b"x")
 
+    def test_cleanup_preserves_folder_when_unknown_file_remains(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw) / "watch"
+            folder = watch / "torrent"
+            folder.mkdir(parents=True)
+            marker = folder / "download.state"
+            marker.write_text("still owned by downloader", encoding="utf-8")
+            library._cleanup_source(folder, watch, min_bytes=1)
+            self.assertEqual(marker.read_text(encoding="utf-8"),
+                             "still owned by downloader")
+
     def test_destructive_extra_cleanup_defaults_on_but_is_independent(self):
         self.assertTrue(DEFAULT_CONFIG["scrape_delete_extras"])
+
+    def test_extra_cleanup_stays_active_when_video_organizing_is_off(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw) / "watch"
+            folder = watch / "ABC-123"
+            folder.mkdir(parents=True)
+            movie = folder / "ABC-123.mp4"
+            extra = folder / "广告.mp4"
+            movie.write_bytes(b"main feature")
+            extra.write_bytes(b"ad")
+            config = {
+                "scrape_watch_dir": str(watch),
+                "scrape_output_dir": "",
+                "scrape_stable_checks": 2,
+                "scrape_settle_seconds": 300,
+                "scrape_min_size_mb": 1,
+                "scrape_keep_size_mb": 300,
+                "scrape_organize_enabled": False,
+                "scrape_delete_extras": True,
+            }
+            process = mock.AsyncMock(return_value={"scrape_ok": True, "moved": False})
+            snapshot = mock.AsyncMock(return_value=(True, []))
+            with mock.patch.object(library, "_download_state_snapshot", new=snapshot), \
+                    mock.patch.object(library, "_process_completed_file", process), \
+                    mock.patch.object(library.time, "time", return_value=1000):
+                asyncio.run(library._scan_once(config))
+            with mock.patch.object(library, "_download_state_snapshot",
+                                   new=mock.AsyncMock(return_value=(True, []))), \
+                    mock.patch.object(library, "_process_completed_file", process), \
+                    mock.patch.object(library.time, "time", return_value=1300):
+                asyncio.run(library._scan_once(config))
+            self.assertTrue(movie.exists())
+            self.assertFalse(extra.exists())
 
     def test_archive_subtree_is_excluded_from_watch_scan(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -106,6 +106,7 @@ def _strip_trailing_part(name: str) -> str:
 _CODE_PATTERNS = [
     re.compile(r'\b(FC2-?PPV-?\d{5,8})(?![0-9])', re.IGNORECASE),        # FC2-PPV-1234567（容许 _1/_2 分集尾巴）
     re.compile(r'\b([A-Z]{3,10}-\d{3,5}-\d{2,4})\b', re.IGNORECASE),     # heydouga-4017-001（厂牌-数字-数字）
+    re.compile(r'\b([A-Z]{1,8}\d{1,4}-\d{2,6})\b', re.IGNORECASE),      # T28-304（字母+数字-数字）
     re.compile(r'\b(\d{3,4}[A-Z]{2,6}-\d{2,5})\b', re.IGNORECASE),       # 390JAC-234 / 259LUXU-1234
     re.compile(r'\b([A-Z]{2,8}-\d{2,6})\b', re.IGNORECASE),              # ABP-123
     re.compile(r'\b([A-Z]{2,8})[-_]?(\d{2,6})\b', re.IGNORECASE),        # ABP123 / ABP_123
@@ -121,6 +122,8 @@ _scrape_jobs: dict[str, dict] = {}
 
 # 非下载器文件稳定性追踪： path -> [last_signature, stable_count, first_seen_at]
 _size_history: dict[str, list] = {}
+# 非下载器整目录稳定性：任一视频仍变化时，整批都不能刮削、归档或删除。
+_folder_history: dict[str, list] = {}
 # 过小文件仍每轮检查是否变大，但相同大小/mtime 只记录一次，避免广告文件刷屏。
 _small_log_history: dict[str, tuple[int, int]] = {}
 # 已处理（移动走或失败记录过）的文件路径，避免重复处理（进程内）
@@ -296,6 +299,12 @@ def _code_from_name(name: str) -> str:
     """从单个名字（文件名去扩展 / 目录名）识别番号：先剔除站点前缀等噪声再匹配。
     回退时**仍剥掉站点/广告域名**（只保留方括号内容），避免把 hhd800.com 这类广告域名
     误当成番号（如 hhd800.com@060226_01 被识别成 HHD-800）。"""
+    # A filename that is only a segment label must inherit the folder code;
+    # otherwise PART01/CD01 can be mistaken for a standalone movie code.
+    if re.fullmatch(r'\s*(?:cd|dvd|disc|disk|part|pt|vol)[._\s-]?\d{1,2}\s*',
+                    name or "", re.IGNORECASE):
+        return ""
+
     def _best(n: str) -> str:
         # 先去方括号+站点域名匹配；不中再保留方括号(番号可能在[]内)仅去广告域名匹配。
         return _match_code(_clean_noise(n)) or _match_code(_SITE_NOISE.sub(' ', n))
@@ -347,8 +356,16 @@ def _recognize_code(video_path: Path, watch_dir: str = "") -> str:
       2. 其次取归一化后更长（更具体）的番号；
       3. 再次按候选顺序（文件名优先于目录名，目录就近优先）。
     """
+    names = _candidate_names(video_path, watch_dir)
+    # A code explicitly present in the filename is the strongest evidence.
+    # Parent directories are only a fallback for bare parts such as A.mp4,
+    # 01.mp4 or CD1.mp4. Repeated outer folder names must never override it.
+    file_code = _code_from_name(names[0]) if names else ""
+    if file_code:
+        return file_code
+
     found = []  # (code, 候选顺序)
-    for idx, n in enumerate(_candidate_names(video_path, watch_dir)):
+    for idx, n in enumerate(names[1:]):
         c = _code_from_name(n)
         if c:
             found.append((c, idx))
@@ -500,6 +517,29 @@ def _is_extra_video(video_path: Path, watch_dir: str = "") -> bool:
         if (sc and _norm(sc) == fc) or _has_cd_marker(s.stem):
             return True      # 存在明确正片/分集兄弟 → 本文件是广告
     return False
+
+
+_EXTRA_NAME_MARKER = re.compile(
+    r'(?:^|[^a-z0-9])(?:ad|ads|promo|trailer|preview|sample)(?:$|[^a-z0-9])|'
+    r'广告|廣告|宣传|宣傳|预告|預告|扫码|掃碼|关注|關注',
+    re.IGNORECASE,
+)
+
+
+def _has_explicit_extra_marker(video_path: Path) -> bool:
+    """Require positive filename evidence before destructive extra deletion."""
+    stem = video_path.stem or ""
+    return bool(_SITE_NOISE.search(stem) or _EXTRA_NAME_MARKER.search(stem))
+
+
+def _should_delete_extra(video_path: Path, watch_dir: str, size: int,
+                         min_bytes: int, drop_set: set) -> bool:
+    """Apply the configured size rule without weakening segment protection."""
+    return (video_path in drop_set
+            and _is_extra_video(video_path, watch_dir)
+            and not _code_from_name(video_path.stem)
+            and not _has_cd_marker(video_path.stem)
+            and (size < min_bytes or _has_explicit_extra_marker(video_path)))
 
 
 def _norm_stem(stem: str) -> str:
@@ -1185,29 +1225,41 @@ def _folder_name_limit() -> int:
     try:
         limit = int(os.pathconf(os.getcwd(), "PC_NAME_MAX"))
         if limit > 0:
-            return limit
+            # Synology shares and media tools can fail before the nominal
+            # 255-byte limit once temporary names are added. Keep headroom.
+            return min(limit, 180)
     except (AttributeError, OSError, ValueError):
         pass
-    return 255
+    return 180
+
+
+def _utf8_prefix(value: str, byte_limit: int) -> str:
+    """Return the longest valid UTF-8 prefix within *byte_limit* bytes."""
+    if byte_limit <= 0:
+        return ""
+    raw = (value or "").encode("utf-8")
+    if len(raw) <= byte_limit:
+        return value or ""
+    return raw[:byte_limit].decode("utf-8", errors="ignore")
 
 
 def _truncate_title_for_folder(title: str, available: int) -> str:
-    """Shorten a title to *available* characters, preferring sentence breaks."""
+    """Shorten a title to *available* UTF-8 bytes, preferring sentence breaks."""
     if available <= 0:
         return ""
-    if len(title) <= available:
+    if len(title.encode("utf-8")) <= available:
         return title
     ellipsis = "..."
     if available <= len(ellipsis):
         return ellipsis[:available]
     keep = available - len(ellipsis)
-    head = title[:keep]
+    head = _utf8_prefix(title, keep)
     # Prefer the last sentence boundary that still fits, then comma-like
     # boundaries.  Include the punctuation and replace the remaining tail.
     for marks in ("。．.", "，,"):
         boundary = max((head.rfind(mark) for mark in marks), default=-1)
         if boundary >= 0:
-            return title[:boundary + 1].rstrip() + ellipsis
+            return head[:boundary + 1].rstrip() + ellipsis
     return head.rstrip() + ellipsis
 
 
@@ -1236,12 +1288,13 @@ def _archive_folder_name(code: str, title_original: str, title_translated: str,
         suffix = " ".join(names)
     elif mode == "actor":
         actor_name = _safe_name(" ".join(names)) if names else ""
-        return (actor_name or safe_code)[:_folder_name_limit()].rstrip(" .")
+        return _utf8_prefix(actor_name or safe_code, _folder_name_limit()).rstrip(" .")
     suffix = _safe_name(suffix.strip()) if (suffix or "").strip() else ""
     base = safe_code
     limit = _folder_name_limit()
-    if len(base) >= limit:
-        return base[:limit].rstrip(" .") or safe_code[:limit]
+    if len(base.encode("utf-8")) >= limit:
+        return (_utf8_prefix(base, limit).rstrip(" .")
+                or _utf8_prefix(safe_code, limit))
     if not suffix:
         return base
 
@@ -1249,18 +1302,19 @@ def _archive_folder_name(code: str, title_original: str, title_translated: str,
     # length calculation include actors instead of truncating them by accident.
     actor_suffix = " ".join(names)
     if mode == "code_title_actor" and actor_suffix:
-        fixed = len(base) + 1 + len(actor_suffix) + 1
+        fixed = len(f"{base}  {actor_suffix}".encode("utf-8"))
         title_budget = max(0, limit - fixed)
         short_title = _truncate_title_for_folder(_safe_name(title.strip()), title_budget)
         suffix = " ".join(part for part in (short_title, actor_suffix) if part)
     elif mode == "code_title":
-        title_budget = max(0, limit - len(base) - 1)
+        title_budget = max(0, limit - len(f"{base} ".encode("utf-8")))
         suffix = _truncate_title_for_folder(suffix, title_budget)
 
     result = f"{base} {suffix}" if suffix else base
-    if len(result) > limit:
-        result = (result[:max(0, limit - 3)].rstrip(" .") + "...") if limit >= 3 else result[:limit]
-    return result or base[:limit].rstrip(" .")
+    if len(result.encode("utf-8")) > limit:
+        result = (_utf8_prefix(result, max(0, limit - 3)).rstrip(" .") + "..."
+                  if limit >= 3 else _utf8_prefix(result, limit))
+    return result or _utf8_prefix(base, limit).rstrip(" .")
 
 
 def _archive_actor_subfolder_name(code: str, title_original: str,
@@ -1473,9 +1527,7 @@ async def _backfill_artwork(movie: dict, code: str, config: dict,
     """
     if movie.get("cover") and movie.get("samples"):
         return movie
-    configured_limit = max(0, min(int(config.get("scrape_artwork_fallback_limit", 2)), 6))
-    if configured_limit <= 0:
-        return movie
+    configured_limit = 2
     from scrapers import enrich, search_source_status
 
     enabled = _enabled_artwork_sources(code, config)
@@ -1641,7 +1693,7 @@ def _artwork_context(movie: dict) -> dict:
 def _queue_artwork_backfill(target_dir: Path, code: str, movie: Optional[dict],
                             config: dict) -> bool:
     """把准确的最终归档目录加入低频补图队列；已有任务不重置退避时间。"""
-    if not code or int(config.get("scrape_artwork_fallback_limit", 2)) <= 0:
+    if not code:
         return False
     target_dir = Path(target_dir)
     poster = target_dir / "poster.jpg"
@@ -1709,7 +1761,7 @@ def _write_artwork_if_missing(path: Path, data: bytes) -> bool:
 async def _run_pending_artwork(config: dict) -> int:
     """每轮最多处理一个到期任务；只重试暂时失败来源，最多三轮。"""
     _load_artwork_pending()
-    if not _artwork_pending or int(config.get("scrape_artwork_fallback_limit", 2)) <= 0:
+    if not _artwork_pending:
         return 0
     now = time.time()
     due = sorted(
@@ -2164,7 +2216,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
 # ─────────────────────────────────────────
 # 归档：视频（按配置决定是否改名）+ NFO/图片 → output_dir/YYYYMM/所选文件夹名/
 #   V1.5 统一：归档方式由全局 archive_mode 决定（hardlink/copy 保留原文件；move 移动后清原目录），
-#   与发种流水线共用同一归档目录与按年月结构。
+#   使用统一归档目录与按年月结构。
 # ─────────────────────────────────────────
 
 def _commit_temp_without_overwrite(tmp: Path, dst: Path) -> None:
@@ -2796,12 +2848,29 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
         # Preserve the original suffix only when it is an explicit part-like
         # suffix that failed multipart validation (e.g. a lone CODE-C).
         part_like = _part_index(video_path.stem, code) is not None
-        base_stem = (safe_code if part or not part_like else
+        ambiguous_same_code = (not part and len(_same_code_main_videos(
+            video_path, code, watch_dir)) > 1)
+        base_stem = (safe_code if part or (not part_like and not ambiguous_same_code) else
                      _safe_name(_preserved_code_stem(video_path, code)))
         video_name = f"{base_stem}{part}{video_path.suffix.lower()}"
     else:
         video_name = video_path.name
     video_dst = target_dir / video_name
+    # A later-arriving unproven segment may find an earlier normalized file in
+    # the archive (common when Thunder creates parts minutes apart). Never
+    # abort or overwrite: retain the incoming original stem as a safe fallback.
+    if video_dst.exists():
+        original_stem = _safe_name(_preserved_code_stem(video_path, code))
+        fallback = target_dir / f"{original_stem}{video_path.suffix.lower()}"
+        try:
+            same_file = video_path.resolve() == video_dst.resolve()
+        except Exception:
+            same_file = False
+        if (not same_file and original_stem and fallback != video_dst
+                and not fallback.exists()):
+            video_dst = fallback
+            video_name = fallback.name
+            _log(f"分段证据不足且标准名已存在，保留原名避免冲突：{video_path.name} → {video_name}")
     if not _transfer(video_path, video_dst, mode):
         return {"archived": False, "moved_original": False,
                 "error": "视频归档失败", "target_dir": str(target_dir)}
@@ -2903,9 +2972,8 @@ def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int,
                     keep_bytes: int = 300 * 1024 * 1024):
     """
     移动走视频后清理原下载位置：
-      - 若视频原本在 watch_dir 下的「子目录」里（典型 qB 单种子单目录），
-        且该子目录已无其它达标视频待处理 → 整个子目录连同遗留广告/样板文件一并删除；
-      - 若还有其它达标视频 → 保留子目录，待最后一个视频处理完再删；
+      - 若视频原本在 watch_dir 下的子目录，只有目录树完全无文件时才删除空目录；
+      - 若还有任何视频、临时文件或未知文件 → 保留目录，不做推断删除；
       - 若视频直接位于 watch_dir 根目录 → 不删根目录（仅此前已移走视频本体）。
     """
     try:
@@ -2929,8 +2997,16 @@ def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int,
         _log(f"原目录仍有 {len(remaining)} 个视频，安全保留整个目录：{parent.name}")
         return
     try:
+        remaining_files = [p for p in parent.rglob("*") if p.is_file()]
+    except Exception as e:
+        _log(f"检查原目录遗留文件失败，取消清理并保留目录：{parent} — {e}")
+        return
+    if remaining_files:
+        _log(f"原目录仍有 {len(remaining_files)} 个未知/附属文件，安全保留整个目录：{parent.name}")
+        return
+    try:
         shutil.rmtree(parent)
-        _log(f"已删除原下载目录（含遗留文件）：{parent}")
+        _log(f"已删除已清空的原下载目录：{parent}")
     except Exception as e:
         _log(f"删除原目录失败 {parent}: {e}")
 
@@ -2939,14 +3015,25 @@ def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int,
 # 监控：完成检测 + 处理一个文件（刮削 → 移动）
 # ─────────────────────────────────────────
 
+_INCOMPLETE_MARKERS = (
+    ".!qb", ".!ut", ".part", ".partial", ".crdownload",
+    ".download", ".tmp", ".td", ".xltd",
+)
+
+
 def _is_incomplete(video_path: Path) -> bool:
     """常见下载器的临时标记；没有标记时仍由稳定性兜底判断。"""
-    markers = (
-        ".!qB", ".!qb", ".!ut", ".part", ".partial", ".crdownload",
-        ".download", ".tmp", ".td", ".xltd",
-    )
     return any((video_path.parent / (video_path.name + marker)).exists()
-               for marker in markers)
+               for marker in _INCOMPLETE_MARKERS)
+
+
+def _has_download_artifact(root: Path) -> bool:
+    """Detect unfinished files even before their final video name exists."""
+    try:
+        return any(p.is_file() and p.name.lower().endswith(_INCOMPLETE_MARKERS)
+                   for p in root.rglob("*"))
+    except OSError:
+        return True  # inability to inspect is not proof of completion
 
 
 def _manual_file_stability(video_path: Path, stat_result, stable_needed: int,
@@ -2975,6 +3062,49 @@ def _manual_file_stability(video_path: Path, stat_result, stable_needed: int,
     settled = (stable_count >= required_checks
                and observed_for >= max(0, int(settle_seconds or 0)))
     return settled, stable_count, observed_for
+
+
+def _manual_group_key(video_path: Path, watch_dir: Path) -> str:
+    """Group a top-level download tree; root files group by explicit code."""
+    try:
+        root = watch_dir.resolve()
+        resolved = video_path.resolve()
+        relative = resolved.relative_to(root)
+        if len(relative.parts) <= 1:
+            code = _code_from_name(video_path.stem)
+            return f"root-code:{_norm(code)}" if code else f"file:{resolved}"
+        return f"dir:{root / relative.parts[0]}"
+    except Exception:
+        return f"file:{video_path}" if video_path.parent == watch_dir else f"dir:{video_path.parent}"
+
+
+def _manual_group_stability(group_key: str, entries: list[tuple[Path, object]],
+                            stable_needed: int, settle_seconds: int,
+                            now: Optional[float] = None) -> tuple:
+    """Require the complete visible video set to remain unchanged as one batch.
+
+    This is the safety gate for Thunder-style preallocation without unfinished
+    suffixes. A new segment, or any size/mtime/ctime change, restarts the quiet
+    window for every video in that download directory.
+    """
+    now = time.time() if now is None else now
+    signature = tuple(sorted(
+        (str(path),) + _stat_signature(stat_result)
+        for path, stat_result in entries
+    ))
+    hist = _folder_history.get(group_key)
+    if hist and hist[0] == signature:
+        hist[1] += 1
+    else:
+        hist = [signature, 1, now]
+        _folder_history[group_key] = hist
+    stable_count = hist[1]
+    observed_for = max(0, now - hist[2])
+    required_checks = max(2, int(stable_needed or 0))
+    # Five minutes is the safety floor for untracked/preallocated downloads.
+    required_quiet = max(300, int(settle_seconds or 0))
+    return (stable_count >= required_checks and observed_for >= required_quiet,
+            stable_count, observed_for)
 
 
 def _file_download_state(video_path: Path, watch_dir: Path,
@@ -3014,8 +3144,7 @@ def _iter_video_files(watch_dir: Path, excluded_roots=None):
 
 
 def _under_any(path: Path, roots: set) -> bool:
-    """path 是否等于、或位于 roots 中任一目录的子树下（均按 resolve 比较）。
-    用于发种占用第二层保护：roots 由 publish.active_paths 提供（番号文件夹/原始下载内容路径）。"""
+    """path 是否等于、或位于 roots 中任一目录的子树下（均按 resolve 比较）。"""
     if not roots:
         return False
     try:
@@ -3049,7 +3178,8 @@ def _match_downloader_torrent(video_path: Path, watch_dir: Path,
     parts = rel.split('/')
     first, filename = parts[0], parts[-1]
     filename_stem = _path_key(Path(filename).stem)
-    for torrent in torrents or []:
+    matches = []
+    for order, torrent in enumerate(torrents or []):
         name = _path_key(torrent.get("name", ""))
         name_base = _path_key(Path(torrent.get("name", "")).name)
         name_stem = _path_key(Path(torrent.get("name", "")).stem)
@@ -3057,21 +3187,42 @@ def _match_downloader_torrent(video_path: Path, watch_dir: Path,
         content_stem = _path_key(Path(content_name).stem)
         file_names = [_path_key(f) for f in (torrent.get("files") or []) if f]
         file_stems = {_path_key(Path(f).stem) for f in file_names}
-        # 单文件任务：任务名通常就是完整文件名。
-        if name and (rel == name or (len(parts) == 1 and (
-                filename in {name, name_base}
-                or (filename_stem and filename_stem in {name_stem, content_stem})))):
-            return torrent
-        # 多文件任务：监控目录下第一层一般就是 torrent name/content_path 末级。
+        scores = []
+        # Exact task path or torrent-root directory is authoritative.
+        if name and rel == name:
+            scores.append(100)
         if len(parts) > 1 and first in {name, content_name} - {""}:
-            return torrent
-        # Transmission 可直接返回 torrent 内相对文件清单。
-        if any(rel == f or rel.endswith('/' + f) or f.endswith('/' + rel)
+            scores.append(100)
+        if len(parts) == 1 and filename in {name, name_base} - {""}:
+            scores.append(95)
+        if len(parts) == 1 and filename_stem and filename_stem in {
+                name_stem, content_stem} - {""}:
+            scores.append(80)
+        # Transmission exposes file lists. Exact relative paths are strong;
+        # suffix matching is accepted only for a multi-component path. A bare
+        # common name such as video.mp4 must not bind to the first random task.
+        if rel in file_names:
+            scores.append(100)
+        if any('/' in f and (rel.endswith('/' + f) or f.endswith('/' + rel))
                for f in file_names):
-            return torrent
+            scores.append(85)
+        if len(parts) > 1 and filename in {Path(f).name.lower() for f in file_names}:
+            scores.append(40)
         if len(parts) == 1 and filename_stem and filename_stem in file_stems:
-            return torrent
-    return None
+            scores.append(60)
+        if scores:
+            matches.append((max(scores), order, torrent))
+    if not matches:
+        return None
+    best_score = max(score for score, _order, _torrent in matches)
+    best = [(order, torrent) for score, order, torrent in matches
+            if score == best_score]
+    # Ambiguous downloader ownership is not completion evidence. Treat it as
+    # actively downloading instead of falling back to filesystem guessing.
+    if len(best) != 1 or best_score < 60:
+        return {"completed": False, "state": "ambiguous", "progress": 0.0,
+                "amount_left": 0, "ambiguous": True}
+    return best[0][1]
 
 
 async def _download_state_snapshot(config: dict) -> tuple[bool, list]:
@@ -3100,10 +3251,9 @@ async def _process_completed_file(video_path: Path, config: dict,
     fp = str(video_path)
     output_dir = config.get("scrape_output_dir", "").strip()
     move_on_fail = config.get("scrape_move_on_fail", True)
-    # 全局刮削/归档总开关（监控 & 发种共用）；兼容旧 publish_* 键
-    scrape_meta = config.get("scrape_meta_enabled", config.get("publish_scrape_enabled", True))
+    scrape_meta = config.get("scrape_meta_enabled", True)
     organize_on = config.get("scrape_organize_enabled", scrape_meta)
-    archive_on = config.get("archive_enabled", config.get("publish_archive_enabled", True))
+    archive_on = config.get("archive_enabled", True)
 
     if scrape_meta:
         try:
@@ -3153,7 +3303,7 @@ async def _process_completed_file(video_path: Path, config: dict,
             scrape_res.get("folder_title", ""), config)
             if config.get("scrape_folder_naming", "code") == "actor" else "")
         src_parent = video_path.parent
-        # V1.5 统一：归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
+        # 归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
         mode = (config.get("archive_mode") or "hardlink").lower()
         rename_video = organize_on and config.get("scrape_video_rename_enabled", True)
         mv = _archive_file(video_path, output_dir, code, mode=mode, rename=rename_video,
@@ -3211,7 +3361,7 @@ async def _scan_once(config: dict) -> int:
 
     _load_processed()   # 重启后从磁盘恢复「已归档」记录，避免 hardlink/copy 保留的原文件被反复处理
     stable_needed = max(2, int(config.get("scrape_stable_checks", 2)))
-    settle_seconds = max(5, int(config.get("scrape_settle_seconds", 60)))
+    settle_seconds = max(300, int(config.get("scrape_settle_seconds", 300)))
     min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
     keep_bytes = int(config.get("scrape_keep_size_mb", 300)) * 1024 * 1024
     organize_on = config.get("scrape_organize_enabled",
@@ -3237,21 +3387,8 @@ async def _scan_once(config: dict) -> int:
     # scan does not perform poster/fanart source lookups or retries.
     now = time.time()
     processed = 0
-    n_total = n_done_before = n_incomplete = n_small = n_waiting = n_extra = n_publish = 0
+    n_total = n_done_before = n_incomplete = n_small = n_waiting = n_extra = 0
     n_backfilled = 0   # 本轮以归档目录为准补登签名（兜底跳过）的文件数
-
-    # 发种占用：这些文件正被发种流水线原地做种，监控绝不能移动/删除（否则做种丢文件）。
-    # 两层保护互补，命中任一即跳过：
-    #   ① 按番号 active_codes —— 路径对不上（如未拿到 content_path）但番号识别得出时仍保护；
-    #   ② 按路径 active_paths —— 番号识别不出（命名怪异/嵌套深）但文件落在发种占用路径下时仍保护。
-    # 懒加载导入避免与 publish.py 的循环依赖。
-    try:
-        import publish as _publish
-        pub_active = _publish.active_codes()
-        pub_paths = _publish.active_paths(config)
-    except Exception:
-        pub_active = set()
-        pub_paths = set()
 
     state_ok, torrent_tasks = await _download_state_snapshot(config)
     if not state_ok:
@@ -3270,29 +3407,53 @@ async def _scan_once(config: dict) -> int:
     initial_videos = list(_iter_video_files(watch_dir, excluded_roots))
     snapshot_videos = []
     scan_file_stats = {}
+    candidate_states = {}
+    manual_groups = {}
     for candidate in initial_videos:
-        candidate_code = _recognize_code(candidate, watch)
-        if pub_active and candidate_code and _norm(candidate_code) in pub_active:
-            continue
-        if pub_paths and _under_any(candidate, pub_paths):
-            continue
         candidate_state, candidate_task = _file_download_state(
             candidate, watch_dir, torrent_tasks)
-        if candidate_state == "downloading":
+        candidate_states[str(candidate)] = candidate_state
+        try:
+            candidate_stat = candidate.stat()
+        except OSError:
             continue
-        if candidate_state == "marked_incomplete":
+        scan_file_stats[str(candidate)] = candidate_stat
+        group_key = _manual_group_key(candidate, watch_dir)
+        manual_groups.setdefault(group_key, []).append((candidate, candidate_stat))
+
+    manual_ready = set()
+    for group_key, entries in manual_groups.items():
+        states = {candidate_states.get(str(path), "unmatched") for path, _st in entries}
+        # A downloader-reported incomplete file or a temporary marker blocks
+        # every sibling in the directory, including deletion candidates.
+        if states & {"downloading", "marked_incomplete"}:
+            _folder_history.pop(group_key, None)
             continue
-        if candidate_state == "unmatched":
-            try:
-                candidate_stat = candidate.stat()
-            except OSError:
+        group_root = (Path(group_key[4:]) if group_key.startswith("dir:")
+                      else watch_dir)
+        if _has_download_artifact(group_root):
+            _folder_history.pop(group_key, None)
+            continue
+        group_stable, _group_count, _group_age = _manual_group_stability(
+            group_key, entries, stable_needed, settle_seconds, now=now)
+        has_unmatched = "unmatched" in states
+        for candidate, candidate_stat in entries:
+            state = candidate_states.get(str(candidate), "unmatched")
+            if state == "completed":
+                # A pure API-tracked torrent is authoritative immediately. If
+                # the same directory also contains untracked files, wait for
+                # the directory batch gate so neither side races the other.
+                if not has_unmatched or group_stable:
+                    manual_ready.add(str(candidate))
                 continue
-            scan_file_stats[str(candidate)] = candidate_stat
             stable, _stable_count, _observed_for = _manual_file_stability(
                 candidate, candidate_stat, stable_needed, settle_seconds, now=now)
-            if not stable:
-                continue
-        snapshot_videos.append(candidate)
+            if group_stable and stable:
+                manual_ready.add(str(candidate))
+
+    for candidate in initial_videos:
+        if str(candidate) in manual_ready:
+            snapshot_videos.append(candidate)
     for candidate in snapshot_videos:
         candidate_code = _recognize_code(candidate, watch)
         if not candidate_code:
@@ -3317,24 +3478,6 @@ async def _scan_once(config: dict) -> int:
         if fp in _processed:
             n_done_before += 1
             continue
-        # 发种任务占用（未终止）→ 跳过本轮，不入 _processed：待发种结束(终态)后自动恢复正常归档。
-        # ① 按番号：识别必须与归档同深度（上溯各级父目录，复用 _recognize_code）——否则视频嵌在
-        #    「番号/子目录/video.mp4」这类多层结构里时，这里只看文件名+直接父目录会识别不出番号、
-        #    不跳过，而归档却能从祖父目录认出番号照常移动+删原目录，把正在做种的发种数据搬空。
-        # ② 按路径：命名怪异、连父目录都不含番号时，只要文件落在发种占用路径（番号文件夹/原始下载
-        #    内容）的子树下就跳过，作为番号识别的兜底。
-        if pub_active or pub_paths:
-            occupied = False
-            if pub_active:
-                _code_guess = _recognize_code(vf, watch)
-                if _code_guess and _norm(_code_guess) in pub_active:
-                    occupied = True
-            if not occupied and pub_paths and _under_any(vf, pub_paths):
-                occupied = True
-            if occupied:
-                n_publish += 1
-                _size_history.pop(fp, None)
-                continue
         download_state, torrent_task = _file_download_state(
             vf, watch_dir, torrent_tasks)
         if download_state == "downloading":
@@ -3360,6 +3503,16 @@ async def _scan_once(config: dict) -> int:
             age = max(0, now - st.st_mtime)   # 距上次写入的秒数
         except Exception as e:
             _log(f"读取文件信息失败，跳过：{vf.name}（{e}）")
+            continue
+        # This gate deliberately precedes archive dedupe and, critically, the
+        # destructive extra-video classifier. No untracked directory is
+        # touched until its complete visible video set has stayed quiet.
+        if download_state in {"unmatched", "completed"} and fp not in manual_ready:
+            n_waiting += 1
+            group_key = _manual_group_key(vf, watch_dir)
+            hist = _folder_history.get(group_key) or [None, 0, now]
+            observed = max(0, now - hist[2])
+            _log(f"等待混合下载目录整体写入完成：{vf.parent.name} / {vf.name}（整批稳定 {int(observed)}/300s）")
             continue
         # 持久化「已归档」去重：hardlink/copy 模式原文件保留在监控目录，重启后内存 _processed 清空，
         # 靠落盘签名（路径|大小）识别出早已归档的文件并跳过，不再重复刮削/重复归档到新月份目录。
@@ -3391,7 +3544,7 @@ async def _scan_once(config: dict) -> int:
             in_download_subdir = vf.parent.resolve() != watch_dir.resolve()
         except Exception:
             pass
-        if organize_on and delete_extras and in_download_subdir and _has_primary_sibling(vf):
+        if delete_extras and in_download_subdir and _has_primary_sibling(vf):
             try:
                 _, drop_set = classify_videos(
                     _sibling_videos(vf), watch, min_bytes, keep_bytes)
@@ -3401,9 +3554,7 @@ async def _scan_once(config: dict) -> int:
         # independent proof that this file is an extra: recognizable codes,
         # compact/explicit part markers, and uncertain names are never
         # deleted.  This second gate is intentional defence in depth.
-        if vf in drop_set and _is_extra_video(vf, watch) \
-                and not _code_from_name(vf.stem) \
-                and not _has_cd_marker(vf.stem):
+        if _should_delete_extra(vf, watch, size, min_bytes, drop_set):
             try:
                 vf.unlink()
                 n_extra += 1
@@ -3508,17 +3659,15 @@ async def _scan_once(config: dict) -> int:
         _log(f"按归档目录补登已归档签名 {n_backfilled} 条（重启/换版后跳过原目录已归档文件）")
     _log(f"扫描完成：共 {n_total} 个视频 → 本次处理 {processed}，"
          f"等待稳定 {n_waiting}，下载中 {n_incomplete}，过小 {n_small}，"
-         f"广告/赠片 {n_extra}，发种占用 {n_publish}，先前已处理 {n_done_before}")
+         f"广告/赠片 {n_extra}，先前已处理 {n_done_before}")
     return processed
 
 
 def _monitor_should_run(config: dict) -> bool:
-    """监控是否该运行：刮削、归档任一开启即运行（无单独的监控开关）。
-    两者都关＝无事可做＝不监控。监控只负责非发种的下载/手动放入文件，按这两个全局
-    开关统一处理（发种任务占用的文件由 active_codes/active_paths 自动跳过）。"""
-    scrape_meta = config.get("scrape_meta_enabled", config.get("publish_scrape_enabled", True))
+    """监控是否该运行：刮削、规整、归档任一开启即运行。"""
+    scrape_meta = config.get("scrape_meta_enabled", True)
     organize_on = config.get("scrape_organize_enabled", scrape_meta)
-    archive_on = config.get("archive_enabled", config.get("publish_archive_enabled", True))
+    archive_on = config.get("archive_enabled", True)
     return bool(scrape_meta or organize_on or archive_on)
 
 

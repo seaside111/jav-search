@@ -318,18 +318,6 @@
   .btn-qb:disabled { opacity: .6; cursor: wait; }
   .btn-qb.pushed { background: var(--green); }
   .btn-qb.failed { background: var(--red); }
-  .btn-publish {
-    display: flex; align-items: center; gap: 4px;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    border: none; border-radius: 5px; color: #fff;
-    padding: 4px 10px; font-size: 10px; font-weight: 700;
-    font-family: 'Noto Sans SC', sans-serif; cursor: pointer;
-    transition: opacity .2s; white-space: nowrap;
-  }
-  .btn-publish:hover { opacity: .85; }
-  .btn-publish:disabled { opacity: .6; cursor: wait; }
-  .btn-publish.pushed { background: var(--green); }
-
   /* drawer empty / loading */
   .drawer-msg { padding: 20px 14px; text-align: center; font-size: 12px; color: var(--text-dim); }
   .drawer-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--magnet); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; margin-right: 6px; }
@@ -589,7 +577,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.21</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.22</div>
   <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -680,16 +668,11 @@
             <label class="source-chk"><input type="checkbox" id="srcJav321"> JAV321</label>
             <label class="source-chk"><input type="checkbox" id="srcDmm"> DMM/FANZA</label>
           </div>
-          <span class="setting-hint">JAV321 与 DMM/FANZA 默认关闭；启用后可参与缺图补全。DMM/FANZA 必须配置下方官方联盟 API 凭据。</span>
+          <span class="setting-hint">这些开关用于搜索；首页最新仅展示支持最新列表的来源。详情页缺少样品图时，会在已启用来源中按 JAV321 → JavDB 回退。自动目录刮削的缺封面兜底固定为 JAV321 → JavDB。DMM/FANZA 必须配置下方官方联盟 API 凭据。</span>
         </div>
 
         <div class="setting-group">
-          <h3>多来源图片补全</h3>
-          <div class="setting-row">
-            <label class="setting-label">最多有效补查来源</label>
-            <input class="setting-input" id="cfgArtworkFallbackLimit" type="number" value="2" min="0" max="6">
-            <span class="setting-hint">图片齐全时不请求；超时、异常或没有返回可识别条目不占额度，会继续尝试 JAV321 等后续来源；命中 fanart 即停。0 表示关闭。</span>
-          </div>
+          <h3>DMM/FANZA 数据源</h3>
           <div class="setting-row">
             <label class="setting-label">DMM/FANZA API ID</label>
             <input class="setting-input" id="cfgDmmApiId" type="password" autocomplete="off">
@@ -780,15 +763,15 @@
         <div class="setting-group">
           <h3>抓取与展示</h3>
           <div class="setting-row">
-            <label class="setting-label">单源抓取上限（条）</label>
+            <label class="setting-label">搜索结果上限（条）</label>
             <input class="setting-input" id="cfgMaxResults" type="number" value="300" min="12" max="500" step="12">
-            <span class="setting-hint">每个数据源最多抓取条目数，最高 500。仅抓列表页速度快，详情翻页时按需加载</span>
+            <span class="setting-hint">每个来源请求不超过此数量，多来源合并后的最终结果也按此数量截断，最高 500。详情在点开时按需加载。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
               <input type="checkbox" id="cfgShowLatest" checked> 首页展示最新片源
             </label>
-            <span class="setting-hint">未搜索时，首页自动展示所选数据源的最新片源</span>
+            <span class="setting-hint">未搜索时，首页自动展示所选且支持最新列表的数据源；JAV321、DMM/FANZA 当前不提供首页最新列表。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">首页最新数量 · JavBus</label>
@@ -993,9 +976,8 @@
         <div class="setting-group">
           <h3>刮削 &amp; 归档（全局统一·所有文件通用）</h3>
           <div class="setting-hint" style="margin:-4px 0 10px;line-height:1.7">
-            <b>刮削</b>负责 NFO 与图片，<b>规整</b>控制归档命名，<b>归档</b>负责落入媒体库；视频改名、封套裁图和广告清理另有独立选项。<br>
+            <b>刮削</b>负责 NFO 与图片，<b>规整</b>控制视频文件规整，<b>归档</b>负责落入媒体库；视频改名、封套裁图和广告清理另有独立选项。<br>
             后台会自动监控下载目录——刮削、规整、归档任一开启即运行；三项都关时停止监控。
-            （发种任务正在做种的文件会自动跳过，绝不抢。）
           </div>
           <div class="jackett-status-row">
             <div class="jackett-status-dot" id="scrapeDot"></div>
@@ -1006,11 +988,11 @@
             <label class="source-chk" style="font-size:13px">
               <input type="checkbox" id="cfgScrapeMetaEnabled" checked> 刮削（写 NFO/封面）
             </label>
-            <span class="setting-hint">开：标题、演员、简介写入 NFO 并抓取封面；视频改名由“规整”控制，广告删除有独立开关。</span>
+            <span class="setting-hint">开：标题、演员、简介写入 NFO 并抓取封面；视频改名由“规整”和“归档时重命名”共同控制，广告删除只受自己的独立开关控制。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgScrapeOrganizeEnabled" checked> 规整（按设置改名）</label>
-            <span class="setting-hint">归档命名规则的总开关；视频是否改名还由下一项控制，广告/赠片删除另有独立开关。</span>
+            <span class="setting-hint">控制视频重命名及同片多版本规整；归档文件夹仍始终使用下方命名规则。广告/赠片删除不受此开关影响。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgVideoRenameEnabled" checked> 归档时重命名视频文件</label>
@@ -1018,14 +1000,14 @@
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgJacketArtworkEnabled" checked> 用完整封套同时生成 poster 和 fanart</label>
-            <span class="setting-hint">开启后 poster 从横向封套中缝左侧少量位置裁取右侧正面，fanart 保存完整横向封套；关闭后不裁切封套，fanart 使用独立样品/宣传图。</span>
+            <span class="setting-hint">开启后 poster 从横向封套中缝左侧少量位置裁取右侧正面，fanart 保存完整横向封套；关闭后不裁切封套，优先用独立样品/宣传图作为 fanart，没有独立图片时复用封面。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px"><input type="checkbox" id="cfgScrapeDeleteExtras" checked> 删除识别出的广告/赠片视频（默认开启）</label>
-            <span class="setting-hint">这是独立的破坏性开关；关闭后不会自动删除广告/赠片，不影响刮削、命名或归档。</span>
+            <span class="setting-hint">这是独立的破坏性开关，不受“规整”开关影响；低于“最小文件大小”的无番号、无分段标记候选按广告删除，明确广告/宣传/预告/站点标记的候选也可删除。CD/PART/A-B 等分段与 -C 硬字幕文件始终保护。</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label">规整后文件夹命名</label>
+            <label class="setting-label">归档文件夹命名</label>
             <select class="setting-input" id="cfgFolderNaming">
               <option value="code">只用番号</option><option value="actor">只用演员</option><option value="code_title">番号 + 标题</option><option value="code_actor">番号 + 演员</option><option value="code_title_actor">番号 + 标题 + 演员</option>
             </select>
@@ -1038,17 +1020,17 @@
             <label class="source-chk" style="font-size:13px">
               <input type="checkbox" id="cfgArchiveEnabled" checked> 归档（成品放到归档目录供 EMBY）
             </label>
-            <span class="setting-hint">开：成品按下面的「归档方式」放进归档目录（手动放入的文件也照此归档）；关：不归档（发种仍在下载目录原地做种）</span>
+            <span class="setting-hint">开：成品按下面的「归档方式」放进归档目录（手动放入的文件也照此归档）；关：只执行已开启的刮削/规整操作，不写入归档目录。</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label">下载/工作目录（监控 &amp; 发种共用）</label>
+            <label class="setting-label">下载/工作目录（监控目录）</label>
             <input class="setting-input" id="cfgScrapeWatch" type="text" placeholder="/data/media/qb/jpav">
-            <span class="setting-hint">本容器内、实际指向<b>下载器保存数据同一物理目录</b>的挂载名。监控扫它做刮削归档；发种也在此目录【原地】规整/做种。务必与下载器保存目录指向同一块盘</span>
+            <span class="setting-hint">本容器内、实际指向<b>下载器保存数据同一物理目录</b>的挂载名。监控会扫描这里并执行刮削、规整和归档；务必与下载器保存目录指向同一块盘。</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label">归档目录（监控 &amp; 发种共用，供 EMBY 扫）</label>
+            <label class="setting-label">归档目录（供 EMBY 扫描）</label>
             <input class="setting-input" id="cfgScrapeOutput" type="text" placeholder="/data/media/emby">
-            <span class="setting-hint">刮削/发种后按所选文件夹命名规则在此生成目录。硬链接需与下载目录<b>同一卷</b>（跨卷自动退化为复制）</span>
+            <span class="setting-hint">刮削归档后按所选文件夹命名规则在此生成目录。硬链接需与下载目录<b>同一卷</b>（跨卷自动退化为复制）。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">历史归档配套文件修复</label>
@@ -1063,13 +1045,13 @@
               <option value="copy">复制（保留原文件，占双倍空间）</option>
               <option value="move">移动（原文件移走、清空下载目录）</option>
             </select>
-            <span class="setting-hint">监控孤儿下载的归档方式。<b>发种文件因需原地做种，恒为硬链接/复制</b>（选「移动」也自动降级为硬链接，绝不移走做种数据）</span>
+            <span class="setting-hint">监控目录文件的归档方式；硬链接/复制会保留下载文件，移动会移走原文件并在安全时清理空目录。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
               <input type="checkbox" id="cfgArchiveByMonth" checked> 按年月建子目录（归档目录/YYYYMM/所选文件夹名/）
             </label>
-            <span class="setting-hint">关闭后直接写入 归档目录/所选文件夹名/。监控与发种共用此结构</span>
+            <span class="setting-hint">关闭后直接写入 归档目录/所选文件夹名/。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">轮询间隔（秒）</label>
@@ -1078,14 +1060,14 @@
           </div>
           <div class="setting-row">
             <label class="setting-label">静置判定（秒）</label>
-            <input class="setting-input" id="cfgScrapeSettle" type="number" value="60" min="5" max="1800" step="5">
+            <input class="setting-input" id="cfgScrapeSettle" type="number" value="300" min="300" max="3600" step="30">
             <!-- 非 qB/TR 文件需同时满足静置时间与连续稳定检查；匹配到的 qB/TR 任务以 API 完成状态为准。 -->
-            <span class="setting-hint">仅用于<b>不属于下载器任务的手动文件</b>。qBittorrent/Transmission 任务必须由下载器 API 明确报告 100% 且剩余 0 字节，预分配文件不会被提前处理。</span>
+            <span class="setting-hint">仅用于<b>不属于 qBittorrent/Transmission 任务的文件</b>（含迅雷和手动放入）。同一下载目录内所有视频必须整体连续稳定，任一段仍写入时不会刮削、归档或删除；安全下限为 300 秒。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">最小文件大小（MB）</label>
             <input class="setting-input" id="cfgScrapeMinSize" type="number" value="100" min="0" step="50">
-            <span class="setting-hint">小于此大小的视频忽略，避免刮削样板/预告片</span>
+            <span class="setting-hint">低于此大小且无番号、无分段标记的候选，在广告删除开启时可按广告清理；未确认是广告的小文件仅跳过刮削。明确分段和 -C 硬字幕文件始终保护。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">大文件保底（MB）</label>
@@ -2069,15 +2051,15 @@ function detailSourceUrl(m, source) {
   return hit ? hit[1] : '';
 }
 
-// 详情补充来源只保留 JAV321：直连、样品图多，且仅在用户点开详情时按需请求。
-// JavDB 不再作为普通 JavBus/FC2/AVSOX 卡片的自动补充来源。
+// 详情样品图优先 JAV321；没有样品图时再回退 JavDB，且只在用户点开详情时请求。
 function detailExtraSources(m) {
   if (!m || !m.code) return [];
   const enabled = new Set((configuredSources.length ? configuredSources : ['javbus', 'jav321', 'javdb'])
     .map(normalizedSource));
   const primary = normalizedSource(m.source);
   const state = m._extra_detail_state || {};
-  return ['jav321'].filter(source =>
+  if (m.samples && m.samples.length) return [];
+  return ['jav321', 'javdb'].filter(source =>
     enabled.has(source) && source !== primary && !state[source]);
 }
 
@@ -2133,7 +2115,7 @@ function renderDetailExtra(m, idx) {
   // 还没补抓且当前没有样品图/磁力时，显示加载提示。
   if (detailExtraPending(m) && !samplesHtml && !magnetsHtml) {
     html += `<div><div class="detail-section-label">磁力链 / 样品图</div>
-      <div style="color:var(--text-dim);font-size:13px"><span class="drawer-spinner"></span> 正在补充详情 / 样品图（JAV321 按需获取）…</div></div>`;
+      <div style="color:var(--text-dim);font-size:13px"><span class="drawer-spinner"></span> 正在补充详情 / 样品图（JAV321，缺失时回退 JavDB）…</div></div>`;
   }
   return html;
 }
@@ -2164,6 +2146,7 @@ async function ensureExtraDetails(idx) {
   m._extra_detail_loading = m._extra_detail_loading || {};
   try {
     for (const source of detailExtraSources(m)) {
+      if (m.samples && m.samples.length) break;
       m._extra_detail_loading[source] = true;
       try {
         const resp = await fetch(`${API}/api/details/resolve`, {
@@ -2301,7 +2284,7 @@ async function openDetail(idx) {
   document.getElementById('detailModal').scrollTop = 0;
   document.getElementById('detailOverlay').classList.add('open');
 
-  // JAV321 样品图补抓与主来源详情并行启动，避免先等主来源详情后才请求更快的 JAV321。
+  // JAV321 样品图补抓与主来源详情并行；缺失时同一流程继续回退 JavDB。
   if (detailExtraSources(m0).length) ensureExtraDetails(idx);
 
   // ② 详情未加载的慢源（JavDB/FC2 走 FlareSolverr）：后台补抓完整详情，
@@ -2312,7 +2295,7 @@ async function openDetail(idx) {
     refreshDetailContent(idx);
   }
 
-  // ③ JAV321 已在弹窗打开时按需补抓样品图。
+  // ③ 样品图已按 JAV321 → JavDB 顺序在弹窗打开时按需补抓。
 }
 
 function closeDetail() {
@@ -2393,7 +2376,6 @@ async function openSettings() {
     document.getElementById('srcFc2').checked    = (cfg.sources || []).includes('fc2');
     document.getElementById('srcJav321').checked = (cfg.sources || []).includes('jav321');
     document.getElementById('srcDmm').checked    = (cfg.sources || []).includes('dmm');
-    document.getElementById('cfgArtworkFallbackLimit').value = cfg.scrape_artwork_fallback_limit ?? 2;
     document.getElementById('cfgDmmApiId').value = cfg.dmm_api_id || '';
     document.getElementById('cfgDmmAffiliateId').value = cfg.dmm_affiliate_id || '';
     document.getElementById('cfgJavdbFlare').value  = cfg.javdb_flaresolverr_url || '';
@@ -2443,24 +2425,21 @@ async function openSettings() {
     document.getElementById('cfgTrPass').value     = cfg.tr_password || '';
     document.getElementById('cfgTrSavePath').value = cfg.tr_save_path || '';
     document.getElementById('cfgTrCategory').value = cfg.tr_category || '';
-    // V1.5 M-Team PT
     // 系统日志详略
     document.getElementById('cfgLogVerbose').checked = cfg.log_verbose !== false;
-    // 注：M-Team 连接与发种流水线设置已迁移到独立的「发种中心」页面 /publish
     // V1.4 刮削
     document.getElementById('cfgScrapeWatch').value       = cfg.scrape_watch_dir || '';
     document.getElementById('cfgScrapeOutput').value      = cfg.scrape_output_dir || '';
     document.getElementById('cfgScrapeInterval').value    = cfg.scrape_interval || 300;
-    document.getElementById('cfgScrapeSettle').value      = cfg.scrape_settle_seconds ?? 60;
+    document.getElementById('cfgScrapeSettle').value      = Math.max(300, cfg.scrape_settle_seconds ?? 300);
     document.getElementById('cfgScrapeMinSize').value     = cfg.scrape_min_size_mb ?? 100;
     document.getElementById('cfgScrapeKeepSize').value    = cfg.scrape_keep_size_mb ?? 300;
     document.getElementById('cfgScrapeTranslate').checked = cfg.scrape_translate_enabled !== false;
     document.getElementById('cfgScrapeMoveOnFail').checked = cfg.scrape_move_on_fail !== false;
     document.getElementById('cfgArchiveMode').value = ['hardlink','copy','move'].includes(cfg.archive_mode) ? cfg.archive_mode : 'hardlink';
     document.getElementById('cfgArchiveByMonth').checked = cfg.archive_by_month !== false;
-    // 刮削/归档总开关（兼容旧 publish_* 键）
-    document.getElementById('cfgScrapeMetaEnabled').checked = (cfg.scrape_meta_enabled ?? cfg.publish_scrape_enabled) !== false;
-    document.getElementById('cfgScrapeOrganizeEnabled').checked = (cfg.scrape_organize_enabled ?? cfg.scrape_meta_enabled ?? cfg.publish_scrape_enabled) !== false;
+    document.getElementById('cfgScrapeMetaEnabled').checked = cfg.scrape_meta_enabled !== false;
+    document.getElementById('cfgScrapeOrganizeEnabled').checked = cfg.scrape_organize_enabled !== false;
     document.getElementById('cfgVideoRenameEnabled').checked = cfg.scrape_video_rename_enabled !== false;
     document.getElementById('cfgJacketArtworkEnabled').checked = cfg.scrape_jacket_artwork_enabled !== false;
     document.getElementById('cfgScrapeDeleteExtras').checked = cfg.scrape_delete_extras !== false;
@@ -2483,7 +2462,7 @@ async function openSettings() {
     document.getElementById('cfgEmbyApiKey').value = cfg.emby_api_key || '';
     document.getElementById('cfgEmbyMediaRoot').value = cfg.emby_media_root || '';
     document.getElementById('cfgEmbyActorSync').checked = cfg.emby_actor_sync_enabled === true;
-    document.getElementById('cfgArchiveEnabled').checked = (cfg.archive_enabled ?? cfg.publish_archive_enabled) !== false;
+    document.getElementById('cfgArchiveEnabled').checked = cfg.archive_enabled !== false;
     currentProvider = cfg.default_translate_provider || 'baidu';
     // 检测 Jackett 状态
     if (cfg.jackett_url && cfg.jackett_api_key) await checkJackettStatus();
@@ -2855,7 +2834,6 @@ async function saveSettings() {
   const payload = {
     proxy: document.getElementById('cfgProxy').value.trim(),
     sources,
-    scrape_artwork_fallback_limit: Math.max(0, Math.min(parseInt(document.getElementById('cfgArtworkFallbackLimit').value) || 0, 6)),
     dmm_api_id: document.getElementById('cfgDmmApiId').value.trim(),
     dmm_affiliate_id: document.getElementById('cfgDmmAffiliateId').value.trim(),
     javdb_flaresolverr_url: document.getElementById('cfgJavdbFlare').value.trim(),
@@ -2904,17 +2882,16 @@ async function saveSettings() {
     tr_save_path: document.getElementById('cfgTrSavePath').value.trim(),
     tr_category: document.getElementById('cfgTrCategory').value.trim(),
     log_verbose: document.getElementById('cfgLogVerbose').checked,
-    // 注：发种相关设置已迁移到「发种中心」页面 /publish
     // 刮削 & 归档（监控由 刮削/归档 任一开启自动运行，无单独监控开关）
     scrape_watch_dir: document.getElementById('cfgScrapeWatch').value.trim(),
     scrape_output_dir: document.getElementById('cfgScrapeOutput').value.trim(),
     scrape_interval: Math.max(30, parseInt(document.getElementById('cfgScrapeInterval').value) || 300),
-    scrape_settle_seconds: Math.max(5, parseInt(document.getElementById('cfgScrapeSettle').value) || 60),
+    scrape_settle_seconds: Math.max(300, parseInt(document.getElementById('cfgScrapeSettle').value) || 300),
     scrape_min_size_mb: Math.max(0, parseInt(document.getElementById('cfgScrapeMinSize').value) || 0),
     scrape_keep_size_mb: Math.max(1, parseInt(document.getElementById('cfgScrapeKeepSize').value) || 300),
     scrape_translate_enabled: document.getElementById('cfgScrapeTranslate').checked,
     scrape_move_on_fail: document.getElementById('cfgScrapeMoveOnFail').checked,
-    // V1.5 统一归档（监控 & 发种共用）
+    // 统一归档设置
     archive_mode: document.getElementById('cfgArchiveMode').value,
     archive_by_month: document.getElementById('cfgArchiveByMonth').checked,
     scrape_meta_enabled: document.getElementById('cfgScrapeMetaEnabled').checked,
@@ -3050,7 +3027,7 @@ function mergeLatestBatch(items) {
   return added;
 }
 
-// V1.5：首页最新结果缓存到 sessionStorage，避免跳到发种页再回来时重新抓取。
+// 首页最新结果缓存到 sessionStorage，避免返回首页时重新抓取。
 // sessionStorage 在同一标签页内（含整页跳转）保留，关闭标签才清，软 TTL 20 分钟。
 const _LATEST_CACHE_KEY = 'jav_latest_cache';
 const _LATEST_CACHE_TTL = 20 * 60 * 1000;
@@ -3226,7 +3203,7 @@ async function init() {
   await checkAuthStatus();   // 未登录会跳转，登录态/免登录则继续
   await loadRuntimeConfig(); // 读取预取开关 / 首页最新来源等运行配置
   checkVersion();            // 后台检测版本更新（不阻塞）
-  // 首页最新：优先用本标签页缓存（从发种页返回时不重抓），无缓存才抓取
+  // 首页最新：优先用本标签页缓存，无缓存才抓取
   if (showLatestCfg) { if (!tryRestoreLatest()) loadLatest(); }
   else document.getElementById('statusText').innerHTML = '输入番号、演员或关键词开始搜索';
 }
