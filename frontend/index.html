@@ -197,8 +197,6 @@
   .jackett-btn.loading { opacity: .6; cursor: wait; }
   .jackett-btn.has-results { border-color: var(--green); color: var(--green); }
 
-  .provider-badge { font-size: 10px; padding: 3px 7px; border-radius: 4px; border: 1px solid var(--border); color: var(--text-dim); cursor: pointer; }
-  .provider-badge.active { border-color: var(--accent); color: var(--accent); }
 
   .ext-link { color: var(--text-dim); text-decoration: none; font-size: 12px; display: flex; align-items: center; gap: 3px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; transition: color .2s, border-color .2s; }
   .ext-link:hover { color: var(--text-main); border-color: var(--text-dim); }
@@ -577,7 +575,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.22</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.23</div>
   <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -803,34 +801,32 @@
       <div class="settings-pane" id="pane-translate">
         <div class="setting-group">
           <h3>默认翻译服务</h3>
-          <select class="setting-input" id="cfgDefaultProvider">
-            <option value="baidu">百度翻译</option>
-            <option value="aliyun">阿里云翻译</option>
-          </select>
+          <div class="setting-row">
+            <label class="setting-label">当前渠道</label>
+            <select class="setting-input" id="cfgDefaultProvider" onchange="changeTranslateProvider()">
+              <optgroup label="传统翻译 API">
+                <option value="baidu">百度翻译</option><option value="aliyun">阿里云翻译</option>
+                <option value="deepl">DeepL</option><option value="youdao">有道翻译</option>
+                <option value="microsoft">必应 / Microsoft Translator</option><option value="google">Google Cloud Translation</option>
+              </optgroup>
+              <optgroup label="大模型与中转站">
+                <option value="deepseek">DeepSeek</option><option value="openai">ChatGPT / OpenAI</option>
+                <option value="claude">Claude</option><option value="grok">Grok / xAI</option>
+                <option value="gemini">Gemini</option><option value="openrouter">OpenRouter</option>
+                <option value="siliconflow">硅基流动</option><option value="custom_openai">自定义 OpenAI 兼容中转站</option>
+              </optgroup>
+            </select>
+            <span class="setting-hint">首页和详情页的“翻译”按钮、刮削标题翻译都会调用这里保存的默认渠道。</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label">请求超时（秒）</label>
+            <input class="setting-input" id="cfgTranslateTimeout" type="number" value="30" min="5" max="120">
+          </div>
         </div>
         <div class="setting-group">
-          <h3>百度翻译 API</h3>
-          <div class="setting-row">
-            <label class="setting-label">APP ID</label>
-            <input class="setting-input" id="cfgBaiduId" type="text" placeholder="百度翻译开放平台 APP ID">
-          </div>
-          <div class="setting-row">
-            <label class="setting-label">Secret Key</label>
-            <input class="setting-input" id="cfgBaiduKey" type="password" placeholder="Secret Key">
-            <span class="setting-hint">免费版每月 500 万字符，<a href="https://fanyi-api.baidu.com/" target="_blank" style="color:var(--accent)">申请地址</a></span>
-          </div>
-        </div>
-        <div class="setting-group">
-          <h3>阿里云翻译 API</h3>
-          <div class="setting-row">
-            <label class="setting-label">Access Key ID</label>
-            <input class="setting-input" id="cfgAliyunId" type="text" placeholder="阿里云 AccessKeyId">
-          </div>
-          <div class="setting-row">
-            <label class="setting-label">Access Key Secret</label>
-            <input class="setting-input" id="cfgAliyunKey" type="password" placeholder="AccessKeySecret">
-            <span class="setting-hint">需开通机器翻译通用版，<a href="https://mt.console.aliyun.com/" target="_blank" style="color:var(--accent)">控制台</a></span>
-          </div>
+          <h3 id="translateProviderTitle">渠道 API 配置</h3>
+          <div id="translateProviderFields"></div>
+          <span class="setting-hint">只展示当前渠道，切换渠道时已填写内容会保留。API 地址与模型可覆盖，便于兼容代理网关和自建中转站。</span>
         </div>
       </div>
 
@@ -1184,9 +1180,52 @@
 
 <script>
 const API = '';
-let currentProvider = 'baidu';
 let translatingCards = new Set();
-const cardProviders = {};
+let translateProviderConfigs = {};
+let renderedTranslateProvider = 'baidu';
+const TRANSLATE_PROVIDER_SCHEMAS = {
+  baidu: {name:'百度翻译', fields:[['app_id','APP ID'],['secret_key','Secret Key','password']]},
+  aliyun: {name:'阿里云翻译', fields:[['access_key_id','Access Key ID'],['access_key_secret','Access Key Secret','password']]},
+  deepl: {name:'DeepL', fields:[['api_key','API Key','password'],['base_url','API 地址','text','https://api-free.deepl.com']]},
+  youdao: {name:'有道翻译', fields:[['app_key','应用 ID'],['app_secret','应用密钥','password'],['base_url','API 地址','text','https://openapi.youdao.com/v2/api']]},
+  microsoft: {name:'Microsoft Translator', fields:[['subscription_key','订阅密钥','password'],['region','资源区域（可选）'],['base_url','API 地址','text','https://api.cognitive.microsofttranslator.com']]},
+  google: {name:'Google Cloud Translation', fields:[['api_key','API Key','password'],['base_url','API 地址','text','https://translation.googleapis.com']]},
+  openai: {name:'ChatGPT / OpenAI', fields:[['api_key','API Key','password'],['base_url','API 地址','text','https://api.openai.com/v1'],['model','模型','text','gpt-4.1-mini']]},
+  deepseek: {name:'DeepSeek', fields:[['api_key','API Key','password'],['base_url','API 地址','text','https://api.deepseek.com'],['model','模型','text','deepseek-v4-flash']]},
+  claude: {name:'Claude', fields:[['api_key','API Key','password'],['base_url','API 地址','text','https://api.anthropic.com'],['model','模型','text','claude-sonnet-4-5']]},
+  grok: {name:'Grok / xAI', fields:[['api_key','API Key','password'],['base_url','API 地址','text','https://api.x.ai/v1'],['model','模型','text','grok-4.5']]},
+  gemini: {name:'Gemini', fields:[['api_key','API Key','password'],['base_url','API 地址','text','https://generativelanguage.googleapis.com/v1beta'],['model','模型','text','gemini-2.5-flash']]},
+  openrouter: {name:'OpenRouter', fields:[['api_key','API Key','password'],['base_url','API 地址','text','https://openrouter.ai/api/v1'],['model','模型','text','google/gemini-2.5-flash']]},
+  siliconflow: {name:'硅基流动', fields:[['api_key','API Key','password'],['base_url','API 地址','text','https://api.siliconflow.cn/v1'],['model','模型','text','deepseek-ai/DeepSeek-V3.2']]},
+  custom_openai: {name:'自定义 OpenAI 兼容中转站', fields:[['api_key','API Key','password'],['base_url','API 地址'],['model','模型']]},
+};
+
+function stashTranslateProviderFields() {
+  const schema = TRANSLATE_PROVIDER_SCHEMAS[renderedTranslateProvider];
+  if (!schema) return;
+  const values = {...(translateProviderConfigs[renderedTranslateProvider] || {})};
+  schema.fields.forEach(([key]) => {
+    const el = document.getElementById(`cfgTranslate_${key}`);
+    if (el) values[key] = el.value.trim();
+  });
+  translateProviderConfigs[renderedTranslateProvider] = values;
+}
+
+function renderTranslateProviderFields(provider) {
+  renderedTranslateProvider = provider || document.getElementById('cfgDefaultProvider').value;
+  const schema = TRANSLATE_PROVIDER_SCHEMAS[renderedTranslateProvider];
+  const values = translateProviderConfigs[renderedTranslateProvider] || {};
+  document.getElementById('translateProviderTitle').textContent = `${schema.name} API 配置`;
+  document.getElementById('translateProviderFields').innerHTML = schema.fields.map(([key,label,type='text',fallback='']) => `
+    <div class="setting-row"><label class="setting-label">${label}</label>
+      <input class="setting-input" id="cfgTranslate_${key}" type="${type}" value="${escAttr(values[key] ?? fallback)}" placeholder="${escAttr(fallback)}">
+    </div>`).join('');
+}
+
+function changeTranslateProvider() {
+  stashTranslateProviderFields();
+  renderTranslateProviderFields(document.getElementById('cfgDefaultProvider').value);
+}
 // 每张卡片已加载的资源缓存
 const jackettCache = {};
 // 每张卡片当前激活的 filter
@@ -1686,8 +1725,6 @@ function renderCard(m, idx) {
           </svg>
           翻译
         </button>
-        <span class="provider-badge ${currentProvider==='baidu'?'active':''}" id="pbadge-baidu-${idx}" onclick="setCardProvider(${idx}, 'baidu')">百度</span>
-        <span class="provider-badge ${currentProvider==='aliyun'?'active':''}" id="pbadge-aliyun-${idx}" onclick="setCardProvider(${idx}, 'aliyun')">阿里</span>
         ${m.url ? `<a class="ext-link" href="${escAttr(m.url)}" target="_blank">
           <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
             <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
@@ -1956,15 +1993,8 @@ async function copyMagnet(magnet, btnOrId) {
 // ══════════════════════════════════════════
 // TRANSLATE
 // ══════════════════════════════════════════
-function setCardProvider(idx, provider) {
-  cardProviders[idx] = provider;
-  document.getElementById(`pbadge-baidu-${idx}`)?.classList.toggle('active', provider === 'baidu');
-  document.getElementById(`pbadge-aliyun-${idx}`)?.classList.toggle('active', provider === 'aliyun');
-}
-
 async function translateCard(idx, btn) {
   if (translatingCards.has(idx)) return;
-  const provider = cardProviders[idx] || currentProvider;
   const card = document.querySelector(`.card[data-idx="${idx}"]`);
   if (!card) return;
   const titleEl = card.querySelector('.card-title');
@@ -1980,7 +2010,7 @@ async function translateCard(idx, btn) {
   try {
     const resp = await fetch(`${API}/api/translate`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, provider }),
+      body: JSON.stringify({ text }),
     });
     const data = await safeJson(resp);
     if (data.success) {
@@ -2321,7 +2351,6 @@ function lightboxOpen() {
 async function translateDetail(idx) {
   const m = currentResults[idx];
   if (!m) return;
-  const provider = cardProviders[idx] || currentProvider;
   const titleEl = document.getElementById('detail-title');
   const descEl  = document.getElementById('detail-desc');
   const parts = [];
@@ -2334,7 +2363,7 @@ async function translateDetail(idx) {
   try {
     const resp = await fetch(`${API}/api/translate`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, provider }),
+      body: JSON.stringify({ text }),
     });
     const data = await safeJson(resp);
     if (data.success) {
@@ -2396,11 +2425,18 @@ async function openSettings() {
     document.getElementById('cfgLatestJavbus').value = ll.javbus || 100;
     document.getElementById('cfgLatestAvsox').value  = ll.avsox || 40;
     document.getElementById('cfgLatestFc2').value    = ll.fc2 || 60;
-    document.getElementById('cfgBaiduId').value  = cfg.baidu_app_id || '';
-    document.getElementById('cfgBaiduKey').value = cfg.baidu_secret_key || '';
-    document.getElementById('cfgAliyunId').value  = cfg.aliyun_access_key_id || '';
-    document.getElementById('cfgAliyunKey').value = cfg.aliyun_access_key_secret || '';
-    document.getElementById('cfgDefaultProvider').value = cfg.default_translate_provider || 'baidu';
+    translateProviderConfigs = JSON.parse(JSON.stringify(cfg.translate_provider_configs || {}));
+    // 将旧版百度/阿里配置映射到新分组，用户升级后不用重新填写。
+    translateProviderConfigs.baidu = {...(translateProviderConfigs.baidu || {})};
+    translateProviderConfigs.aliyun = {...(translateProviderConfigs.aliyun || {})};
+    if (!translateProviderConfigs.baidu.app_id) translateProviderConfigs.baidu.app_id = cfg.baidu_app_id || '';
+    if (!translateProviderConfigs.baidu.secret_key) translateProviderConfigs.baidu.secret_key = cfg.baidu_secret_key || '';
+    if (!translateProviderConfigs.aliyun.access_key_id) translateProviderConfigs.aliyun.access_key_id = cfg.aliyun_access_key_id || '';
+    if (!translateProviderConfigs.aliyun.access_key_secret) translateProviderConfigs.aliyun.access_key_secret = cfg.aliyun_access_key_secret || '';
+    const savedProvider = TRANSLATE_PROVIDER_SCHEMAS[cfg.default_translate_provider] ? cfg.default_translate_provider : 'baidu';
+    document.getElementById('cfgDefaultProvider').value = savedProvider;
+    document.getElementById('cfgTranslateTimeout').value = cfg.translate_timeout_seconds || 30;
+    renderTranslateProviderFields(savedProvider);
     document.getElementById('cfgJackettEnabled').checked = cfg.jackett_enabled === true;
     document.getElementById('cfgJackettUrl').value      = cfg.jackett_url || '';
     document.getElementById('cfgJackettKey').value      = cfg.jackett_api_key || '';
@@ -2463,7 +2499,6 @@ async function openSettings() {
     document.getElementById('cfgEmbyMediaRoot').value = cfg.emby_media_root || '';
     document.getElementById('cfgEmbyActorSync').checked = cfg.emby_actor_sync_enabled === true;
     document.getElementById('cfgArchiveEnabled').checked = cfg.archive_enabled !== false;
-    currentProvider = cfg.default_translate_provider || 'baidu';
     // 检测 Jackett 状态
     if (cfg.jackett_url && cfg.jackett_api_key) await checkJackettStatus();
     if (cfg.qb_url || cfg.tr_url) checkQbStatus();
@@ -2816,6 +2851,7 @@ async function checkJackettStatus() {
 }
 
 async function saveSettings() {
+  stashTranslateProviderFields();
   const sources = [];
   if (document.getElementById('srcJavbus').checked) sources.push('javbus');
   if (document.getElementById('srcJavdb').checked)  sources.push('javdb');
@@ -2852,11 +2888,9 @@ async function saveSettings() {
     show_latest: document.getElementById('cfgShowLatest').checked,
     latest_sources: sources,
     latest_limits: { javbus: latJb, javdb: 40, avsox: latAv, avmoo: 40, fc2: latFc2 },
-    baidu_app_id: document.getElementById('cfgBaiduId').value.trim(),
-    baidu_secret_key: document.getElementById('cfgBaiduKey').value.trim(),
-    aliyun_access_key_id: document.getElementById('cfgAliyunId').value.trim(),
-    aliyun_access_key_secret: document.getElementById('cfgAliyunKey').value.trim(),
     default_translate_provider: document.getElementById('cfgDefaultProvider').value,
+    translate_provider_configs: translateProviderConfigs,
+    translate_timeout_seconds: Math.max(5, Math.min(120, parseInt(document.getElementById('cfgTranslateTimeout').value, 10) || 30)),
     jackett_enabled: document.getElementById('cfgJackettEnabled').checked,
     jackett_url: document.getElementById('cfgJackettUrl').value.trim(),
     jackett_api_key: document.getElementById('cfgJackettKey').value.trim(),
@@ -2920,7 +2954,6 @@ async function saveSettings() {
     emby_actor_sync_enabled: document.getElementById('cfgEmbyActorSync').checked,
     archive_enabled: document.getElementById('cfgArchiveEnabled').checked,
   };
-  currentProvider = payload.default_translate_provider;
   const msg = document.getElementById('saveMsg');
   msg.style.color = 'var(--text-muted)';
   msg.textContent = '保存中…';
@@ -3162,7 +3195,6 @@ async function loadRuntimeConfig() {
   try {
     const resp = await fetch(`${API}/api/config`, { cache: 'no-store' });
     const cfg = await safeJson(resp);
-    currentProvider = cfg.default_translate_provider || currentProvider;
     showLatestCfg = cfg.show_latest !== false;
     configuredSources = (cfg.sources && cfg.sources.length)
       ? cfg.sources

@@ -44,8 +44,8 @@ _VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
 try:
     _IMAGE_VERSION = _VERSION_FILE.read_text(encoding="utf-8").strip()
 except (OSError, UnicodeError):
-    _IMAGE_VERSION = "1.4.6.22"
-APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.22"
+    _IMAGE_VERSION = "1.4.6.23"
+APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.23"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -216,7 +216,8 @@ class ResolveDetailRequest(BaseModel):
 
 class TranslateRequest(BaseModel):
     text: str
-    provider: str = "baidu"        # baidu | aliyun
+    # 为空时由后端读取 default_translate_provider；前端无需维护渠道状态。
+    provider: Optional[str] = None
     from_lang: str = "auto"
     to_lang: str = "zh"
 
@@ -258,6 +259,8 @@ class ConfigUpdateRequest(BaseModel):
     aliyun_access_key_id: Optional[str] = None
     aliyun_access_key_secret: Optional[str] = None
     default_translate_provider: Optional[str] = None
+    translate_provider_configs: Optional[dict] = None
+    translate_timeout_seconds: Optional[int] = None
     results_per_page: Optional[int] = None
     max_results: Optional[int] = None
     show_latest: Optional[bool] = None
@@ -939,6 +942,19 @@ async def api_get_config():
         if safe_config.get(key):
             v = safe_config[key]
             safe_config[key] = "***" + v[-4:] if len(v) > 4 else "****"
+    # 新翻译配置是嵌套结构，所有常见密钥字段都必须递归脱敏。
+    secret_fields = {"api_key", "secret_key", "app_secret", "access_key_secret", "subscription_key"}
+    def mask_nested(value):
+        if not isinstance(value, dict):
+            return value
+        masked = {}
+        for key, item in value.items():
+            if key in secret_fields and isinstance(item, str) and item:
+                masked[key] = "***" + item[-4:] if len(item) > 4 else "****"
+            else:
+                masked[key] = mask_nested(item)
+        return masked
+    safe_config["translate_provider_configs"] = mask_nested(config.get("translate_provider_configs") or {})
     # 禁止缓存，确保保存后立即读到最新设置
     return JSONResponse(content=safe_config, headers={"Cache-Control": "no-store"})
 
@@ -953,6 +969,23 @@ async def api_set_config(req: ConfigUpdateRequest):
         v = update.get(key, "")
         if v and v.startswith("***"):
             update.pop(key, None)
+
+    # 嵌套密钥若仍是脱敏占位符，则从原配置恢复；非密钥字段正常更新。
+    if isinstance(update.get("translate_provider_configs"), dict):
+        current_nested = config.get("translate_provider_configs") or {}
+        secret_fields = {"api_key", "secret_key", "app_secret", "access_key_secret", "subscription_key"}
+        def restore_masked(incoming, current):
+            result = {}
+            for nested_key, value in incoming.items():
+                old_value = current.get(nested_key) if isinstance(current, dict) else None
+                if isinstance(value, dict):
+                    result[nested_key] = restore_masked(value, old_value if isinstance(old_value, dict) else {})
+                elif nested_key in secret_fields and isinstance(value, str) and value.startswith("***"):
+                    result[nested_key] = old_value or ""
+                else:
+                    result[nested_key] = value
+            return result
+        update["translate_provider_configs"] = restore_masked(update["translate_provider_configs"], current_nested)
 
     config.update(update)
     ok = save_config(config)

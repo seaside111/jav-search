@@ -41,6 +41,10 @@ DEFAULT_CONFIG = {
     "aliyun_access_key_id": "",          # 阿里云 AccessKeyId
     "aliyun_access_key_secret": "",      # 阿里云 AccessKeySecret
     "default_translate_provider": "baidu",  # 默认翻译服务
+    # 多渠道翻译配置。按渠道分组保存，只在设置页展示当前选中渠道，避免页面过长。
+    # 百度/阿里旧顶层键仍保留兼容，设置页保存后也会写入此结构。
+    "translate_provider_configs": {},
+    "translate_timeout_seconds": 30,
     "results_per_page": 12,
     "max_results": 300,                  # 每个数据源最多抓取的列表条目数（V1.3 上限 500）
     # V1.3：首页最新片源
