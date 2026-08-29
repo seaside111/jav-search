@@ -16,8 +16,6 @@ jobs:
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
 
@@ -56,7 +54,10 @@ jobs:
 
       - name: Test, freeze and build installer
         shell: powershell
-        run: .\windows\build.ps1 -Installer
+        run: |
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
+          .\windows\build.ps1 -Installer
 
       - name: Frozen application smoke test
         shell: powershell
