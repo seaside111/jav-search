@@ -928,6 +928,11 @@
               <input type="checkbox" id="cfgQbPaused"> 推送后暂停（先不开始下载）
             </label>
           </div>
+          <div class="setting-row windows-only" style="display:none">
+            <label class="setting-label">本机程序路径</label>
+            <input class="setting-input" id="cfgQbExePath" type="text" placeholder="留空自动检测 qbittorrent.exe">
+            <span class="setting-hint">Windows 桌面版“本机打开”使用；支持手动填写免安装版路径。</span>
+          </div>
           <div class="setting-row">
             <label class="source-chk"><input type="checkbox" id="cfgTrackersAuto" checked> 自动更新公共 Tracker</label>
             <span class="setting-hint">约 7 天刷新一次在线 best 列表；失败继续使用旧缓存或内置兜底。</span>
@@ -963,6 +968,11 @@
             <label class="setting-label">任务标签</label>
             <input class="setting-input" id="cfgTrCategory" type="text" placeholder="jav">
             <span class="setting-hint">Transmission 用 labels 作分类标签</span>
+          </div>
+          <div class="setting-row windows-only" style="display:none">
+            <label class="setting-label">本机程序路径</label>
+            <input class="setting-input" id="cfgTrExePath" type="text" placeholder="留空自动检测 transmission-qt.exe">
+            <span class="setting-hint">Windows 桌面版“本机打开”使用；支持手动填写免安装版路径。</span>
           </div>
         </div>
       </div>
@@ -1180,6 +1190,8 @@
 
 <script>
 const API = '';
+let platformInfo = {windows_desktop:false, local_downloaders:{}};
+let activeDownloaderType = 'qb';
 let translatingCards = new Set();
 let translateProviderConfigs = {};
 let renderedTranslateProvider = 'baidu';
@@ -1902,6 +1914,9 @@ function renderResourceItem(r, i, idx) {
         推送下载
        </button>`
     : '';
+  const localBtn = hasMagnet && platformInfo.windows_desktop
+    ? `<button class="btn-torrent" onclick="openLocalDownloader('${escAttr(r.magnet)}', this)" title="启动 Windows 本机下载器">本机打开</button>`
+    : '';
 
   return `
     <div class="resource-item">
@@ -1911,6 +1926,7 @@ function renderResourceItem(r, i, idx) {
       </div>
       <div class="res-actions">
         ${qbBtn}
+        ${localBtn}
         ${thunderBtn}
         ${magnetBtn}
         ${torrentBtn}
@@ -2067,6 +2083,26 @@ async function ensureItemDetail(idx) {
   return false;
 }
 
+async function openLocalDownloader(downloadUrl, btn) {
+  const original = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '启动中'; }
+  const preferred = activeDownloaderType === 'transmission' ? 'transmission' : 'qb';
+  const installed = platformInfo.local_downloaders?.[preferred]?.installed;
+  try {
+    const resp = await fetch(`${API}/api/local-download/open`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({download_url: downloadUrl, client: installed ? preferred : 'system'}),
+    });
+    const data = await safeJson(resp);
+    if (!resp.ok || !data.success) throw new Error(data.detail || data.error || '启动失败');
+    showToast(data.message || '已启动本机下载器');
+  } catch (e) {
+    showToast('本机下载器启动失败：' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = original; }
+  }
+}
+
 // 当前打开的详情卡索引（用于异步补抓回来时确认弹窗未被切走）
 let currentDetailIdx = -1;
 
@@ -2124,6 +2160,9 @@ function renderDetailExtra(m, idx) {
     const qbBtn = `<button class="btn-qb" id="jdmag-qb-${di}-${j}" onclick="pushToQb('${escAttr(g.link)}', this, ${di})" title="推送到 qBittorrent 下载器">
         <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M5 21h14"/></svg>
         推送下载</button>`;
+    const localBtn = platformInfo.windows_desktop
+      ? `<button class="btn-torrent" onclick="openLocalDownloader('${escAttr(g.link)}', this)" title="启动 Windows 本机下载器">本机打开</button>`
+      : '';
     const thunderBtn = thunderUrl
       ? `<a class="btn-thunder" href="${escAttr(thunderUrl)}" title="用迅雷下载">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2L4.5 13.5H11L10 22L19.5 10.5H13L13 2Z"/></svg>
@@ -2136,7 +2175,7 @@ function renderDetailExtra(m, idx) {
       <a class="mag-link" href="${escAttr(g.link)}" title="点击用本地下载器打开磁力链">🧲 ${escHtml(g.name || g.link.slice(0, 50))}</a>
       <span class="mag-meta">${escHtml(g.size || '')} ${escHtml(g.date || '')}</span>
       ${badges.join('')}
-      <div class="mag-actions">${qbBtn}${thunderBtn}${copyBtn}</div>
+      <div class="mag-actions">${qbBtn}${localBtn}${thunderBtn}${copyBtn}</div>
     </div>`;
   }).join('');
   let html = '';
@@ -2444,6 +2483,7 @@ async function openSettings() {
     document.getElementById('cfgJackettTimeout').value  = cfg.jackett_timeout || 20;
     // V1.5 下载器类型
     document.getElementById('cfgDownloaderType').value = cfg.downloader_type || 'qb';
+    activeDownloaderType = cfg.downloader_type || 'qb';
     document.getElementById('cfgMagnetUpLimit').value = cfg.magnet_upload_limit_kbps || 0;
     document.getElementById('cfgMagnetDeleteCompleted').checked = !!cfg.magnet_delete_completed;
     // V1.4 qBittorrent
@@ -2453,6 +2493,7 @@ async function openSettings() {
     document.getElementById('cfgQbSavePath').value = cfg.qb_save_path || '';
     document.getElementById('cfgQbCategory').value = cfg.qb_category || '';
     document.getElementById('cfgQbPaused').checked = !!cfg.qb_paused;
+    document.getElementById('cfgQbExePath').value = cfg.qb_exe_path || '';
     document.getElementById('cfgTrackersAuto').checked = cfg.public_trackers_auto_update !== false;
     document.getElementById('cfgTrackers').value = cfg.public_trackers || '';
     // V1.5 Transmission
@@ -2461,6 +2502,7 @@ async function openSettings() {
     document.getElementById('cfgTrPass').value     = cfg.tr_password || '';
     document.getElementById('cfgTrSavePath').value = cfg.tr_save_path || '';
     document.getElementById('cfgTrCategory').value = cfg.tr_category || '';
+    document.getElementById('cfgTrExePath').value = cfg.tr_exe_path || '';
     // 系统日志详略
     document.getElementById('cfgLogVerbose').checked = cfg.log_verbose !== false;
     // V1.4 刮削
@@ -2909,12 +2951,14 @@ async function saveSettings() {
     qb_save_path: document.getElementById('cfgQbSavePath').value.trim(),
     qb_category: document.getElementById('cfgQbCategory').value.trim(),
     qb_paused: document.getElementById('cfgQbPaused').checked,
+    qb_exe_path: document.getElementById('cfgQbExePath').value.trim(),
     // V1.5 Transmission
     tr_url: document.getElementById('cfgTrUrl').value.trim(),
     tr_username: document.getElementById('cfgTrUser').value.trim(),
     tr_password: document.getElementById('cfgTrPass').value,
     tr_save_path: document.getElementById('cfgTrSavePath').value.trim(),
     tr_category: document.getElementById('cfgTrCategory').value.trim(),
+    tr_exe_path: document.getElementById('cfgTrExePath').value.trim(),
     log_verbose: document.getElementById('cfgLogVerbose').checked,
     // 刮削 & 归档（监控由 刮削/归档 任一开启自动运行，无单独监控开关）
     scrape_watch_dir: document.getElementById('cfgScrapeWatch').value.trim(),

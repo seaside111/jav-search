@@ -39,8 +39,10 @@ import library
 import actor_scraper
 import auth
 import logging
+from platform_paths import app_data_dir, resource_path
+import windows_integration
 
-_VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
+_VERSION_FILE = resource_path("VERSION")
 try:
     _IMAGE_VERSION = _VERSION_FILE.read_text(encoding="utf-8").strip()
 except (OSError, UnicodeError):
@@ -289,6 +291,8 @@ class ConfigUpdateRequest(BaseModel):
     tr_password: Optional[str] = None
     tr_save_path: Optional[str] = None
     tr_category: Optional[str] = None
+    qb_exe_path: Optional[str] = None
+    tr_exe_path: Optional[str] = None
     # V1.5 日志详略
     log_verbose: Optional[bool] = None
     # V1.4 刮削
@@ -342,6 +346,24 @@ class ConfigUpdateRequest(BaseModel):
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "version": APP_VERSION}
+
+
+class LocalOpenRequest(BaseModel):
+    download_url: str
+    client: str = "system"
+
+
+@app.get("/api/platform")
+async def api_platform():
+    return windows_integration.capabilities(load_config())
+
+
+@app.post("/api/local-download/open")
+async def api_local_download_open(req: LocalOpenRequest):
+    result = windows_integration.open_download(req.download_url, req.client, load_config())
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "启动失败"))
+    return result
 
 
 # ──────────────────────────────────────────────
@@ -423,7 +445,7 @@ _IMG_CACHE_MAX = 800
 _img_disk_tasks: set = set()   # 持有后台落盘任务引用，防止被 GC 提前回收
 
 # 磁盘缓存目录：默认放进已持久化的 CONFIG_DIR 下，现有用户无需改 compose 即生效。
-_IMG_DISK_DIR = Path(os.getenv("CONFIG_DIR", "/config")) / "imgcache"
+_IMG_DISK_DIR = app_data_dir() / "imgcache"
 # 磁盘缓存总量上限（MB）：超出按最旧访问时间(LRU)淘汰。可用环境变量覆盖，默认 500MB。
 try:
     _IMG_DISK_CACHE_MB = max(0, int(os.getenv("IMG_DISK_CACHE_MB", "500")))
@@ -1094,7 +1116,7 @@ async def api_downloader_status():
 # 前端静态文件服务
 # ──────────────────────────────────────────────
 
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+FRONTEND_DIR = resource_path("frontend")
 
 if FRONTEND_DIR.exists():
     @app.get("/", response_class=HTMLResponse)

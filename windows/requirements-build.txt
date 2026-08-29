@@ -1,0 +1,4 @@
+-r ../backend/requirements.txt
+pyinstaller>=6.10,<7
+pywebview>=5.3,<7
+

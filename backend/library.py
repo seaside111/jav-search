@@ -22,6 +22,7 @@ import re
 import shutil
 import stat
 import subprocess
+from platform_paths import app_data_dir, bundled_tool
 import sys
 import time
 import uuid
@@ -134,15 +135,15 @@ _processed: set[str] = set()
 # 仅靠内存 _processed 在容器重启后会清空，导致监控把早已归档的文件当新文件反复处理
 # （还会因归档路径用「当前年月」而落进新月份目录重复堆叠）。
 # 这里把「已归档」签名落盘到 CONFIG_DIR，键 = 解析后路径|文件大小，重启后仍能跳过。
-_PROCESSED_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "scrape_processed.json"
+_PROCESSED_FILE = app_data_dir() / "scrape_processed.json"
 _processed_sig: dict[str, float] = {}     # signature -> 处理时间戳
 _processed_loaded = False
 _PROCESSED_MAX = 20000                     # 上限：超出按时间裁掉最旧（极少触发；裁掉的最旧文件若仍在会被再处理一次）
 
 # 已归档但缺 poster/fanart 的低频补全队列。任务记录最终归档目录，后续只补图片，
 # 不重复翻译、写 NFO、归档视频或触发演员同步。
-_ARTWORK_PENDING_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "scrape_artwork_pending.json"
-_ARTWORK_TERMINAL_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "scrape_artwork_terminal.json"
+_ARTWORK_PENDING_FILE = app_data_dir() / "scrape_artwork_pending.json"
+_ARTWORK_TERMINAL_FILE = app_data_dir() / "scrape_artwork_terminal.json"
 _artwork_pending: dict[str, dict] = {}
 _artwork_pending_loaded = False
 _artwork_terminal: dict[str, list[str]] = {}
@@ -209,7 +210,7 @@ _monitor_state: dict = {
 }
 
 # 按番号聚合的任务摘要：失败记录保留更久，重试同一番号时更新原记录。
-_TASKS_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "scrape_tasks.json"
+_TASKS_FILE = app_data_dir() / "scrape_tasks.json"
 _tasks: dict[str, dict] = {}
 _tasks_loaded = False
 _TASK_SUCCESS_MAX = 300
@@ -575,7 +576,8 @@ def _probe_video(video_path: Path) -> dict:
     cached = _VIDEO_PROBE_CACHE.get(key)
     if cached is not None:
         return cached
-    probe = shutil.which("ffprobe")
+    bundled = bundled_tool("ffprobe.exe" if sys.platform == "win32" else "ffprobe")
+    probe = str(bundled) if bundled else shutil.which("ffprobe")
     if not probe:
         _VIDEO_PROBE_CACHE[key] = {}
         return {}

@@ -16,6 +16,7 @@ import os
 import re
 import time
 from pathlib import Path
+from platform_paths import app_data_dir
 import httpx
 
 
@@ -47,7 +48,7 @@ _trackers_state = {"ts": 0.0, "list": list(_FALLBACK_TRACKERS), "source": "fallb
 
 
 def _trackers_file() -> Path:
-    return Path(os.getenv("CONFIG_DIR", "/config")) / "trackers_cache.json"
+    return app_data_dir() / "trackers_cache.json"
 
 
 def _parse_trackers(value: str) -> list:

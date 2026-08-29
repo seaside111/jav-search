@@ -4,8 +4,9 @@
 import json
 import os
 from pathlib import Path
+from platform_paths import app_data_dir
 
-CONFIG_PATH = Path(os.getenv("CONFIG_DIR", "/config")) / "settings.json"
+CONFIG_PATH = app_data_dir() / "settings.json"
 
 DEFAULT_CONFIG = {
     "proxy": "",                         # HTTP代理，如 http://192.168.1.1:7890
@@ -86,6 +87,9 @@ DEFAULT_CONFIG = {
     "tr_password": "",                   # RPC 密码（可空）
     "tr_save_path": "",                  # 推送任务保存目录（TR 主机视角），留空用 TR 默认
     "tr_category": "jav",                # 任务标签（labels），便于筛选；留空不打标签
+    # Windows 桌面版本机下载器路径；留空时自动检测安装目录和 PATH。
+    "qb_exe_path": "",
+    "tr_exe_path": "",
     # V1.5：日志详略。True=详细(每步+每次API,beta排查用)；定型后设 False 只看主要动作
     "log_verbose": True,
     # V1.4：媒体库刮削（监控下载目录 → 刮削 → 移动归档）

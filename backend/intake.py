@@ -20,9 +20,10 @@ import os
 import time
 import asyncio
 from pathlib import Path
+from platform_paths import app_data_dir
 from typing import Optional
 
-_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "pushed_intake.json"
+_FILE = app_data_dir() / "pushed_intake.json"
 
 # 随影片一起记下、供刮削写 NFO/封面用的字段（与 scrapers 列表/详情字段对齐）。
 # detail_loaded 表示推送时详情是否已加载完整——刮削时据此决定要不要回原源补抓缺失字段。

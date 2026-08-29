@@ -14,9 +14,10 @@ import json
 import time
 import hashlib
 from pathlib import Path
+from platform_paths import app_data_dir
 from typing import Optional
 
-_DIR = Path(os.getenv("CONFIG_DIR", "/config")) / "detailcache"
+_DIR = app_data_dir() / "detailcache"
 _TTL = float(os.getenv("DETAIL_CACHE_TTL_DAYS", "7")) * 86400
 _mem: dict[str, tuple[float, dict]] = {}
 _MEM_MAX = 600
