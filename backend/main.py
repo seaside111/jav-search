@@ -41,6 +41,8 @@ import auth
 import logging
 from platform_paths import app_data_dir, resource_path
 import windows_integration
+import windows_updater
+import desktop_runtime
 
 _VERSION_FILE = resource_path("VERSION")
 try:
@@ -371,6 +373,7 @@ async def api_local_download_open(req: LocalOpenRequest):
 # ──────────────────────────────────────────────
 # 内存缓存：避免频繁打 GitHub API（其匿名限流 60 次/小时）
 _version_cache: dict = {"ts": 0.0, "data": None}
+_version_release: dict = {}
 _VERSION_TTL = 3600  # 缓存 1 小时
 
 
@@ -423,6 +426,10 @@ async def api_version(force: bool = Query(False, description="是否强制刷新
             if data.get("html_url"):
                 result["release_url"] = data["html_url"]
             result["update_available"] = bool(latest) and _cmp_version(latest, APP_VERSION) > 0
+            selected = windows_updater.select_windows_assets(data)
+            result["windows_installer_available"] = selected["available"]
+            _version_release.clear()
+            _version_release.update(data)
         else:
             result["error"] = f"GitHub HTTP {resp.status_code}"
     except Exception as e:
@@ -432,6 +439,25 @@ async def api_version(force: bool = Query(False, description="是否强制刷新
     if result["latest"]:
         _version_cache.update({"ts": now, "data": result})
     return result
+
+
+@app.post("/api/update/install")
+async def api_update_install():
+    if sys.platform != "win32":
+        raise HTTPException(status_code=400, detail="自动安装仅支持 Windows 桌面版")
+    version = await api_version(force=True)
+    if not version.get("update_available"):
+        raise HTTPException(status_code=400, detail="当前已经是最新版本")
+    release = dict(_version_release)
+    try:
+        prepared = await windows_updater.prepare_update(
+            release, (load_config().get("proxy") or None))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"更新准备失败：{exc}") from exc
+    if not desktop_runtime.request_update(Path(prepared["path"])):
+        raise HTTPException(status_code=400, detail="当前不是可自动退出安装的 Windows 桌面运行模式")
+    return {"success": True, "message": "安装包已验证，程序即将退出并开始升级",
+            "sha256": prepared["sha256"]}
 
 
 import asyncio as _asyncio

@@ -6,6 +6,7 @@ import ctypes
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -19,6 +20,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from platform_paths import app_data_dir, resource_path  # noqa: E402
+import desktop_runtime  # noqa: E402
 
 
 MUTEX_NAME = "Local\\JAVSearchDesktop"
@@ -131,7 +133,7 @@ def _cleanup_webview_processes(storage_path: Path) -> None:
         print(f"[退出] WebView2 子进程清理跳过：{exc}", flush=True)
 
 
-def _run_webview(url: str, server, thread: threading.Thread) -> None:
+def _run_webview(url: str, server, thread: threading.Thread) -> Path | None:
     import webview
     import pystray
     from PIL import Image
@@ -140,6 +142,7 @@ def _run_webview(url: str, server, thread: threading.Thread) -> None:
     window = webview.create_window("JAV Search", url, width=1280, height=820,
                                    min_size=(960, 640), confirm_close=False)
     exiting = threading.Event()
+    pending_installer: list[Path] = []
 
     def tray_image():
         return Image.open(resource_path("windows/app-icon.png")).convert("RGBA")
@@ -154,6 +157,12 @@ def _run_webview(url: str, server, thread: threading.Thread) -> None:
     def exit_app(icon, _item=None):
         exiting.set()
         icon.stop()
+        window.destroy()
+
+    def install_update(path: Path):
+        pending_installer.append(path)
+        exiting.set()
+        tray.stop()
         window.destroy()
 
     def minimize_to_tray():
@@ -173,15 +182,18 @@ def _run_webview(url: str, server, thread: threading.Thread) -> None:
         ),
     )
     window.events.closing += minimize_to_tray
+    desktop_runtime.set_update_handler(install_update)
     tray.run_detached()
     try:
         webview.start(gui="edgechromium", private_mode=False,
                       storage_path=str(storage))
     finally:
+        desktop_runtime.set_update_handler(None)
         tray.stop()
         _cleanup_webview_processes(storage)
         server.should_exit = True
         thread.join(timeout=8)
+    return pending_installer[-1] if pending_installer else None
 
 
 def main() -> int:
@@ -201,6 +213,7 @@ def main() -> int:
     server, thread = _start_server(port)
     url = f"http://127.0.0.1:{port}"
     _wait_ready(url)
+    installer_to_launch: Path | None = None
     try:
         if args.smoke_test:
             server.should_exit = True
@@ -210,12 +223,15 @@ def main() -> int:
             _run_browser(url, server, thread)
         else:
             try:
-                _run_webview(url, server, thread)
+                installer_to_launch = _run_webview(url, server, thread)
             except ImportError:
                 _run_browser(url, server, thread)
     finally:
         if mutex and sys.platform == "win32":
             ctypes.windll.kernel32.CloseHandle(mutex)
+    if installer_to_launch:
+        subprocess.Popen([str(installer_to_launch), "/SILENT", "/NORESTART",
+                          "/CLOSEAPPLICATIONS"], close_fds=True)
     return 0
 
 

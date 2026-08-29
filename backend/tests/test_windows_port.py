@@ -1,3 +1,4 @@
+import hashlib
 import os
 from pathlib import Path
 import sys
@@ -12,6 +13,7 @@ if str(BACKEND) not in sys.path:
 
 import platform_paths
 import windows_integration
+import windows_updater
 
 
 class WindowsPathTests(unittest.TestCase):
@@ -64,6 +66,40 @@ class WindowsDownloaderTests(unittest.TestCase):
         with patch.object(windows_integration, "bundled_tool", return_value=None), \
                 patch.object(windows_integration.shutil, "which", return_value=None):
             self.assertEqual(windows_integration.ffprobe_status()["available"], False)
+
+
+class WindowsUpdaterTests(unittest.TestCase):
+    def test_selects_matching_installer_and_checksum(self):
+        release = {"assets": [
+            {"name": "JAV-Search-v2.0-Windows-x64-Setup.exe",
+             "browser_download_url": "https://github.com/a/b.exe"},
+            {"name": "JAV-Search-v2.0-Windows-x64-Setup.exe.sha256",
+             "browser_download_url": "https://github.com/a/b.sha256"},
+        ]}
+        selected = windows_updater.select_windows_assets(release)
+        self.assertTrue(selected["available"])
+        self.assertEqual(selected["installer"]["name"], release["assets"][0]["name"])
+
+    def test_checksum_requires_matching_filename(self):
+        digest = "a" * 64
+        self.assertEqual(windows_updater.parse_sha256(
+            f"{digest}  JAV-Search-v2.0-Windows-x64-Setup.exe",
+            "JAV-Search-v2.0-Windows-x64-Setup.exe"), digest)
+        with self.assertRaises(ValueError):
+            windows_updater.parse_sha256(f"{digest}  other.exe", "expected.exe")
+
+    def test_rejects_non_github_download(self):
+        with self.assertRaises(ValueError):
+            windows_updater._safe_download_url("https://example.test/update.exe")
+
+    def test_hashes_installer_without_loading_whole_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            installer = Path(folder) / "setup.exe"
+            installer.write_bytes(b"verified installer")
+            self.assertEqual(
+                windows_updater._sha256_file(installer),
+                hashlib.sha256(b"verified installer").hexdigest(),
+            )
 
 
 if __name__ == "__main__":

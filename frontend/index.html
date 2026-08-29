@@ -3325,13 +3325,31 @@ async function checkVersion() {
       chip.classList.add('has-update', 'clickable');
       chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;
       chip.innerHTML = `v${escHtml(d.current)} <span class="update-dot"></span>`;
-      chip.onclick = () => window.open(d.release_url || `https://github.com/seaside111/jav-search/releases`, '_blank');
+      chip.onclick = () => (platformInfo.windows_desktop && d.windows_installer_available)
+        ? startWindowsUpdate(d) : window.open(d.release_url || `https://github.com/seaside111/jav-search/releases`, '_blank');
     } else {
       chip.title = d.latest
         ? `当前 v${d.current}，已是最新（GitHub: ${d.latest}）`
         : `当前 v${d.current}`;
     }
   } catch (e) { /* 检测失败保留静态版本号 */ }
+}
+
+async function startWindowsUpdate(versionInfo) {
+  if (!confirm(`发现 ${versionInfo.latest}，是否下载、校验并安装更新？\n\n更新开始后 JAV Search 将自动退出。`)) return;
+  const chip = document.getElementById('versionChip');
+  chip.textContent = '正在准备更新…';
+  chip.onclick = null;
+  try {
+    const resp = await fetch(`${API}/api/update/install`, {method:'POST'});
+    const data = await safeJson(resp);
+    if (!resp.ok || !data.success) throw new Error(data.detail || '更新准备失败');
+    showToast(data.message || '即将开始升级');
+  } catch (e) {
+    chip.textContent = 'v' + (versionInfo.current || '');
+    showToast(`更新失败：${e.message}`);
+    setTimeout(checkVersion, 1500);
+  }
 }
 
 async function init() {
