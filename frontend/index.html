@@ -126,6 +126,8 @@
   .src-filter-btn .loading-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: spin 1s linear infinite; opacity: .8; }
 
   .status-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; min-height: 24px; }
+  .status-text { min-width: 0; }
+  .latest-refresh { margin-left: auto; flex: 0 0 auto; }
   .status-text { color: var(--text-muted); font-size: 13px; }
   .status-text strong { color: var(--accent); }
   .spinner { display: none; width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
@@ -614,6 +616,12 @@
   <div class="status-bar">
     <div class="spinner" id="spinner"></div>
     <div class="status-text" id="statusText">输入番号、演员或关键词开始搜索</div>
+    <button class="btn-icon latest-refresh" id="latestRefreshBtn" onclick="refreshLatest()" style="display:none" title="按当前配置重新获取最新资源">
+      <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/>
+      </svg>
+      刷新最新
+    </button>
   </div>
   <div class="source-filter" id="sourceFilter"></div>
   <div id="results">
@@ -1323,6 +1331,7 @@ async function doSearch() {
 
   isHomeLatest = false;
   latestLoadToken++;            // 使仍在途的首页最新批次失效，避免其结果混入搜索
+  document.getElementById('latestRefreshBtn').style.display = 'none';
   activeSourceFilter = null;
   btn.disabled = true;
   spinner.classList.add('active');
@@ -3142,12 +3151,25 @@ function tryRestoreLatest() {
     document.getElementById('spinner').classList.remove('active');
     document.getElementById('statusText').innerHTML =
       `🆕 最新片源（缓存）· 来自 <strong>${escHtml(srcs)}</strong> · ` +
-      `<a href="#" onclick="loadLatest();return false;" style="color:var(--accent)">刷新</a>`;
+      `可点击右侧按钮重新获取`;
+    document.getElementById('latestRefreshBtn').style.display = 'flex';
     // 当前页详情按需补全（缓存里可能未补全）
     ensurePageDetails(currentPage).then(() => upgradePageCards(currentPage));
     ensureMissingJavdbCovers(currentPage);
     return true;
   } catch (e) { return false; }
+}
+
+async function refreshLatest() {
+  const button = document.getElementById('latestRefreshBtn');
+  button.disabled = true;
+  try {
+    sessionStorage.removeItem(_LATEST_CACHE_KEY);
+    await loadRuntimeConfig();
+    await loadLatest();
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // 首页最新片源：各来源并行抓取，谁先回来谁先显示，慢源随后补入（V1.4.3）
@@ -3161,6 +3183,7 @@ async function loadLatest() {
   // 新一轮加载：失效旧批次、重置状态
   const token = ++latestLoadToken;
   isHomeLatest = true;
+  document.getElementById('latestRefreshBtn').style.display = 'flex';
   currentResults = [];
   latestCodeIndex = {};
   _coverPrewarmed.clear();   // 新一批封面，重置预热去重表

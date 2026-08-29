@@ -6,6 +6,8 @@ __pycache__/
 venv/
 build/
 dist/
+build-next/
+dist-next/
 .smoke-data/
 
 # 运行时配置（含密钥/密码，切勿提交）

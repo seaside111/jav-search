@@ -18,7 +18,7 @@ BACKEND = ROOT / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from platform_paths import app_data_dir  # noqa: E402
+from platform_paths import app_data_dir, resource_path  # noqa: E402
 
 
 MUTEX_NAME = "Local\\JAVSearchDesktop"
@@ -94,18 +94,14 @@ def _run_browser(url: str, server, thread: threading.Thread) -> None:
 def _run_webview(url: str, server, thread: threading.Thread) -> None:
     import webview
     import pystray
-    from PIL import Image, ImageDraw
+    from PIL import Image
 
     window = webview.create_window("JAV Search", url, width=1280, height=820,
                                    min_size=(960, 640), confirm_close=False)
     exiting = threading.Event()
 
     def tray_image():
-        image = Image.new("RGB", (64, 64), "#111827")
-        draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((7, 7, 57, 57), radius=12, fill="#2563eb")
-        draw.text((21, 16), "J", fill="white", stroke_width=1)
-        return image
+        return Image.open(resource_path("windows/app-icon.png")).convert("RGBA")
 
     def show_window(_icon=None, _item=None):
         window.show()

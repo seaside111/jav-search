@@ -5,6 +5,7 @@ root = Path(SPECPATH).parent
 datas = [
     (str(root / "frontend"), "frontend"),
     (str(root / "backend" / "assets"), "backend/assets"),
+    (str(root / "windows" / "app-icon.png"), "windows"),
     (str(root / "VERSION"), "."),
 ]
 ffprobe = root / "tools" / "ffprobe.exe"
