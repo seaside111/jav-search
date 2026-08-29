@@ -91,11 +91,52 @@ def _run_browser(url: str, server, thread: threading.Thread) -> None:
         thread.join(timeout=8)
 
 
+def _cleanup_webview_processes(storage_path: Path) -> None:
+    """Stop only WebView2 processes created by this app, never the shared runtime globally."""
+    if sys.platform != "win32":
+        return
+    try:
+        import psutil
+
+        current = psutil.Process()
+        descendants = {}
+        for child in current.children(recursive=True):
+            try:
+                if child.name().lower() == "msedgewebview2.exe":
+                    descendants[child.pid] = child
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+        storage_marker = os.path.normcase(str(storage_path.resolve()))
+        for process in psutil.process_iter(["name", "cmdline"]):
+            try:
+                name = (process.info.get("name") or "").lower()
+                command = " ".join(process.info.get("cmdline") or [])
+                if name == "msedgewebview2.exe" and storage_marker in os.path.normcase(command):
+                    descendants[process.pid] = process
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+        targets = list(descendants.values())
+        for process in targets:
+            try:
+                process.terminate()
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                pass
+        _gone, alive = psutil.wait_procs(targets, timeout=3)
+        for process in alive:
+            try:
+                process.kill()
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                pass
+    except Exception as exc:
+        print(f"[退出] WebView2 子进程清理跳过：{exc}", flush=True)
+
+
 def _run_webview(url: str, server, thread: threading.Thread) -> None:
     import webview
     import pystray
     from PIL import Image
 
+    storage = app_data_dir() / "webview"
     window = webview.create_window("JAV Search", url, width=1280, height=820,
                                    min_size=(960, 640), confirm_close=False)
     exiting = threading.Event()
@@ -135,9 +176,10 @@ def _run_webview(url: str, server, thread: threading.Thread) -> None:
     tray.run_detached()
     try:
         webview.start(gui="edgechromium", private_mode=False,
-                      storage_path=str(app_data_dir() / "webview"))
+                      storage_path=str(storage))
     finally:
         tray.stop()
+        _cleanup_webview_processes(storage)
         server.should_exit = True
         thread.join(timeout=8)
 
