@@ -74,18 +74,18 @@ DEFAULT_CONFIG = {
     # 开：经「推送」加入的磁力链种子下载完成后，自动删除该种子记录（保留已下载文件）。
     #   这里的磁力链只用于下载文件、不做种，故下完即可移除种子，免得一直占着挂在下载器里。
     "magnet_delete_completed": False,
-    # V1.4：qBittorrent 下载器（群晖中部署）
+    # qBittorrent / Transmission 下载器（Windows 本机服务）
     "qb_url": "",                        # qBittorrent WebUI 地址，如 http://192.168.1.100:8080
     "qb_username": "",                   # WebUI 用户名
     "qb_password": "",                   # WebUI 密码
-    "qb_save_path": "",                  # 推送任务的保存目录（qB 主机视角），留空用 qB 默认
+    "qb_save_path": "",                  # Windows 本机保存目录，留空用 qB 默认
     "qb_category": "jav",                # 任务分类，便于刮削监控筛选；留空不分类
     "qb_paused": False,                  # 推送后是否暂停（先不下载）
     # V1.5：Transmission 下载器（与 qB 并列，由 downloader_type 选择）
     "tr_url": "",                        # Transmission RPC 地址，如 http://192.168.1.100:9091
     "tr_username": "",                   # RPC 用户名（可空）
     "tr_password": "",                   # RPC 密码（可空）
-    "tr_save_path": "",                  # 推送任务保存目录（TR 主机视角），留空用 TR 默认
+    "tr_save_path": "",                  # Windows 本机保存目录，留空用 TR 默认
     "tr_category": "jav",                # 任务标签（labels），便于筛选；留空不打标签
     # Windows 桌面版本机下载器路径；留空时自动检测安装目录和 PATH。
     "qb_exe_path": "",
@@ -94,7 +94,7 @@ DEFAULT_CONFIG = {
     "log_verbose": True,
     # V1.4：媒体库刮削（监控下载目录 → 刮削 → 移动归档）
     "scrape_enabled": False,             # 【已废弃为独立开关】监控改由 scrape_meta_enabled/archive_enabled 任一开启自动运行，此键不再起作用
-    "scrape_watch_dir": "",              # 监控目录（下载器保存的目录，容器内视角）
+    "scrape_watch_dir": "",              # Windows 本机下载/工作目录
     "scrape_output_dir": "",             # 刮削后归档目录（按 YYYYMM 建子目录存放）
     "scrape_interval": 300,              # 监控轮询间隔（秒）
     "scrape_settle_seconds": 300,        # 非下载器整目录至少连续静置此秒数；兼容迅雷预分配且无临时后缀
@@ -133,7 +133,7 @@ DEFAULT_CONFIG = {
     "actor_javdb_directory_interval_hours": 12,
     "emby_url": "",
     "emby_api_key": "",
-    "emby_media_root": "",             # Emby 容器内看到的归档根路径；留空表示与本容器一致
+    "emby_media_root": "",             # 本机 Emby 媒体库根路径；留空表示与归档目录一致
     "emby_actor_sync_enabled": False,
     "public_trackers": "",               # 用户自定义；每行或逗号一个，非空时覆盖自动列表
     "public_trackers_auto_update": True,  # 自动抓取在线 best 列表并缓存 7 天

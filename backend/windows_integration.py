@@ -135,6 +135,21 @@ def capabilities(config: dict) -> dict:
     }
 
 
+def normalize_local_file_config(update: dict) -> tuple[dict, list[str]]:
+    """Apply Windows desktop-only file management rules before saving config."""
+    normalized = dict(update)
+    if normalized.get("archive_mode") == "hardlink":
+        normalized["archive_mode"] = "copy"
+    path_keys = (
+        "qb_save_path", "tr_save_path", "scrape_watch_dir", "scrape_output_dir",
+        "scrape_actor_images_dir", "actor_scrape_cache_dir", "emby_media_root",
+    )
+    invalid = [key for key in path_keys
+               if (value := str(normalized.get(key) or "").strip())
+               and not Path(value).is_absolute()]
+    return normalized, invalid
+
+
 def open_download(download_url: str, client: str, config: dict) -> dict:
     if sys.platform != "win32":
         return {"success": False, "error": "本机程序启动仅支持 Windows 桌面版"}

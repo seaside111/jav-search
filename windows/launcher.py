@@ -165,6 +165,12 @@ def _run_webview(url: str, server, thread: threading.Thread) -> Path | None:
         tray.stop()
         window.destroy()
 
+    def select_folder(initial: str) -> str | None:
+        initial_dir = initial if initial and Path(initial).is_dir() else ""
+        selected = window.create_file_dialog(webview.FileDialog.FOLDER,
+                                             directory=initial_dir)
+        return selected[0] if selected else None
+
     def minimize_to_tray():
         if exiting.is_set():
             return True
@@ -183,12 +189,14 @@ def _run_webview(url: str, server, thread: threading.Thread) -> Path | None:
     )
     window.events.closing += minimize_to_tray
     desktop_runtime.set_update_handler(install_update)
+    desktop_runtime.set_folder_handler(select_folder)
     tray.run_detached()
     try:
         webview.start(gui="edgechromium", private_mode=False,
                       storage_path=str(storage))
     finally:
         desktop_runtime.set_update_handler(None)
+        desktop_runtime.set_folder_handler(None)
         tray.stop()
         _cleanup_webview_processes(storage)
         server.should_exit = True

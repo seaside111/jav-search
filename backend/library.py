@@ -2776,6 +2776,11 @@ def _heal_archived_parts(target_dir: Path, safe_code: str) -> None:
             _log(f"分集命名自愈失败 {p.name}: {e}")
 
 
+def _configured_archive_mode(config: dict) -> str:
+    mode = (config.get("archive_mode") or ("copy" if sys.platform == "win32" else "hardlink")).lower()
+    return "copy" if sys.platform == "win32" and mode == "hardlink" else mode
+
+
 def _archive_file(video_path: Path, output_dir: str, code: str,
                   mode: str = "hardlink", rename: bool = True,
                   watch_dir: str = "", folder_name: str = "",
@@ -3305,8 +3310,8 @@ async def _process_completed_file(video_path: Path, config: dict,
             scrape_res.get("folder_title", ""), config)
             if config.get("scrape_folder_naming", "code") == "actor" else "")
         src_parent = video_path.parent
-        # 归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
-        mode = (config.get("archive_mode") or "hardlink").lower()
+        # Windows 桌面版仅使用本地复制/移动；Docker 版仍兼容原有硬链接配置。
+        mode = _configured_archive_mode(config)
         rename_video = organize_on and config.get("scrape_video_rename_enabled", True)
         mv = _archive_file(video_path, output_dir, code, mode=mode, rename=rename_video,
                            watch_dir=str(watch_dir), folder_name=folder_name,
@@ -3357,7 +3362,7 @@ async def _scan_once(config: dict) -> int:
         return 0
     watch_dir = Path(watch)
     if not watch_dir.exists():
-        _log(f"监控目录不存在（检查 Docker 卷映射 / 容器内路径）：{watch}")
+        _log(f"监控目录不存在（请检查 Windows 本地路径或磁盘是否可用）：{watch}")
         _monitor_state["message"] = f"监控目录不存在: {watch}"
         return 0
 
@@ -3843,7 +3848,7 @@ async def api_scrape_single(req: ScrapeRequest):
             if config.get("scrape_folder_naming", "code") == "actor" else "")
         mv = _archive_file(
             video_path, config["scrape_output_dir"], code,
-            mode=(config.get("archive_mode") or "hardlink").lower(),
+            mode=_configured_archive_mode(config),
             rename=(config.get("scrape_organize_enabled", True) and
                     config.get("scrape_video_rename_enabled", True)),
             watch_dir=config.get("scrape_watch_dir", ""),

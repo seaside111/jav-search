@@ -28,6 +28,22 @@ class WindowsPathTests(unittest.TestCase):
             os.environ.pop("CONFIG_DIR", None)
             self.assertEqual(platform_paths.app_data_dir(), Path(tmp) / "JAV Search")
 
+    def test_local_file_config_converts_hardlink_and_accepts_absolute_paths(self):
+        update, invalid = windows_integration.normalize_local_file_config({
+            "archive_mode": "hardlink",
+            "scrape_watch_dir": r"D:\Downloads\JAV",
+            "scrape_output_dir": r"E:\Media\JAV",
+        })
+        self.assertEqual(update["archive_mode"], "copy")
+        self.assertEqual(invalid, [])
+
+    def test_local_file_config_rejects_relative_paths(self):
+        _update, invalid = windows_integration.normalize_local_file_config({
+            "scrape_watch_dir": r"downloads\JAV",
+            "actor_scrape_cache_dir": r"cache\actors",
+        })
+        self.assertEqual(invalid, ["scrape_watch_dir", "actor_scrape_cache_dir"])
+
 
 class WindowsDownloaderTests(unittest.TestCase):
     def test_configured_qbittorrent_is_detected(self):

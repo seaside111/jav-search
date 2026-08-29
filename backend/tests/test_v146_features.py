@@ -801,6 +801,22 @@ class VideoClassificationTests(unittest.TestCase):
             "/data/av/jp/202608/SAN-475/SAN-475.nfo",
         ])
 
+    def test_emby_windows_root_preserves_windows_path_style(self):
+        with tempfile.TemporaryDirectory() as raw:
+            archive = Path(raw) / "archive"
+            folder = archive / "202608" / "SAN-475"
+            folder.mkdir(parents=True)
+            (folder / "SAN-475.mp4").write_bytes(b"video")
+            paths, error = actor_scraper._emby_media_paths(folder, {
+                "scrape_output_dir": str(archive),
+                "emby_media_root": r"E:\Media\JAV",
+            })
+        self.assertEqual(error, "")
+        self.assertEqual(paths, [
+            r"E:\Media\JAV\202608\SAN-475",
+            r"E:\Media\JAV\202608\SAN-475\SAN-475.mp4",
+        ])
+
     def test_library_syncs_emby_only_after_archive_finishes(self):
         original_scrape = library._scrape_one
         original_archive = library._archive_file

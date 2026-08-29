@@ -22,10 +22,12 @@ machine before publishing the first stable Windows release:
 3. Refresh Home latest and confirm the current saved source configuration is used.
 4. Open a magnet with system default, qBittorrent and Transmission when installed.
 5. Scan a video in a Chinese and long path; confirm duration/geometry from bundled ffprobe.
-6. Close to tray, restore, then Exit; confirm app-owned WebView2 processes terminate.
-7. Enable optional startup and confirm it launches once after sign-in.
-8. Upgrade over an older build; confirm `%LOCALAPPDATA%\JAV Search` settings remain.
-9. Trigger a deliberately bad installer checksum; confirm the current version stays running.
-10. Uninstall; confirm program files and shortcuts are removed while user data remains.
+6. Use every folder picker (download, watch, archive, actor cache and Emby paths),
+   then confirm relative paths are rejected and legacy hardlink mode is shown as Copy.
+7. Close to tray, restore, then Exit; confirm app-owned WebView2 processes terminate.
+8. Enable optional startup and confirm it launches once after sign-in.
+9. Upgrade over an older build; confirm `%LOCALAPPDATA%\JAV Search` settings remain.
+10. Trigger a deliberately bad installer checksum; confirm the current version stays running.
+11. Uninstall; confirm program files and shortcuts are removed while user data remains.
 
 Record OS build, WebView2 runtime version, downloader version and result for each run.

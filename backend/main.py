@@ -355,9 +355,23 @@ class LocalOpenRequest(BaseModel):
     client: str = "system"
 
 
+class FolderSelectRequest(BaseModel):
+    initial: str = ""
+
+
 @app.get("/api/platform")
 async def api_platform():
     return windows_integration.capabilities(load_config())
+
+
+@app.post("/api/platform/select-folder")
+async def api_select_folder(req: FolderSelectRequest):
+    if sys.platform != "win32":
+        raise HTTPException(status_code=400, detail="文件夹选择仅支持 Windows 桌面版")
+    selected = desktop_runtime.select_folder(req.initial)
+    if selected is None:
+        return {"success": False, "cancelled": True}
+    return {"success": True, "path": selected}
 
 
 @app.post("/api/local-download/open")
@@ -986,6 +1000,8 @@ async def api_get_config():
     config = load_config()
     # 脱敏返回（隐藏密钥）
     safe_config = dict(config)
+    if sys.platform == "win32" and safe_config.get("archive_mode") == "hardlink":
+        safe_config["archive_mode"] = "copy"
     for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "javdb_cookie", "fc2_cookie", "dmm_api_id", "dmm_affiliate_id", "emby_api_key"]:
         if safe_config.get(key):
             v = safe_config[key]
@@ -1011,7 +1027,12 @@ async def api_get_config():
 async def api_set_config(req: ConfigUpdateRequest):
     config = load_config()
 
-    update = req.dict(exclude_none=True)
+    update = req.model_dump(exclude_none=True)
+    if sys.platform == "win32":
+        update, invalid = windows_integration.normalize_local_file_config(update)
+        if invalid:
+            raise HTTPException(status_code=400,
+                                detail="Windows 本地目录必须填写绝对路径：" + ", ".join(invalid))
     # 如果是脱敏值则不更新
     for key in ["baidu_secret_key", "aliyun_access_key_secret", "jackett_api_key", "qb_password", "tr_password", "javdb_cookie", "fc2_cookie", "dmm_api_id", "dmm_affiliate_id", "emby_api_key"]:
         v = update.get(key, "")

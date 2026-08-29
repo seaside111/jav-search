@@ -700,7 +700,7 @@
           <div class="setting-row">
             <label class="setting-label">FlareSolverr 地址</label>
             <input class="setting-input" id="cfgJavdbFlare" type="text" placeholder="留空＝自动探测；也可手填 http://192.168.1.100:8191 或 https://fs.你的域名.com">
-            <span class="setting-hint"><strong>留空即自动探测</strong>本机/同宿主机已部署的 FlareSolverr（含扫描 docker 同网段），装了就自然连上、零填写；探不到则回退增强直连，且一段时间内不再重扫。也可手填具体 URL（局域网 IP 或外网域名）固定使用。后端已做串行+排队上限+熔断，多任务并发也不会把它压垮</span>
+            <span class="setting-hint"><strong>留空即自动探测</strong> Windows 本机已运行的 FlareSolverr；探测不到则使用增强直连。也可填写本机地址，例如 http://127.0.0.1:8191。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">FlareSolverr 复用代理</label>
@@ -725,7 +725,7 @@
           <div class="setting-row">
             <label class="setting-label">FlareSolverr 地址</label>
             <input class="setting-input" id="cfgFc2Flare" type="text" placeholder="留空＝复用 JavDB 的 / 自动探测">
-            <span class="setting-hint">fc2ppvdb.com 强制 Cloudflare Turnstile 人机验证，必须经 FlareSolverr 才能抓取。留空时：先复用上方 JavDB 填的地址，JavDB 也留空则<strong>自动探测</strong>本机/同宿主机的 FlareSolverr</span>
+            <span class="setting-hint">fc2ppvdb.com 遇到 Cloudflare 验证时需要 FlareSolverr。留空会复用上方地址，或自动探测 Windows 本机服务。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">FlareSolverr 复用代理</label>
@@ -870,7 +870,7 @@
           <div class="setting-row">
             <label class="setting-label">Jackett 地址</label>
             <input class="setting-input" id="cfgJackettUrl" type="text" placeholder="http://192.168.1.100:9117">
-            <span class="setting-hint">群晖内网地址，如 http://NAS-IP:9117</span>
+            <span class="setting-hint">Windows 本机 Jackett 地址，通常为 http://127.0.0.1:9117</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">API Key</label>
@@ -920,8 +920,8 @@
           <h3>qBittorrent</h3>
           <div class="setting-row">
             <label class="setting-label">WebUI 地址</label>
-            <input class="setting-input" id="cfgQbUrl" type="text" placeholder="http://192.168.1.100:8080">
-            <span class="setting-hint">群晖中 qBittorrent 的 Web 界面地址</span>
+            <input class="setting-input" id="cfgQbUrl" type="text" placeholder="http://127.0.0.1:8080">
+            <span class="setting-hint">Windows 本机 qBittorrent WebUI 地址，需要先在 qBittorrent 中启用 WebUI。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">用户名</label>
@@ -933,8 +933,9 @@
           </div>
           <div class="setting-row">
             <label class="setting-label">保存目录</label>
-            <input class="setting-input" id="cfgQbSavePath" type="text" placeholder="/downloads/jav">
-            <span class="setting-hint">推送任务的下载保存目录（qB 主机视角）；留空用 qB 默认目录</span>
+            <input class="setting-input" id="cfgQbSavePath" type="text" placeholder="例如 D:\Downloads\JAV">
+            <button type="button" class="jackett-test-btn windows-only" style="display:none;margin-left:0" onclick="selectLocalFolder('cfgQbSavePath')">选择本机文件夹</button>
+            <span class="setting-hint">Windows 本机 qBittorrent 的下载保存目录；留空使用 qBittorrent 默认目录。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">任务分类</label>
@@ -966,8 +967,8 @@
           <h3>Transmission</h3>
           <div class="setting-row">
             <label class="setting-label">RPC 地址</label>
-            <input class="setting-input" id="cfgTrUrl" type="text" placeholder="http://192.168.1.100:9091">
-            <span class="setting-hint">Transmission 的 RPC 地址；填到端口即可，会自动补 /transmission/rpc</span>
+            <input class="setting-input" id="cfgTrUrl" type="text" placeholder="http://127.0.0.1:9091">
+            <span class="setting-hint">Windows 本机 Transmission RPC 地址；填到端口即可，会自动补 /transmission/rpc。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">用户名</label>
@@ -979,8 +980,9 @@
           </div>
           <div class="setting-row">
             <label class="setting-label">保存目录</label>
-            <input class="setting-input" id="cfgTrSavePath" type="text" placeholder="/downloads/jav">
-            <span class="setting-hint">推送任务的下载保存目录（TR 主机视角）；留空用 TR 默认目录</span>
+            <input class="setting-input" id="cfgTrSavePath" type="text" placeholder="例如 D:\Downloads\JAV">
+            <button type="button" class="jackett-test-btn windows-only" style="display:none;margin-left:0" onclick="selectLocalFolder('cfgTrSavePath')">选择本机文件夹</button>
+            <span class="setting-hint">Windows 本机 Transmission 的下载保存目录；留空使用 Transmission 默认目录。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">任务标签</label>
@@ -999,9 +1001,9 @@
       <div class="settings-pane" id="pane-scrape">
         <div class="setting-group">
           <h3>刮削 &amp; 归档（全局统一·所有文件通用）</h3>
-          <div class="setting-hint" style="margin:-4px 0 10px;line-height:1.7">
+          <div class="setting-hint" id="scrapeLocalModeHint" style="margin:-4px 0 10px;line-height:1.7">
             <b>刮削</b>负责 NFO 与图片，<b>规整</b>控制视频文件规整，<b>归档</b>负责落入媒体库；视频改名、封套裁图和广告清理另有独立选项。<br>
-            后台会自动监控下载目录——刮削、规整、归档任一开启即运行；三项都关时停止监控。
+            Windows 桌面版只管理本机目录。后台会自动监控本机下载目录——刮削、规整、归档任一开启即运行；三项都关时停止监控。
           </div>
           <div class="jackett-status-row">
             <div class="jackett-status-dot" id="scrapeDot"></div>
@@ -1048,13 +1050,15 @@
           </div>
           <div class="setting-row">
             <label class="setting-label">下载/工作目录（监控目录）</label>
-            <input class="setting-input" id="cfgScrapeWatch" type="text" placeholder="/data/media/qb/jpav">
-            <span class="setting-hint">本容器内、实际指向<b>下载器保存数据同一物理目录</b>的挂载名。监控会扫描这里并执行刮削、规整和归档；务必与下载器保存目录指向同一块盘。</span>
+            <input class="setting-input" id="cfgScrapeWatch" type="text" placeholder="例如 D:\Downloads\JAV">
+            <button type="button" class="jackett-test-btn windows-only" style="display:none;margin-left:0" onclick="selectLocalFolder('cfgScrapeWatch')">选择本机文件夹</button>
+            <span class="setting-hint">填写 Windows 本机绝对路径。程序直接监控此文件夹，路径应与本机下载器的实际保存目录一致。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">归档目录（供 EMBY 扫描）</label>
-            <input class="setting-input" id="cfgScrapeOutput" type="text" placeholder="/data/media/emby">
-            <span class="setting-hint">刮削归档后按所选文件夹命名规则在此生成目录。硬链接需与下载目录<b>同一卷</b>（跨卷自动退化为复制）。</span>
+            <input class="setting-input" id="cfgScrapeOutput" type="text" placeholder="例如 E:\Media\JAV">
+            <button type="button" class="jackett-test-btn windows-only" style="display:none;margin-left:0" onclick="selectLocalFolder('cfgScrapeOutput')">选择本机文件夹</button>
+            <span class="setting-hint">填写 Windows 本机媒体库绝对路径。刮削成品会按所选命名规则复制或移动到这里，供本机 Emby 扫描。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">历史归档配套文件修复</label>
@@ -1065,11 +1069,10 @@
           <div class="setting-row">
             <label class="setting-label">归档方式</label>
             <select class="setting-input" id="cfgArchiveMode">
-              <option value="hardlink">硬链接（保留原文件，同卷不占空间）</option>
-              <option value="copy">复制（保留原文件，占双倍空间）</option>
+              <option value="copy">复制（保留下载目录中的原文件）</option>
               <option value="move">移动（原文件移走、清空下载目录）</option>
             </select>
-            <span class="setting-hint">监控目录文件的归档方式；硬链接/复制会保留下载文件，移动会移走原文件并在安全时清理空目录。</span>
+            <span class="setting-hint">Windows 桌面版仅提供复制和移动。复制会保留下载文件；移动会移走原文件，并在确认安全时清理空下载目录。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
@@ -1105,20 +1108,22 @@
           </div>
           <div class="setting-row">
             <label class="setting-label">Emby metadata/people 路径（可选）</label>
-            <input class="setting-input" id="cfgActorImagesDir" type="text" placeholder="例如 /emby-metadata/people；可留空">
-            <span class="setting-hint">填写容器内路径后，会额外保存 <b>演员名/folder.jpg</b> 和 <b>portrait.jpg</b>。Docker 中需把 Emby 的 metadata/people 宿主机目录映射到这里；留空则仅保存影片内 actors 缓存。</span>
+            <input class="setting-input" id="cfgActorImagesDir" type="text" placeholder="例如 C:\ProgramData\Emby-Server\programdata\metadata\People；可留空">
+            <button type="button" class="jackett-test-btn windows-only" style="display:none;margin-left:0" onclick="selectLocalFolder('cfgActorImagesDir')">选择本机文件夹</button>
+            <span class="setting-hint">可选择本机 Emby 的 metadata/people 目录，额外保存 <b>演员名/folder.jpg</b> 和 <b>portrait.jpg</b>；留空则只保存每部影片内的 actors 头像。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">Emby API 同步</label>
             <input class="setting-input" id="cfgEmbyUrl" type="text" placeholder="例如 http://192.168.1.100:8096">
             <input class="setting-input" id="cfgEmbyApiKey" type="password" placeholder="Emby API Key">
-            <input class="setting-input" id="cfgEmbyMediaRoot" type="text" placeholder="Emby 容器内归档根路径；路径相同可留空，例如 /media/av/jp">
+            <input class="setting-input" id="cfgEmbyMediaRoot" type="text" placeholder="本机 Emby 媒体库根目录；与归档目录相同可留空">
+            <button type="button" class="jackett-test-btn windows-only" style="display:none;margin-left:0" onclick="selectLocalFolder('cfgEmbyMediaRoot')">选择本机文件夹</button>
             <label class="source-chk"><input type="checkbox" id="cfgEmbyActorSync"> 头像刮削成功后自动更新 Emby 演员主图</label>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="jackett-test-btn" style="margin-left:0" onclick="testEmby()">测试 Emby 连接</button>
               <span class="setting-hint" id="embyTestStatus"></span>
             </div>
-            <span class="setting-hint">使用 Emby 管理员 Key。影片归档完成后只通知当前影片目录，不扫描其他媒体库；若两端归档根路径不同，请填写上方 Emby 路径。同步仅从当前影片 People 关联取得 Person ID 并上传本地 actors 图片；影片尚未入库时会持久化低频重试，不枚举全局人物库。</span>
+            <span class="setting-hint">使用本机 Emby 管理员 Key。影片归档完成后只通知当前影片目录；通常 Emby 媒体库根目录与上方归档目录相同，此项留空即可。同步仅从当前影片 People 关联取得 Person ID 并上传本机 actors 图片，不枚举全局人物库；影片尚未入库时会低频重试。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk"><input type="checkbox" id="cfgActorThumbInNfo" checked> 将演员头像远程地址写入 NFO</label>
@@ -1137,7 +1142,8 @@
           </div>
           <div class="setting-row">
             <label class="setting-label">全局演员头像缓存（可选）</label>
-            <input class="setting-input" id="cfgActorCacheDir" type="text" placeholder="留空使用 /config/actor-cache">
+            <input class="setting-input" id="cfgActorCacheDir" type="text" placeholder="留空使用本机 JAV Search 数据目录下的 actor-cache">
+            <button type="button" class="jackett-test-btn windows-only" style="display:none;margin-left:0" onclick="selectLocalFolder('cfgActorCacheDir')">选择本机文件夹</button>
           </div>
           <div class="setting-row">
             <label class="setting-label">演员刮削请求间隔（秒）</label>
@@ -1297,7 +1303,7 @@ async function safeJson(resp) {
   }
   const text = await resp.text();
   if (!text || !text.trim()) {
-    throw new Error(`服务器返回空响应 (HTTP ${resp.status})，请查看容器日志`);
+    throw new Error(`程序返回空响应 (HTTP ${resp.status})，请查看 JAV Search 本地日志`);
   }
   try {
     return JSON.parse(text);
@@ -2533,7 +2539,7 @@ async function openSettings() {
     document.getElementById('cfgScrapeKeepSize').value    = cfg.scrape_keep_size_mb ?? 300;
     document.getElementById('cfgScrapeTranslate').checked = cfg.scrape_translate_enabled !== false;
     document.getElementById('cfgScrapeMoveOnFail').checked = cfg.scrape_move_on_fail !== false;
-    document.getElementById('cfgArchiveMode').value = ['hardlink','copy','move'].includes(cfg.archive_mode) ? cfg.archive_mode : 'hardlink';
+    document.getElementById('cfgArchiveMode').value = cfg.archive_mode === 'move' ? 'move' : 'copy';
     document.getElementById('cfgArchiveByMonth').checked = cfg.archive_by_month !== false;
     document.getElementById('cfgScrapeMetaEnabled').checked = cfg.scrape_meta_enabled !== false;
     document.getElementById('cfgScrapeOrganizeEnabled').checked = cfg.scrape_organize_enabled !== false;
@@ -3042,7 +3048,7 @@ async function saveSettings() {
       setTimeout(refreshScrapeStatus, 500);
     } else {
       msg.style.color = 'var(--red)';
-      msg.textContent = '保存失败';
+      msg.textContent = '保存失败：' + (data.detail || '请检查本机目录设置');
     }
   } catch (e) {
     msg.style.color = 'var(--red)';
@@ -3268,6 +3274,20 @@ async function loadLatest() {
 // ══════════════════════════════════════════
 // 启动时读取少量影响浏览行为的运行配置
 let showLatestCfg = true;
+async function selectLocalFolder(inputId) {
+  const input = document.getElementById(inputId);
+  if (!input || !platformInfo.windows_desktop) return;
+  try {
+    const resp = await fetch(`${API}/api/platform/select-folder`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({initial:input.value.trim()})
+    });
+    const data = await safeJson(resp);
+    if (!resp.ok) throw new Error(data.detail || '无法打开文件夹选择器');
+    if (data.success && data.path) input.value = data.path;
+  } catch (e) { showToast(`选择文件夹失败：${e.message}`); }
+}
+
 async function loadPlatformInfo() {
   try {
     const resp = await fetch(`${API}/api/platform`, {cache:'no-store'});

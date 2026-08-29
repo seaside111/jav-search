@@ -6,7 +6,7 @@ import shutil
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
 from xml.dom import minidom
 
@@ -572,7 +572,8 @@ def _emby_media_paths(folder: Path, config: dict) -> tuple[list[str], str]:
             relative = local_folder.relative_to(Path(local_root_value).resolve())
         except ValueError:
             return [], f"当前目录不在项目归档根路径内，无法映射到 Emby：{local_folder}"
-        remote_folder = str(PurePosixPath(emby_root, *relative.parts))
+        remote_type = PureWindowsPath if PureWindowsPath(emby_root).is_absolute() else PurePosixPath
+        remote_folder = str(remote_type(emby_root, *relative.parts))
     else:
         remote_folder = str(local_folder)
 
@@ -580,7 +581,8 @@ def _emby_media_paths(folder: Path, config: dict) -> tuple[list[str], str]:
     for child in sorted(folder.iterdir() if folder.is_dir() else []):
         if child.is_file() and (child.suffix.lower() in _video_exts or child.suffix.lower() == ".nfo"):
             if emby_root:
-                paths.append(str(PurePosixPath(remote_folder, child.name)))
+                remote_type = PureWindowsPath if PureWindowsPath(remote_folder).is_absolute() else PurePosixPath
+                paths.append(str(remote_type(remote_folder, child.name)))
             else:
                 paths.append(str(child.resolve()))
     return paths, ""
