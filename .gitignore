@@ -14,6 +14,9 @@ build-iconfix/
 dist-iconfix/
 build-ffprobe/
 dist-ffprobe/
+build-release/
+dist-release/
+.install-smoke-data/
 .smoke-data/
 tools/ffprobe.exe
 

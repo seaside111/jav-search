@@ -2,14 +2,20 @@
 #ifndef AppVersion
   #define AppVersion "1.4.6.23"
 #endif
+#ifndef AppSourceRoot
+  #define AppSourceRoot "..\dist"
+#endif
+#ifndef InstallerOutputDir
+  #define InstallerOutputDir "..\dist\installer"
+#endif
 
 [Setup]
 AppId={{90E23E8B-B4E1-4FBA-B22B-B0CE07182713}
 AppName={#AppName}
 AppVersion={#AppVersion}
-DefaultDirName={autopf}\JAV Search
+DefaultDirName={localappdata}\Programs\JAV Search
 DefaultGroupName=JAV Search
-OutputDir=..\dist\installer
+OutputDir={#InstallerOutputDir}
 OutputBaseFilename=JAV-Search-v{#AppVersion}-Windows-x64-Setup
 Compression=lzma2
 SolidCompression=yes
@@ -18,9 +24,18 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 WizardStyle=modern
 UninstallDisplayIcon={app}\JAV Search.exe
+SetupIconFile=app.ico
+MinVersion=10.0.10240
+CloseApplications=yes
+RestartApplications=no
+AppMutex=Local\JAVSearchDesktop
+AppPublisher=seaside111
+AppPublisherURL=https://github.com/seaside111/jav-search
+AppSupportURL=https://github.com/seaside111/jav-search/issues
+AppUpdatesURL=https://github.com/seaside111/jav-search/releases
 
 [Files]
-Source: "..\dist\JAV Search\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#AppSourceRoot}\JAV Search\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\JAV Search"; Filename: "{app}\JAV Search.exe"
