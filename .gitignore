@@ -4,6 +4,9 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+build/
+dist/
+.smoke-data/
 
 # 运行时配置（含密钥/密码，切勿提交）
 config/settings.json

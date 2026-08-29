@@ -3235,11 +3235,22 @@ async function loadLatest() {
 // ══════════════════════════════════════════
 // 启动时读取少量影响浏览行为的运行配置
 let showLatestCfg = true;
+async function loadPlatformInfo() {
+  try {
+    const resp = await fetch(`${API}/api/platform`, {cache:'no-store'});
+    platformInfo = await safeJson(resp);
+    if (platformInfo.windows_desktop) {
+      document.querySelectorAll('.windows-only').forEach(el => el.style.display = 'flex');
+    }
+  } catch (e) { /* Docker/Web 部署保持隐藏 */ }
+}
+
 async function loadRuntimeConfig() {
   try {
     const resp = await fetch(`${API}/api/config`, { cache: 'no-store' });
     const cfg = await safeJson(resp);
     showLatestCfg = cfg.show_latest !== false;
+    activeDownloaderType = cfg.downloader_type || 'qb';
     configuredSources = (cfg.sources && cfg.sources.length)
       ? cfg.sources
       : ['javbus', 'jav321', 'javdb'];
@@ -3277,6 +3288,7 @@ async function checkVersion() {
 
 async function init() {
   await checkAuthStatus();   // 未登录会跳转，登录态/免登录则继续
+  await loadPlatformInfo();  // Windows 桌面能力（本机下载器等）
   await loadRuntimeConfig(); // 读取预取开关 / 首页最新来源等运行配置
   checkVersion();            // 后台检测版本更新（不阻塞）
   // 首页最新：优先用本标签页缓存，无缓存才抓取

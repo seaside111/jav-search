@@ -27,6 +27,7 @@ import socket
 import asyncio
 import itertools
 import uuid
+import sys
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -285,6 +286,13 @@ async def discover_auto(force: bool = False) -> str:
                 _auto_state.update({"endpoint": ep, "ts": time.monotonic()})
                 print(f"[fsgate] 自动探测到 FlareSolverr：{ep}")
                 return ep
+
+        # Windows 桌面版只管理/连接本机或用户明确填写的服务，不扫描用户局域网。
+        # Docker 的 sibling 容器没有固定 DNS 时才需要下面的 /24 网段兜底。
+        if sys.platform == "win32":
+            _auto_state.update({"endpoint": "", "ts": time.monotonic()})
+            print(f"[fsgate] Windows 本机未发现 FlareSolverr，{int(_AUTO_NEG_TTL)}s 内不再重扫")
+            return ""
 
         # 2) 扫描本容器所在 /24 网段（找 sibling 容器 IP，如 172.17.0.3）
         #    两段式、更快更轻：先「全并发 TCP 连扫」一个超时窗口扫完整段（不是分批），

@@ -34,6 +34,19 @@ def _single_instance():
     return handle
 
 
+def _install_windowed_logging(data_dir: Path) -> None:
+    """PyInstaller windowed apps have no stdout/stderr; keep backend prints safe."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    log_dir = data_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stream = open(log_dir / "desktop.log", "a", encoding="utf-8", buffering=1)
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -80,13 +93,55 @@ def _run_browser(url: str, server, thread: threading.Thread) -> None:
 
 def _run_webview(url: str, server, thread: threading.Thread) -> None:
     import webview
+    import pystray
+    from PIL import Image, ImageDraw
 
     window = webview.create_window("JAV Search", url, width=1280, height=820,
                                    min_size=(960, 640), confirm_close=False)
+    exiting = threading.Event()
+
+    def tray_image():
+        image = Image.new("RGB", (64, 64), "#111827")
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((7, 7, 57, 57), radius=12, fill="#2563eb")
+        draw.text((21, 16), "J", fill="white", stroke_width=1)
+        return image
+
+    def show_window(_icon=None, _item=None):
+        window.show()
+        window.restore()
+
+    def open_browser(_icon=None, _item=None):
+        webbrowser.open(url)
+
+    def exit_app(icon, _item=None):
+        exiting.set()
+        icon.stop()
+        window.destroy()
+
+    def minimize_to_tray():
+        if exiting.is_set():
+            return True
+        window.hide()
+        return False
+
+    tray = pystray.Icon(
+        "jav-search",
+        tray_image(),
+        "JAV Search",
+        menu=pystray.Menu(
+            pystray.MenuItem("打开 JAV Search", show_window, default=True),
+            pystray.MenuItem("在浏览器中打开", open_browser),
+            pystray.MenuItem("退出", exit_app),
+        ),
+    )
+    window.events.closing += minimize_to_tray
+    tray.run_detached()
     try:
         webview.start(gui="edgechromium", private_mode=False,
                       storage_path=str(app_data_dir() / "webview"))
     finally:
+        tray.stop()
         server.should_exit = True
         thread.join(timeout=8)
 
@@ -94,10 +149,12 @@ def _run_webview(url: str, server, thread: threading.Thread) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--browser", action="store_true")
+    parser.add_argument("--smoke-test", action="store_true")
     args, _unknown = parser.parse_known_args()
     mutex = _single_instance()
     data = app_data_dir()
     data.mkdir(parents=True, exist_ok=True)
+    _install_windowed_logging(data)
     os.environ.setdefault("CONFIG_DIR", str(data))
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
@@ -107,6 +164,10 @@ def main() -> int:
     url = f"http://127.0.0.1:{port}"
     _wait_ready(url)
     try:
+        if args.smoke_test:
+            server.should_exit = True
+            thread.join(timeout=8)
+            return 0 if not thread.is_alive() else 1
         if args.browser:
             _run_browser(url, server, thread)
         else:
