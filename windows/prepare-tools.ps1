@@ -15,13 +15,16 @@ New-Item -ItemType Directory -Force -Path $downloadDir, $toolsDir | Out-Null
 $curl = Get-Command curl.exe -ErrorAction Stop
 & $curl.Source -L --fail --retry 3 --output $checksums "$releaseBase/checksums.sha256"
 if ($LASTEXITCODE -ne 0) { throw "Failed to download checksums.sha256." }
-& $curl.Source -L --fail --retry 3 --continue-at - --output $archive "$releaseBase/$FfmpegAsset"
-if ($LASTEXITCODE -ne 0) { throw "Failed to download $FfmpegAsset." }
 
 $checksumLine = Get-Content $checksums | Where-Object { $_ -match "\s$([regex]::Escape($FfmpegAsset))$" } | Select-Object -First 1
 if (-not $checksumLine) { throw "Asset not found in checksums file: $FfmpegAsset" }
 $expected = ($checksumLine -split '\s+')[0].ToLowerInvariant()
-$actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+$actual = if (Test-Path $archive) { (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant() } else { "" }
+if ($actual -ne $expected) {
+    & $curl.Source -L --fail --retry 3 --continue-at - --output $archive "$releaseBase/$FfmpegAsset"
+    if ($LASTEXITCODE -ne 0) { throw "Failed to download $FfmpegAsset." }
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+}
 if ($actual -ne $expected) { throw "FFmpeg archive checksum verification failed." }
 
 if (Test-Path $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force }

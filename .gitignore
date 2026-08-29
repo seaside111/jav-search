@@ -12,7 +12,10 @@ build-orange/
 dist-orange/
 build-iconfix/
 dist-iconfix/
+build-ffprobe/
+dist-ffprobe/
 .smoke-data/
+tools/ffprobe.exe
 
 # 运行时配置（含密钥/密码，切勿提交）
 config/settings.json
