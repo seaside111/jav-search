@@ -8,6 +8,8 @@ import subprocess
 import sys
 from urllib.parse import urlsplit
 
+from platform_paths import bundled_tool
+
 
 _CLIENT_NAMES = {
     "qb": "qBittorrent",
@@ -56,6 +58,58 @@ def find_client(client: str, configured: str = "") -> str:
     return ""
 
 
+def _first_existing(candidates: list[Path]) -> str:
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return str(candidate.resolve())
+        except OSError:
+            continue
+    return ""
+
+
+def find_optional_tool(tool: str) -> str:
+    """Locate optional Windows services without starting or installing them."""
+    if sys.platform != "win32":
+        return ""
+    program_files = Path(os.getenv("ProgramFiles", r"C:\Program Files"))
+    program_data = Path(os.getenv("ProgramData", r"C:\ProgramData"))
+    local = Path(os.getenv("LOCALAPPDATA", "")) if os.getenv("LOCALAPPDATA") else None
+    if tool == "flaresolverr":
+        candidates = [program_files / "FlareSolverr" / "flaresolverr.exe"]
+        if local:
+            candidates.extend([
+                local / "FlareSolverr" / "flaresolverr.exe",
+                local / "Programs" / "FlareSolverr" / "flaresolverr.exe",
+                Path.home() / "scoop" / "apps" / "flaresolverr" / "current" / "flaresolverr.exe",
+            ])
+    elif tool == "jackett":
+        candidates = [
+            program_files / "Jackett" / "JackettTray.exe",
+            program_data / "Jackett" / "JackettConsole.exe",
+        ]
+    else:
+        return ""
+    return _first_existing(candidates)
+
+
+def ffprobe_status() -> dict:
+    executable = bundled_tool("ffprobe.exe") if sys.platform == "win32" else bundled_tool("ffprobe")
+    if not executable:
+        located = shutil.which("ffprobe")
+        executable = Path(located) if located else None
+    result = {"available": bool(executable), "path": str(executable or ""), "version": ""}
+    if executable:
+        try:
+            completed = subprocess.run([str(executable), "-version"], capture_output=True,
+                                       text=True, timeout=5, check=False)
+            first_line = (completed.stdout or completed.stderr or "").splitlines()
+            result["version"] = first_line[0].strip() if first_line else ""
+        except (OSError, subprocess.TimeoutExpired):
+            result["available"] = False
+    return result
+
+
 def capabilities(config: dict) -> dict:
     is_windows = sys.platform == "win32"
     qb = find_client("qb", config.get("qb_exe_path", "")) if is_windows else ""
@@ -66,6 +120,17 @@ def capabilities(config: dict) -> dict:
             "qb": {"installed": bool(qb), "path": qb},
             "transmission": {"installed": bool(tr), "path": tr},
             "system": {"available": is_windows},
+        },
+        "tools": {
+            "ffprobe": ffprobe_status(),
+            "flaresolverr": {
+                "installed": bool(fs := find_optional_tool("flaresolverr")), "path": fs,
+                "required": False,
+            },
+            "jackett": {
+                "installed": bool(jackett := find_optional_tool("jackett")), "path": jackett,
+                "required": False,
+            },
         },
     }
 

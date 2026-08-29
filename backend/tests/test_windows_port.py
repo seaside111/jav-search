@@ -50,7 +50,21 @@ class WindowsDownloaderTests(unittest.TestCase):
         self.assertTrue(result["success"])
         popen.assert_called_once_with([r"C:\Apps\qbittorrent.exe", magnet], close_fds=True)
 
+    def test_optional_flaresolverr_detection(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(sys, "platform", "win32"), \
+                patch.dict(os.environ, {"ProgramFiles": tmp}, clear=False):
+            executable = Path(tmp) / "FlareSolverr" / "flaresolverr.exe"
+            executable.parent.mkdir()
+            executable.write_bytes(b"test")
+            self.assertEqual(windows_integration.find_optional_tool("flaresolverr"),
+                             str(executable.resolve()))
+
+    def test_ffprobe_status_reports_missing(self):
+        with patch.object(windows_integration, "bundled_tool", return_value=None), \
+                patch.object(windows_integration.shutil, "which", return_value=None):
+            self.assertEqual(windows_integration.ffprobe_status()["available"], False)
+
 
 if __name__ == "__main__":
     unittest.main()
-

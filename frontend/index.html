@@ -692,6 +692,11 @@
 
         <div class="setting-group">
           <h3>JavDB 反爬</h3>
+          <div class="jackett-status-row windows-only" style="display:none">
+            <div class="jackett-status-dot" id="flaresolverrLocalDot"></div>
+            <span class="jackett-status-text" id="flaresolverrLocalText">Windows 本机检测中…</span>
+            <a class="jackett-test-btn" href="https://github.com/FlareSolverr/FlareSolverr/releases/latest" target="_blank" rel="noopener">按需安装</a>
+          </div>
           <div class="setting-row">
             <label class="setting-label">FlareSolverr 地址</label>
             <input class="setting-input" id="cfgJavdbFlare" type="text" placeholder="留空＝自动探测；也可手填 http://192.168.1.100:8191 或 https://fs.你的域名.com">
@@ -842,6 +847,11 @@
       <div class="settings-pane" id="pane-jackett">
         <div class="setting-group">
           <h3>资源搜索来源</h3>
+          <div class="jackett-status-row windows-only" style="display:none">
+            <div class="jackett-status-dot" id="jackettLocalDot"></div>
+            <span class="jackett-status-text" id="jackettLocalText">Windows 本机检测中…</span>
+            <a class="jackett-test-btn" href="https://github.com/Jackett/Jackett/releases/latest/download/Jackett.Installer.Windows.exe" target="_blank" rel="noopener">下载安装</a>
+          </div>
           <div class="setting-row">
             <label class="setting-label">内置默认来源</label>
             <input class="setting-input" type="text" value="https://sukebei.nyaa.si/" readonly>
@@ -3264,6 +3274,21 @@ async function loadPlatformInfo() {
     platformInfo = await safeJson(resp);
     if (platformInfo.windows_desktop) {
       document.querySelectorAll('.windows-only').forEach(el => el.style.display = 'flex');
+      const tools = platformInfo.tools || {};
+      const fs = tools.flaresolverr || {};
+      const fsDot = document.getElementById('flaresolverrLocalDot');
+      const fsText = document.getElementById('flaresolverrLocalText');
+      if (fsDot) fsDot.className = `jackett-status-dot ${fs.installed ? 'online' : 'offline'}`;
+      if (fsText) fsText.textContent = fs.installed
+        ? `已检测到本机 FlareSolverr：${fs.path}`
+        : '未安装；JavDB 直连正常时无需安装，遇到 Cloudflare 拦截再按需安装';
+      const jk = tools.jackett || {};
+      const jkDot = document.getElementById('jackettLocalDot');
+      const jkText = document.getElementById('jackettLocalText');
+      if (jkDot) jkDot.className = `jackett-status-dot ${jk.installed ? 'online' : 'offline'}`;
+      if (jkText) jkText.textContent = jk.installed
+        ? `已检测到本机 Jackett：${jk.path}`
+        : '未安装；内置 Sukebei 可直接使用，只有需要更多索引器时才安装';
     }
   } catch (e) { /* Docker/Web 部署保持隐藏 */ }
 }
