@@ -10,6 +10,8 @@ build-next/
 dist-next/
 build-orange/
 dist-orange/
+build-iconfix/
+dist-iconfix/
 .smoke-data/
 
 # 运行时配置（含密钥/密码，切勿提交）
