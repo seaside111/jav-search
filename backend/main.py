@@ -48,8 +48,8 @@ _VERSION_FILE = resource_path("VERSION")
 try:
     _IMAGE_VERSION = _VERSION_FILE.read_text(encoding="utf-8").strip()
 except (OSError, UnicodeError):
-    _IMAGE_VERSION = "1.4.6.26"
-APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.26"
+    _IMAGE_VERSION = "1.4.6.27"
+APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.27"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -410,7 +410,9 @@ def _cmp_version(a: str, b: str) -> int:
 @app.get("/api/version")
 async def api_version(force: bool = Query(False, description="是否强制刷新缓存")):
     """
-    返回当前版本与 GitHub 最新 release，判断是否有更新。
+    返回当前版本与对应发布通道的 GitHub release，判断是否有更新。
+    Windows 桌面版只读取 windows-v*（包含 Pre-release）；Docker/Web 只读取
+    仓库全局正式 Latest。两个通道互不参与对方的版本比较。
     后端代理 + 缓存 1 小时，避免浏览器跨域/被限流，群晖内网也能用（经配置代理出网）。
     """
     import time as _time
@@ -420,11 +422,16 @@ async def api_version(force: bool = Query(False, description="是否强制刷新
 
     config = load_config()
     proxy = config.get("proxy") or None
-    api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    windows_channel = sys.platform == "win32"
+    api_url = (f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=30"
+               if windows_channel else
+               f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest")
     result = {
         "current": APP_VERSION,
         "latest": "",
         "update_available": False,
+        "channel": "windows" if windows_channel else "docker",
+        "windows_installer_available": False,
         "release_url": f"https://github.com/{GITHUB_REPO}/releases",
         "error": "",
     }
@@ -435,14 +442,20 @@ async def api_version(force: bool = Query(False, description="是否强制刷新
                 "User-Agent": "jav-search-version-check",
             })
         if resp.status_code == 200:
-            data = resp.json()
+            payload = resp.json()
+            data = (windows_updater.select_latest_windows_release(payload)
+                    if windows_channel else payload)
+            if not data:
+                result["error"] = "未找到带有效安装器的 Windows 预发布版本"
+                return result
             latest = (data.get("tag_name") or data.get("name") or "").strip()
             result["latest"] = latest
             if data.get("html_url"):
                 result["release_url"] = data["html_url"]
             result["update_available"] = bool(latest) and _cmp_version(latest, APP_VERSION) > 0
-            selected = windows_updater.select_windows_assets(data)
-            result["windows_installer_available"] = selected["available"]
+            if windows_channel:
+                selected = windows_updater.select_windows_assets(data)
+                result["windows_installer_available"] = selected["available"]
             _version_release.clear()
             _version_release.update(data)
         else:

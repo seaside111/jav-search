@@ -14,6 +14,7 @@ if str(BACKEND) not in sys.path:
 
 import platform_paths
 import library
+import main
 import windows_integration
 import windows_updater
 
@@ -120,6 +121,20 @@ class WindowsDownloaderTests(unittest.TestCase):
 
 
 class WindowsUpdaterTests(unittest.TestCase):
+    @staticmethod
+    def _release(tag, *, prerelease=True, installer_version=None, usable=True):
+        version = installer_version or tag.removeprefix("windows-v")
+        assets = []
+        if usable:
+            name = f"JAV-Search-v{version}-Windows-x64-Setup.exe"
+            assets = [
+                {"name": name, "browser_download_url": "https://github.com/a/setup.exe"},
+                {"name": name + ".sha256",
+                 "browser_download_url": "https://github.com/a/setup.exe.sha256"},
+            ]
+        return {"tag_name": tag, "prerelease": prerelease, "draft": False,
+                "html_url": f"https://github.com/a/releases/{tag}", "assets": assets}
+
     def test_selects_matching_installer_and_checksum(self):
         release = {"assets": [
             {"name": "JAV-Search-v2.0-Windows-x64-Setup.exe",
@@ -151,6 +166,66 @@ class WindowsUpdaterTests(unittest.TestCase):
                 windows_updater._sha256_file(installer),
                 hashlib.sha256(b"verified installer").hexdigest(),
             )
+
+    def test_windows_channel_selects_newest_usable_prerelease_only(self):
+        releases = [
+            self._release("v9.9.9", prerelease=False),
+            self._release("windows-v1.4.6.26"),
+            self._release("windows-v1.4.6.28", usable=False),
+            self._release("windows-v1.4.6.27"),
+            self._release("windows-v1.4.6.29", installer_version="1.4.6.30"),
+            {**self._release("windows-v1.4.6.31"), "draft": True},
+        ]
+        selected = windows_updater.select_latest_windows_release(releases)
+        self.assertEqual(selected["tag_name"], "windows-v1.4.6.27")
+
+    def test_windows_api_uses_windows_release_list_not_global_latest(self):
+        releases = [
+            self._release("v9.9.9", prerelease=False),
+            self._release("windows-v1.4.6.27"),
+        ]
+        response = main.httpx.Response(200, json=releases)
+        client = AsyncMock()
+        client.__aenter__.return_value = client
+        client.get.return_value = response
+        main._version_cache.update({"ts": 0.0, "data": None})
+        main._version_release.clear()
+        with patch.object(main.sys, "platform", "win32"), \
+                patch.object(main, "APP_VERSION", "1.4.6.26"), \
+                patch.object(main, "load_config", return_value={}), \
+                patch.object(main.httpx, "AsyncClient", return_value=client):
+            result = asyncio.run(main.api_version(force=True))
+        requested_url = client.get.await_args.args[0]
+        self.assertTrue(requested_url.endswith("/releases?per_page=30"))
+        self.assertEqual(result["channel"], "windows")
+        self.assertEqual(result["latest"], "windows-v1.4.6.27")
+        self.assertTrue(result["update_available"])
+        self.assertTrue(result["windows_installer_available"])
+
+    def test_windows_verified_update_entrypoint_remains_connected(self):
+        main._version_release.clear()
+        main._version_release.update(self._release("windows-v1.4.6.27"))
+        with patch.object(main.sys, "platform", "win32"), \
+                patch.object(main, "api_version", AsyncMock(return_value={
+                    "current": "1.4.6.26", "latest": "windows-v1.4.6.27",
+                    "update_available": True,
+                })), \
+                patch.object(main.windows_updater, "prepare_update",
+                             AsyncMock(return_value={"path": r"C:\Temp\setup.exe",
+                                                     "sha256": "a" * 64})), \
+                patch.object(main.desktop_runtime, "request_update", return_value=True):
+            result = asyncio.run(main.api_update_install())
+        self.assertTrue(result["success"])
+        self.assertEqual(result["sha256"], "a" * 64)
+
+    def test_frontend_shows_checking_latest_and_failure_states(self):
+        html = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
+            encoding="utf-8")
+        self.assertIn('class="version-status">检测中', html)
+        self.assertIn('class="version-status">有更新', html)
+        self.assertIn('class="version-status">检测失败', html)
+        self.assertIn('class="update-dot"', html)
+        self.assertIn('startWindowsUpdate(d)', html)
 
 
 if __name__ == "__main__":

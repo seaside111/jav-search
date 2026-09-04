@@ -12,6 +12,7 @@ from platform_paths import app_data_dir
 
 
 INSTALLER_RE = re.compile(r"^JAV-Search-v(.+)-Windows-x64-Setup\.exe$", re.I)
+WINDOWS_TAG_RE = re.compile(r"^windows-v(\d+(?:\.\d+)+)$", re.I)
 ALLOWED_DOWNLOAD_HOSTS = {"github.com", "objects.githubusercontent.com",
                           "release-assets.githubusercontent.com"}
 MAX_INSTALLER_BYTES = 750 * 1024 * 1024
@@ -29,6 +30,41 @@ def select_windows_assets(release: dict) -> dict:
         "checksum": checksum,
         "available": bool(installer and (checksum or installer.get("digest"))),
     }
+
+
+def _windows_version(tag: str) -> tuple[int, ...] | None:
+    """Return the numeric version only for the independent Windows channel."""
+    match = WINDOWS_TAG_RE.fullmatch((tag or "").strip())
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def select_latest_windows_release(releases: list[dict]) -> dict | None:
+    """Select the newest usable windows-v* release, including prereleases.
+
+    Docker v* releases are deliberately ignored. Drafts and Windows releases
+    without a verifiable installer are also ignored so the UI never advertises
+    an update that cannot be installed.
+    """
+    candidates: list[tuple[tuple[int, ...], dict]] = []
+    for release in releases or []:
+        if not isinstance(release, dict) or release.get("draft"):
+            continue
+        version = _windows_version(release.get("tag_name") or "")
+        if version is None:
+            continue
+        selected = select_windows_assets(release)
+        if not selected["available"]:
+            continue
+        installer_match = INSTALLER_RE.fullmatch(
+            (selected["installer"] or {}).get("name") or "")
+        installer_version = (_windows_version(f"windows-v{installer_match.group(1)}")
+                             if installer_match else None)
+        if installer_version != version:
+            continue
+        candidates.append((version, release))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def _safe_download_url(url: str) -> str:

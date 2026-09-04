@@ -99,6 +99,7 @@
   .version-chip.clickable { cursor: pointer; }
   .version-chip.clickable:hover { background: var(--bg-hover); color: var(--text-main); }
   .version-chip.has-update { border-color: var(--accent); color: var(--accent); }
+  .version-chip .version-status { font-size: 11px; opacity: .72; }
   .version-chip .update-dot {
     width: 7px; height: 7px; border-radius: 50%; background: var(--red);
     box-shadow: 0 0 0 0 rgba(204,51,68,.6); animation: pulseDot 1.8s infinite;
@@ -577,7 +578,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.26</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.27</div>
   <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -3348,22 +3349,31 @@ async function loadRuntimeConfig() {
 async function checkVersion() {
   const chip = document.getElementById('versionChip');
   if (!chip) return;
+  const currentText = (chip.textContent.match(/[\d.]+/) || ['1.4.6.27'])[0];
+  chip.classList.remove('has-update', 'clickable');
+  chip.onclick = null;
+  chip.title = platformInfo.windows_desktop ? '正在检测 Windows 更新…' : '正在检测 Docker 正式版更新…';
+  chip.innerHTML = `v${escHtml(currentText)} <span class="version-status">检测中</span>`;
   try {
     const resp = await fetch(`${API}/api/version`, { cache: 'no-store' });
     const d = await safeJson(resp);
-      chip.textContent = 'v' + (d.current || '1.4.6.26');
+    const current = d.current || '1.4.6.27';
     if (d.update_available && d.latest) {
       chip.classList.add('has-update', 'clickable');
       chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;
-      chip.innerHTML = `v${escHtml(d.current)} <span class="update-dot"></span>`;
+      chip.innerHTML = `v${escHtml(current)} <span class="update-dot"></span><span class="version-status">有更新</span>`;
       chip.onclick = () => (platformInfo.windows_desktop && d.windows_installer_available)
         ? startWindowsUpdate(d) : window.open(d.release_url || `https://github.com/seaside111/jav-search/releases`, '_blank');
     } else {
-      chip.title = d.latest
-        ? `当前 v${d.current}，已是最新（GitHub: ${d.latest}）`
-        : `当前 v${d.current}`;
+      chip.innerHTML = `v${escHtml(current)} <span class="version-status">${d.error ? '检测失败' : '已是最新'}</span>`;
+      chip.title = d.error
+        ? `v${current} 更新检测失败：${d.error}`
+        : (d.latest ? `当前 v${current}，已是最新（${d.latest}）` : `当前 v${current}`);
     }
-  } catch (e) { /* 检测失败保留静态版本号 */ }
+  } catch (e) {
+    chip.innerHTML = `v${escHtml(currentText)} <span class="version-status">检测失败</span>`;
+    chip.title = `更新检测失败：${e.message}`;
+  }
 }
 
 async function startWindowsUpdate(versionInfo) {
