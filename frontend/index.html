@@ -575,7 +575,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.23</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.24</div>
   <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -1140,9 +1140,9 @@
           </div>
           <div class="setting-row">
             <label class="source-chk" style="font-size:13px">
-              <input type="checkbox" id="cfgScrapeMoveOnFail" checked> 刮削失败也照常归档
+              <input type="checkbox" id="cfgScrapeMoveOnFail" disabled> 刮削失败时保留源文件
             </label>
-            <span class="setting-hint">监控正常但无法刮到内容时，仍按上面的归档方式把视频归档</span>
+            <span class="setting-hint">安全规则：NFO、poster 或 fanart 任一创建/校验失败，任务显示失败，视频及相关文件不改名、不归档。</span>
           </div>
           <button class="jackett-test-btn" style="margin-left:0;align-self:flex-start" onclick="runScrapeOnce()">立即扫描一次</button>
           <div class="setting-hint" id="scrapeRunMsg"></div>
@@ -1232,6 +1232,9 @@ const jackettCache = {};
 const jackettFilters = {};
 // 当前结果（搜索结果 或 首页最新）
 let currentResults = [];
+// Every wholesale result replacement advances this token. Detail responses
+// from an older search must never merge into the new list by stale indexes.
+let resultsGeneration = 0;
 // 分页
 let currentPage = 1;
 const PAGE_SIZE = 12;
@@ -1344,6 +1347,7 @@ async function doSearch() {
 // RENDER CARDS
 // ══════════════════════════════════════════
 function renderResults(results) {
+  resultsGeneration++;
   currentResults = results || [];
   currentPage = 1;
   activeSourceFilter = null;
@@ -1524,7 +1528,9 @@ function ensurePageDetails(p) {
   });
   if (!idxs.length) return Promise.resolve();
 
-  const items = idxs.map(i => ({ url: currentResults[i].url, source: currentResults[i].source }));
+  const generation = resultsGeneration;
+  const bases = idxs.map(i => currentResults[i]);
+  const items = bases.map(m => ({ url: m.url, source: m.source, code: m.code || '' }));
   const promise = (async () => {
     // 超时保护：部分来源（如 AVSOX）限流可能拖慢整批，
     // 30s 仍未返回则中断；失败条目保持未加载，用户点开时可以单条重试。
@@ -1541,7 +1547,9 @@ function ensurePageDetails(p) {
       if (data.success) {
         (data.results || []).forEach((d, k) => {
           const i = idxs[k];
-          if (d) currentResults[i] = mergeDetail(currentResults[i], d);
+          if (d && generation === resultsGeneration && currentResults[i] === bases[k]) {
+            currentResults[i] = mergeDetail(currentResults[i], d);
+          }
         });
       }
     } catch (e) {
@@ -2055,10 +2063,11 @@ async function ensureItemDetail(idx) {
   try {
     const resp = await fetch(`${API}/api/details`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ items: [{ url: m.url, source: m.source }] }),
+      body: JSON.stringify({ items: [{ url: m.url, source: m.source, code: m.code || '' }] }),
     });
     const data = await safeJson(resp);
     if (data.success && data.results && data.results[0]) {
+      if (currentResults[idx] !== m) return false;
       currentResults[idx] = mergeDetail(m, data.results[0]);
       return true;
     }
@@ -2471,7 +2480,7 @@ async function openSettings() {
     document.getElementById('cfgScrapeMinSize').value     = cfg.scrape_min_size_mb ?? 100;
     document.getElementById('cfgScrapeKeepSize').value    = cfg.scrape_keep_size_mb ?? 300;
     document.getElementById('cfgScrapeTranslate').checked = cfg.scrape_translate_enabled !== false;
-    document.getElementById('cfgScrapeMoveOnFail').checked = cfg.scrape_move_on_fail !== false;
+    document.getElementById('cfgScrapeMoveOnFail').checked = false;
     document.getElementById('cfgArchiveMode').value = ['hardlink','copy','move'].includes(cfg.archive_mode) ? cfg.archive_mode : 'hardlink';
     document.getElementById('cfgArchiveByMonth').checked = cfg.archive_by_month !== false;
     document.getElementById('cfgScrapeMetaEnabled').checked = cfg.scrape_meta_enabled !== false;
@@ -2924,7 +2933,7 @@ async function saveSettings() {
     scrape_min_size_mb: Math.max(0, parseInt(document.getElementById('cfgScrapeMinSize').value) || 0),
     scrape_keep_size_mb: Math.max(1, parseInt(document.getElementById('cfgScrapeKeepSize').value) || 300),
     scrape_translate_enabled: document.getElementById('cfgScrapeTranslate').checked,
-    scrape_move_on_fail: document.getElementById('cfgScrapeMoveOnFail').checked,
+    scrape_move_on_fail: false,
     // 统一归档设置
     archive_mode: document.getElementById('cfgArchiveMode').value,
     archive_by_month: document.getElementById('cfgArchiveByMonth').checked,
@@ -3081,6 +3090,7 @@ function tryRestoreLatest() {
     if (Date.now() - (c.ts || 0) > _LATEST_CACHE_TTL) return false;
     // 恢复状态
     isHomeLatest = true;
+    resultsGeneration++;
     currentResults = c.results;
     latestCodeIndex = {};
     currentResults.forEach((it, i) => {
@@ -3117,6 +3127,7 @@ async function loadLatest() {
   // 新一轮加载：失效旧批次、重置状态
   const token = ++latestLoadToken;
   isHomeLatest = true;
+  resultsGeneration++;
   currentResults = [];
   latestCodeIndex = {};
   _coverPrewarmed.clear();   // 新一批封面，重置预热去重表
@@ -3217,7 +3228,7 @@ async function checkVersion() {
   try {
     const resp = await fetch(`${API}/api/version`, { cache: 'no-store' });
     const d = await safeJson(resp);
-      chip.textContent = 'v' + (d.current || '1.4.6.18');
+      chip.textContent = 'v' + (d.current || '1.4.6.24');
     if (d.update_available && d.latest) {
       chip.classList.add('has-update', 'clickable');
       chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;

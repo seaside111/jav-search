@@ -99,7 +99,7 @@ DEFAULT_CONFIG = {
     "scrape_keep_size_mb": 300,          # 达到此大小一律视为正片，绝不作为广告删除
     "scrape_translate_enabled": True,    # 刮削时是否翻译标题/简介；关闭则直接用日文原标题写入 NFO
     "scrape_translate_provider": "",     # 刮削翻译服务，留空用默认翻译服务
-    "scrape_move_on_fail": True,         # 刮削失败也照常归档
+    "scrape_move_on_fail": False,        # 兼容旧配置；主要文件失败时始终保留源视频
     # 刮削归档统一：监控目录中的成品按同一套规则写入媒体库目录。
     "archive_mode": "hardlink",          # hardlink | copy | move —— 监控孤儿下载的归档方式：
                                          #   hardlink/copy 保留原文件；move 移动并清理原下载目录。

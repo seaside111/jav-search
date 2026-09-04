@@ -227,6 +227,14 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
 
         url = item.get("url", "")
         source = (item.get("source", "") or "").lower()
+        expected_code = _normalize_code(item.get("code", ""))
+
+        def identity_ok(value: Optional[dict]) -> bool:
+            if not value or not expected_code:
+                return bool(value)
+            actual = _normalize_code(value.get("code", ""))
+            return bool(actual) and actual == expected_code
+
         mod = SOURCE_MODULES.get(source)
         if not mod or not url:
             return result(None, "invalid")
@@ -241,7 +249,11 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
                             for actor in cached.get("actors") or [])):
             cached = None
         if cached is not None:
-            return result(cached, "ok")
+            if identity_ok(cached):
+                return result(cached, "ok")
+            _detailcache.discard(url)
+            print(f"[enrich] {source} 丢弃番号不一致的详情缓存："
+                  f"期望 {item.get('code', '')}，实际 {cached.get('code', '')}")
         use_fs = source in _FLARESOLVERR_SOURCES and flaresolverr_on
         # FlareSolverr 来源需容纳浏览器启动、过盾及认证代理会话；其余保持快速超时。
         gate = _FLARESOLVERR_GATE if use_fs else sem
@@ -250,6 +262,10 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
             await asyncio.sleep(0.05)
             try:
                 res = await asyncio.wait_for(mod.fetch_detail(url, proxy), timeout=timeout)
+                if res and not identity_ok(res):
+                    print(f"[enrich] {source} 拒绝番号不一致的详情："
+                          f"期望 {item.get('code', '')}，实际 {res.get('code', '')}，url={url}")
+                    return result(None, "mismatch")
                 if res:                       # 仅缓存成功结果，失败不缓存以便重试
                     _detailcache.put(url, res)
                 return result(res, "ok" if res else "empty")

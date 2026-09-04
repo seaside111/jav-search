@@ -69,7 +69,7 @@ docker stop jav-search && docker rm jav-search
 # 再次执行上面的 docker run 命令即可
 ```
 
-> 当前正式版本为 `v1.4.6.18`，也可以将镜像标签 `:latest` 换成固定版本标签 `:v1.4.6.18`。
+> 当前正式版本为 `v1.4.6.24`，也可以将镜像标签 `:latest` 换成固定版本标签 `:v1.4.6.24`。
 
 版本检测读取 GitHub 的最新正式 Release（`/releases/latest`），不是直接读取 GHCR 的 `:latest` 标签。正式版本必须推送版本 tag；GitHub Actions 会自动创建对应 Release，并把 tag 注入镜像的 `/api/version`。Beta Release 不会作为正式版本参与检测。
 
@@ -198,7 +198,7 @@ volumes:
 | 轮询间隔（秒） | 每隔多久扫描一次，默认 300 |
 | 静置判定（秒） | 文件超过这么久没再写入即判定下载完成，默认 60 |
 | 最小文件大小（MB） | 小于此值的视频忽略（样板/预告） |
-| 刮削失败也照常移动归档 | 监控正常但刮不到内容时仍移动 |
+| 刮削失败时保留源文件 | NFO、poster 或 fanart 任一缺失/无效时跳过规整归档，并在任务列表显示失败 |
 
 ### 行为说明
 

@@ -5,7 +5,7 @@
   1. 扫描/监控下载器保存目录，找出「下载完成」的视频文件
   2. 对完成的文件刮削元数据（番号→搜索→翻译中文标题/简介）
   3. 写 Emby/Kodi 兼容的 NFO + 封面（poster/fanart）
-  4. 刮削后（无论成功与否，按配置）把视频及其附属文件移动到归档目录，
+  4. 仅在主要刮削产物验证成功后，把视频及其附属文件移动到归档目录，
      在归档目录下按当前年月（如 202605）建子目录存放
 
 提供：
@@ -1383,6 +1383,52 @@ async def _ensure_cover(movie: dict, code: str, proxy: Optional[str]) -> dict:
     return movie
 
 
+def _poster_quality(data: Optional[bytes]) -> tuple[bool, int, int, int]:
+    """Return whether artwork is usable plus dimensions and an area score."""
+    if not data:
+        return False, 0, 0, 0
+    width, height = _image_dimensions(data)
+    area = width * height
+    usable = min(width, height) >= 300 and max(width, height) >= 500 and area >= 180_000
+    return usable, width, height, area
+
+
+async def _enhance_artwork_jav321(movie: dict, code: str,
+                                   proxy: Optional[str]) -> dict:
+    """Use fast exact-code JAV321 results to improve weak covers and fanart."""
+    current_url = (movie.get("cover") or "").strip()
+    current_data = await _fetch_cover(current_url, proxy) if current_url else None
+    current_ok, cur_w, cur_h, cur_area = _poster_quality(current_data)
+    rows, status = await search_source_status(
+        code, SEARCH_MODE_CODE, "jav321", proxy=proxy, max_results=1)
+    item = _source_item_for_code(rows, code)
+    if not item:
+        _log(f"JAV321 图片择优未命中：{code}（状态 {status}，保留主来源）")
+        return movie
+
+    candidate_url = (item.get("cover") or "").strip()
+    candidate_data = await _fetch_cover(candidate_url, proxy) if candidate_url else None
+    candidate_ok, cand_w, cand_h, cand_area = _poster_quality(candidate_data)
+    prefer_candidate = bool(movie.pop("_prefer_jav321_cover", False))
+    if candidate_ok and (prefer_candidate or not current_ok
+                         or cand_area >= int(cur_area * 1.25)):
+        movie["cover"] = candidate_url
+        movie["poster_source"] = "jav321"
+        movie.setdefault("source_urls", {})["JAV321"] = item.get("url", "")
+        _log(f"JAV321 封面择优：{code}（{cur_w}x{cur_h} → {cand_w}x{cand_h}）")
+    elif current_url:
+        _log(f"保留主来源封面：{code}（{cur_w}x{cur_h}；JAV321 {cand_w}x{cand_h}）")
+
+    # Prefer the exact-code gallery. This also repairs sample URLs supplied by
+    # an older polluted detail cache; every candidate is dimension-checked.
+    if item.get("samples"):
+        movie["samples"] = list(item["samples"])
+        movie["fanart_source"] = "jav321"
+        movie.setdefault("source_urls", {})["JAV321"] = item.get("url", "")
+        _log(f"JAV321 背景候选：{code}（{len(movie['samples'])} 张，写入前校验横向尺寸）")
+    return movie
+
+
 def _use_jacket_artwork(config: dict, movie: dict, cover_url: str) -> bool:
     """Use one confirmed horizontal jacket for both poster and fanart."""
     return (config.get("scrape_jacket_artwork_enabled", False) and
@@ -1444,6 +1490,11 @@ def _is_confirmed_jacket_cover(movie: dict, cover_url: str) -> bool:
     if source == "javdb":
         return "/covers/" in url and bool(
             re.search(r"\.(?:jpe?g|png|webp)$", url))
+    if source == "jav321":
+        # JAV321's primary col-md-3 image is package artwork. The byte-level
+        # size/aspect gate in _poster_bytes still rejects portrait covers and
+        # ordinary 16:9 stills before cropping.
+        return bool(re.search(r"\.(?:jpe?g|png|webp)$", url))
     return False
 
 
@@ -1580,7 +1631,7 @@ async def _backfill_artwork(movie: dict, code: str, config: dict,
                         source_urls[source] = url
                     _merge_artwork(movie, detail, source)
             if url and not movie.get("samples"):
-                rows = await enrich([{"url": url, "source": source}], proxy=proxy,
+                rows = await enrich([{"url": url, "source": source, "code": code}], proxy=proxy,
                                     concurrency=1, per_timeout=12.0, with_status=True)
                 entry = rows[0] if rows else (None, "error")
                 if isinstance(entry, tuple) and len(entry) == 2:
@@ -1862,16 +1913,44 @@ async def _run_pending_artwork(config: dict) -> int:
 
 
 def _flat_sidecar_dir(video_path: Path, code: str, config: dict) -> Optional[Path]:
-    """For a video directly in the watch root, isolate its sidecars by code."""
+    """Return a per-code staging folder so unrelated videos never share artwork."""
     watch = (config.get("scrape_watch_dir") or "").strip()
     if not watch or not code:
         return None
     try:
-        if video_path.parent.resolve() != Path(watch).resolve():
-            return None
+        direct_in_root = video_path.parent.resolve() == Path(watch).resolve()
     except OSError:
         return None
-    return video_path.parent / _safe_name(code)
+    if direct_in_root:
+        # Preserve the established layout for flat watch directories.
+        return video_path.parent / _safe_name(code)
+    # A download folder can contain many unrelated movies. Generic artwork in
+    # that folder is shared state and previously made processing order visible.
+    return video_path.parent / ".jav-search-sidecars" / _safe_name(code)
+
+
+def _main_sidecar_errors(metadata_dir: Path, nfo_path: Path) -> list[str]:
+    """Validate the main artifacts that gate video organization/archive."""
+    errors = []
+    if not nfo_path.exists():
+        errors.append("NFO 未创建")
+    else:
+        try:
+            ET.parse(nfo_path)
+        except Exception as exc:
+            errors.append(f"NFO 无法解析: {exc}")
+    for name, label in (("poster.jpg", "poster"), ("fanart.jpg", "fanart")):
+        path = metadata_dir / name
+        if not path.exists():
+            errors.append(f"{label} 未创建")
+            continue
+        try:
+            width, height = _image_dimensions(path.read_bytes())
+            if width <= 0 or height <= 0:
+                errors.append(f"{label} 不是有效图片")
+        except Exception as exc:
+            errors.append(f"{label} 无法读取: {exc}")
+    return errors
 
 
 def _get_file_status(video_path: Path, code: str = "",
@@ -1948,6 +2027,15 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         _log(f"读取推送入库元数据失败（忽略，回退常规刮削）：{e}")
         pushed_meta = None
 
+    # Downloader-name matching is only a hint. When the filename itself carries
+    # a different explicit code, never let stale/ambiguous pushed metadata win.
+    filename_code = _code_from_name(path.stem)
+    if (pushed_meta and pushed_meta.get("code") and filename_code
+            and _norm(pushed_meta["code"]) != _norm(filename_code)):
+        _log(f"拒绝不匹配的推送元数据：{path.name} 文件番号 {filename_code}，"
+             f"记录番号 {pushed_meta.get('code')}；改用文件番号直接检索")
+        pushed_meta = None
+
     if pushed_meta and pushed_meta.get("code"):
         code = pushed_meta["code"]
         _log(f"命中推送元数据：{path.name} → 番号 {code}（用已呈现内容刮削，免重识别/重刮削）")
@@ -1971,11 +2059,13 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     external_subtitle = _has_external_subtitle(path)
     status = _get_file_status(path, code, sidecar_dir=sidecar_dir)
     nfo_path = metadata_dir / f"{path.stem}.nfo"
+    existing_errors = _main_sidecar_errors(metadata_dir, nfo_path)
     hard_subtitle_repair = hard_subtitle and not _nfo_has_tag(nfo_path, "硬字幕")
     if (not overwrite and status["has_nfo"] and status["has_poster"]
             and status["has_fanart"]
             and not hard_subtitle_repair
-            and not external_subtitle):
+            and not external_subtitle
+            and not existing_errors):
         existing = _read_existing_nfo_metadata(path, code, sidecar_dir)
         actor_images_saved = 0
         if (config.get("scrape_actor_images_enabled", False)
@@ -2011,7 +2101,9 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         if incomplete and movie.get("url"):
             try:
                 from scrapers import enrich
-                enriched = await enrich([{"url": movie["url"], "source": movie.get("source", "")}], proxy=proxy)
+                enriched = await enrich([{"url": movie["url"],
+                                          "source": movie.get("source", ""),
+                                          "code": code}], proxy=proxy)
                 if enriched and enriched[0]:
                     filled = [k for k, v in enriched[0].items() if v and not movie.get(k)]
                     for k in filled:
@@ -2020,6 +2112,23 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             except Exception as e:
                 _log(f"原源补抓失败（用已有内容继续）：{code}: {e}")
         _log(f"用推送元数据刮削：{code} 标题《{(movie.get('title') or '')[:40]}》来源 {movie.get('source','')}")
+        # Old frontend/detail-cache versions could attach another movie's
+        # samples to otherwise correct pushed metadata. Re-resolve artwork by
+        # exact code for every downloaded file; keep textual metadata intact.
+        movie["samples"] = []
+        verified_artwork = await search(
+            query=code, mode=SEARCH_MODE_CODE, proxy=proxy, sources=["javbus"])
+        verified_item = _source_item_for_code(verified_artwork, code)
+        if verified_item and verified_item.get("cover"):
+            movie["cover"] = verified_item["cover"]
+            movie["poster_source"] = "javbus"
+            movie.setdefault("source_urls", {})["JavBus"] = verified_item.get("url", "")
+            _log(f"推送影片图片已按番号重新核验：{code} ← JavBus")
+        else:
+            # JAV321 is the next exact-code direct source and may replace the
+            # unverified pushed cover even when its pixel count is merely equal.
+            movie["_prefer_jav321_cover"] = True
+            _log(f"JavBus 图片核验未命中：{code}，转 JAV321 精确检索")
     else:
         _log(f"搜索元数据：{code}（首选 JavBus，代理 {'有' if proxy else '无'}）")
         results = await search(query=code, mode=SEARCH_MODE_CODE, proxy=proxy,
@@ -2052,7 +2161,9 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                 and not movie.get("actors") and movie.get("url")):
             try:
                 from scrapers import enrich
-                enriched = await enrich([{"url": movie["url"], "source": movie.get("source", "")}], proxy=proxy)
+                enriched = await enrich([{"url": movie["url"],
+                                          "source": movie.get("source", ""),
+                                          "code": code}], proxy=proxy)
                 if enriched and enriched[0]:
                     detail = enriched[0]
                     for k, v in detail.items():
@@ -2066,6 +2177,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     # available, poster/fanart are generated locally according to the jacket
     # setting; no background sample-art search is scheduled.
     await _ensure_cover(movie, code, proxy)
+    await _enhance_artwork_jav321(movie, code, proxy)
 
     # ── 标题/简介翻译 ──
     # 番号（字母+数字）不翻译，仅作前缀；只对真正的日文片名/简介长句翻译。
@@ -2203,8 +2315,15 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         except Exception as e:
             _log(f"独立演员头像任务失败（不影响影片刮削）：{code}: {e}")
 
-    _log(f"刮削结束：{code}（NFO={'有' if saved_nfo else '无'} 封面={'有' if saved_cover else '无'}）")
-    return {"success": True, "skipped": False, "filepath": filepath, "code": code,
+    artifact_errors = _main_sidecar_errors(metadata_dir, nfo_path)
+    success = not artifact_errors
+    error = "；".join(artifact_errors)
+    if success:
+        _log(f"刮削结束：{code}（主要文件校验通过）")
+    else:
+        _log(f"刮削失败：{code}（{error}；保留源视频，不执行规整/归档）")
+    return {"success": success, "skipped": False, "filepath": filepath, "code": code,
+            "error": error,
             "title_zh": title_for_nfo, "title_original": name_part,
             "folder_title": folder_title, "actors": movie.get("actors") or [],
             "actor_images_saved": actor_images_saved,
@@ -2782,7 +2901,8 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
                   min_bytes: int = 100 * 1024 * 1024,
                   keep_bytes: int = 300 * 1024 * 1024,
                   multipart_parts: Optional[list] = None,
-                  subfolder_name: str = "") -> dict:
+                  subfolder_name: str = "",
+                  require_sidecars: bool = False) -> dict:
     """
     把视频归档到 归档目录/年月/番号/ 子目录下（Emby 单片单目录布局）。
     rename：开（刮削开）= 视频改名「番号.后缀」、随带番号命名的 NFO/封面；
@@ -2908,10 +3028,17 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
     try:
         # Prefer the per-video staging directory, then accept legacy sidecars
         # from the video directory for backward compatibility.
+        isolated_sidecars = Path(sidecar_dir) if sidecar_dir else None
         for root in sidecar_roots:
             if not root.is_dir():
                 continue
             for candidate in root.iterdir():
+                # When an isolated per-code stage exists, generic artwork in
+                # the shared download folder is legacy shared state and must
+                # never be used for this movie.
+                if (isolated_sidecars is not None and root != isolated_sidecars
+                        and candidate.name.lower() in {"poster.jpg", "fanart.jpg"}):
+                    continue
                 if candidate.is_file() and candidate.name.lower() in expected:
                     found_extras.setdefault(candidate.name.lower(), candidate)
     except Exception as e:
@@ -2952,7 +3079,10 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
 
     # 3) 演员头像本地缓存始终随影片归档；它是保底缓存，不依赖 Emby 全局 people 映射。
     # 新版本使用可见的 actors；旧版 .actors 也合并进去，避免升级后丢失缓存。
-    for actors_src in (folder / "actors", folder / ".actors"):
+    actor_roots = [folder / "actors", folder / ".actors"]
+    if sidecar_dir:
+        actor_roots = [Path(sidecar_dir) / "actors", Path(sidecar_dir) / ".actors"] + actor_roots
+    for actors_src in actor_roots:
       if actors_src.is_dir():
         actors_dst = target_dir / "actors"
         actors_dst.mkdir(parents=True, exist_ok=True)
@@ -2961,6 +3091,25 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
                 continue
             if _transfer(actor_img, actors_dst / actor_img.name, sub_mode):
                 done.append(f"actors/{actor_img.name}")
+
+    if require_sidecars:
+        required = [target_dir / video_name, target_dir / f"{media_stem}.nfo",
+                    target_dir / "poster.jpg", target_dir / "fanart.jpg"]
+        missing = [path.name for path in required if not path.exists()]
+        if missing:
+            _log(f"归档产物校验失败：{code}（缺少 {', '.join(missing)}；源视频保持不动）")
+            # Roll back only files created by this invocation. Existing
+            # multipart/shared artifacts were not appended to done.
+            for relative in reversed(list(dict.fromkeys(done))):
+                try:
+                    created = target_dir / relative
+                    if created.is_file():
+                        created.unlink()
+                except OSError:
+                    pass
+            return {"archived": False, "moved_original": False,
+                    "error": f"归档产物不完整: {', '.join(missing)}",
+                    "target_dir": str(target_dir), "files": done}
 
     how = {"move": "移动", "copy": "复制", "hardlink": "硬链接"}.get(mode, mode)
     _log(f"归档（{how}）：{len(done)} 个文件 → {target_dir} （{', '.join(done)}）")
@@ -3250,7 +3399,6 @@ async def _process_completed_file(video_path: Path, config: dict,
     """对一个判定为下载完成的视频文件执行：刮削(可关) → 按配置归档(可关)。"""
     fp = str(video_path)
     output_dir = config.get("scrape_output_dir", "").strip()
-    move_on_fail = config.get("scrape_move_on_fail", True)
     scrape_meta = config.get("scrape_meta_enabled", True)
     organize_on = config.get("scrape_organize_enabled", scrape_meta)
     archive_on = config.get("archive_enabled", True)
@@ -3282,13 +3430,12 @@ async def _process_completed_file(video_path: Path, config: dict,
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
-    # 归档：需 归档总开关开 + 配了归档目录 + (刮削成功 或 允许失败仍归档)
+    # Main scrape artifacts are a transaction boundary. A failed movie stays
+    # exactly where it is and never enters naming/archive operations.
     if not archive_on:
         _log(f"归档已关闭（仅刮削，保留原处）：{video_path.name}")
         record["note"] = "归档已关闭，保留原处"
-    elif output_dir and (not failed or move_on_fail):
-        if failed:
-            _log(f"刮削未成功但按配置仍归档：{video_path.name}")
+    elif output_dir and not failed:
         watch_dir = Path(config.get("scrape_watch_dir", ""))
         min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
         keep_bytes = int(config.get("scrape_keep_size_mb", 300)) * 1024 * 1024
@@ -3306,14 +3453,33 @@ async def _process_completed_file(video_path: Path, config: dict,
         # 归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
         mode = (config.get("archive_mode") or "hardlink").lower()
         rename_video = organize_on and config.get("scrape_video_rename_enabled", True)
-        mv = _archive_file(video_path, output_dir, code, mode=mode, rename=rename_video,
+        # Even for requested move mode, first materialize and validate a
+        # hardlink/copy archive while the source remains untouched. Only after
+        # every required artifact exists do we remove the source video.
+        transfer_mode = "hardlink" if mode == "move" else mode
+        mv = _archive_file(video_path, output_dir, code, mode=transfer_mode, rename=rename_video,
                            watch_dir=str(watch_dir), folder_name=folder_name,
                            subfolder_name=subfolder_name,
                            by_month=config.get("archive_by_month", True),
                            sidecar_dir=Path(sidecar_dir),
                            min_bytes=min_bytes, keep_bytes=keep_bytes,
-                           multipart_parts=multipart_parts)
+                           multipart_parts=multipart_parts,
+                           require_sidecars=scrape_meta)
+        if mv.get("archived") and mode == "move":
+            try:
+                video_path.unlink()
+                mv["moved_original"] = True
+                stage = Path(sidecar_dir)
+                if stage != video_path.parent and stage.exists():
+                    shutil.rmtree(stage)
+            except Exception as e:
+                reason, advice = _diagnose_source_remove_error(video_path, e)
+                mv["archived"] = False
+                mv["moved_original"] = False
+                mv["error"] = f"归档已写入但源文件未移动: {reason}；{advice}"
+                _log(mv["error"])
         record["moved"] = mv.get("archived", False)
+        record["archive_error"] = mv.get("error", "")
         record["archive_mode"] = mode
         record["target_dir"] = mv.get("target_dir", "")
         if (mv.get("archived") and config.get("emby_actor_sync_enabled", False)
@@ -3336,7 +3502,8 @@ async def _process_completed_file(video_path: Path, config: dict,
         _log(f"未配置归档目录，仅刮削未归档：{video_path.name}")
         record["note"] = "未配置归档目录，仅刮削未归档"
     else:
-        _log(f"刮削失败且未开启「失败仍归档」，保留原处：{video_path.name}")
+        _log(f"刮削失败，已跳过规整/归档并保留源文件：{video_path.name}")
+        record["note"] = "刮削失败，源文件已保留且未规整"
 
     return record
 
@@ -3839,9 +4006,11 @@ async def api_scrape_single(req: ScrapeRequest):
             folder_code, result.get("title_original", ""),
             result.get("folder_title", ""), config)
             if config.get("scrape_folder_naming", "code") == "actor" else "")
+        requested_mode = (config.get("archive_mode") or "hardlink").lower()
+        transfer_mode = "hardlink" if requested_mode == "move" else requested_mode
         mv = _archive_file(
             video_path, config["scrape_output_dir"], code,
-            mode=(config.get("archive_mode") or "hardlink").lower(),
+            mode=transfer_mode,
             rename=(config.get("scrape_organize_enabled", True) and
                     config.get("scrape_video_rename_enabled", True)),
             watch_dir=config.get("scrape_watch_dir", ""),
@@ -3850,7 +4019,20 @@ async def api_scrape_single(req: ScrapeRequest):
             by_month=config.get("archive_by_month", True),
             sidecar_dir=Path(result.get("sidecar_dir") or video_path.parent),
             min_bytes=int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024,
-            keep_bytes=int(config.get("scrape_keep_size_mb", 300)) * 1024 * 1024)
+            keep_bytes=int(config.get("scrape_keep_size_mb", 300)) * 1024 * 1024,
+            require_sidecars=True)
+        if mv.get("archived") and requested_mode == "move":
+            try:
+                video_path.unlink()
+                mv["moved_original"] = True
+                stage = Path(result.get("sidecar_dir") or video_path.parent)
+                if stage != video_path.parent and stage.exists():
+                    shutil.rmtree(stage)
+            except Exception as exc:
+                reason, advice = _diagnose_source_remove_error(video_path, exc)
+                mv["archived"] = False
+                mv["moved_original"] = False
+                mv["error"] = f"归档已写入但源文件未移动: {reason}；{advice}"
         result["moved"] = mv.get("archived", False)
         result["moved_original"] = mv.get("moved_original", False)
         result["target_dir"] = mv.get("target_dir", "")
