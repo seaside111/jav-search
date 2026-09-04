@@ -1,10 +1,11 @@
+import asyncio
 import hashlib
 import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -12,6 +13,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 import platform_paths
+import library
 import windows_integration
 import windows_updater
 
@@ -43,6 +45,39 @@ class WindowsPathTests(unittest.TestCase):
             "actor_scrape_cache_dir": r"cache\actors",
         })
         self.assertEqual(invalid, ["scrape_watch_dir", "actor_scrape_cache_dir"])
+
+    def test_windows_move_archives_by_copy_before_source_removal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "downloads" / "ABC-123.mp4"
+            video.parent.mkdir()
+            video.write_bytes(b"source movie")
+            scraped = {
+                "success": True,
+                "code": "ABC-123",
+                "filepath": str(video),
+                "sidecar_dir": str(video.parent / "ABC-123"),
+                "title_original": "",
+                "folder_title": "",
+                "actors": [],
+            }
+            with patch.object(library, "_scrape_one",
+                              AsyncMock(return_value=scraped)), \
+                    patch.object(library, "_archive_file", return_value={
+                        "archived": False, "moved_original": False,
+                        "error": "test stop", "target_dir": "",
+                    }) as archive:
+                asyncio.run(library._process_completed_file(video, {
+                    "scrape_output_dir": str(root / "archive"),
+                    "scrape_watch_dir": str(video.parent),
+                    "scrape_meta_enabled": True,
+                    "scrape_organize_enabled": True,
+                    "archive_enabled": True,
+                    "archive_mode": "move",
+                }))
+            self.assertEqual(archive.call_args.kwargs["mode"], "copy")
+            self.assertTrue(archive.call_args.kwargs["require_sidecars"])
+            self.assertTrue(video.exists())
 
 
 class WindowsDownloaderTests(unittest.TestCase):

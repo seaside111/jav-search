@@ -59,3 +59,14 @@ def put(url: str, data: dict) -> None:
         tmp.replace(f)
     except Exception:
         pass
+
+
+def discard(url: str) -> None:
+    """Remove a detail entry that failed a later identity check."""
+    if not url:
+        return
+    _mem.pop(url, None)
+    try:
+        (_DIR / f"{_key(url)}.json").unlink(missing_ok=True)
+    except Exception:
+        pass

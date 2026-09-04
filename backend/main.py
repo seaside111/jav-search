@@ -48,8 +48,8 @@ _VERSION_FILE = resource_path("VERSION")
 try:
     _IMAGE_VERSION = _VERSION_FILE.read_text(encoding="utf-8").strip()
 except (OSError, UnicodeError):
-    _IMAGE_VERSION = "1.4.6.23"
-APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.23"
+    _IMAGE_VERSION = "1.4.6.26"
+APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.26"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -206,6 +206,7 @@ class SearchRequest(BaseModel):
 class DetailItem(BaseModel):
     url: str
     source: str
+    code: Optional[str] = None
 
 
 class DetailsRequest(BaseModel):
@@ -773,7 +774,8 @@ async def api_details(req: DetailsRequest):
     if not req.items:
         return {"success": True, "results": []}
     # 单次最多补全 60 条，避免被滥用
-    items = [{"url": it.url, "source": it.source} for it in req.items[:60]]
+    items = [{"url": it.url, "source": it.source, "code": it.code or ""}
+             for it in req.items[:60]]
     config = load_config()
     proxy = config.get("proxy") or None
     try:
@@ -816,7 +818,7 @@ async def api_detail_resolve(req: ResolveDetailRequest):
                 return {"success": True, "status": "ok", "detail": seed, "url": url}
         if not url:
             return {"success": True, "status": "empty", "detail": seed}
-        result = await enrich([{"url": url, "source": source}], proxy=proxy,
+        result = await enrich([{"url": url, "source": source, "code": code}], proxy=proxy,
                               concurrency=1, per_timeout=15.0, with_status=True)
         detail, status = result[0] if result else (None, "error")
         return {"success": True, "status": status, "detail": detail, "url": url}

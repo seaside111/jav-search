@@ -20,6 +20,7 @@ import downloader
 import main
 import intake
 import config_manager
+import scrapers
 from scrapers import _javu_base, _javbus_base, _fsgate, jav321, dmm, javdb
 from config_manager import DEFAULT_CONFIG
 
@@ -88,6 +89,44 @@ class JavDbFlareSolverrTests(unittest.TestCase):
         self.assertEqual(saved["samples"], ["https://img.jav321/sample-1.jpg"])
         self.assertEqual(saved["source_urls"]["JAV321"], "https://www.jav321.com/search")
         self.assertEqual(saved["score_count"], "100")
+
+    def test_detail_enrichment_rejects_and_does_not_cache_wrong_code(self):
+        wrong = {"code": "OAE-212", "source": "JavBus",
+                 "samples": ["https://img/oae-212.jpg"]}
+        with mock.patch.object(scrapers._detailcache, "get", return_value=None), \
+                mock.patch.object(scrapers._detailcache, "put") as cache_put, \
+                mock.patch.object(scrapers.javbus, "fetch_detail",
+                                  mock.AsyncMock(return_value=wrong)):
+            result = asyncio.run(scrapers.enrich([
+                {"url": "https://www.javbus.com/SSIS-484",
+                 "source": "javbus", "code": "SSIS-484"}],
+                concurrency=1, per_timeout=1, with_status=True))
+        self.assertEqual(result, [(None, "mismatch")])
+        cache_put.assert_not_called()
+
+    def test_jav321_replaces_only_materially_better_cover_and_supplies_fanart(self):
+        def jpeg(width, height):
+            buf = BytesIO()
+            Image.new("RGB", (width, height), "red").save(buf, format="JPEG")
+            return buf.getvalue()
+
+        movie = {"code": "NCG-011", "cover": "https://primary/small.jpg",
+                 "source": "javbus", "samples": []}
+        jav321_item = {"code": "NCG-011", "cover": "https://jav321/large.jpg",
+                       "samples": ["https://jav321/wide.jpg"],
+                       "url": "https://www.jav321.com/search", "source": "JAV321"}
+
+        async def fetch(url, _proxy):
+            return jpeg(240, 360) if "small" in url else jpeg(1200, 800)
+
+        with mock.patch.object(library, "search_source_status",
+                               mock.AsyncMock(return_value=([jav321_item], "ok"))), \
+                mock.patch.object(library, "_fetch_cover", side_effect=fetch):
+            result = asyncio.run(library._enhance_artwork_jav321(
+                movie, "NCG-011", None))
+        self.assertEqual(result["cover"], "https://jav321/large.jpg")
+        self.assertEqual(result["samples"], ["https://jav321/wide.jpg"])
+        self.assertEqual(result["poster_source"], "jav321")
 
     def test_downloader_completion_requires_whole_torrent_state(self):
         self.assertFalse(downloader.is_download_complete(
@@ -1933,7 +1972,83 @@ class NamingAndTrackerTests(unittest.TestCase):
             nested = source / "nested" / "ABC-003.mp4"
             nested.parent.mkdir()
             nested.write_bytes(b"nested movie")
-            self.assertIsNone(library._flat_sidecar_dir(nested, "ABC-003", config))
+            self.assertEqual(
+                library._flat_sidecar_dir(nested, "ABC-003", config),
+                nested.parent / ".jav-search-sidecars" / "ABC-003")
+
+    def test_nested_mixed_movie_folder_never_reuses_shared_artwork(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            watch = root / "downloads"
+            batch = watch / "mixed-batch"
+            output = root / "archive"
+            batch.mkdir(parents=True)
+            first = batch / "OAE-212.mp4"
+            second = batch / "SSIS-484.mp4"
+            first.write_bytes(b"first movie")
+            second.write_bytes(b"second movie")
+            config = {"scrape_watch_dir": str(watch)}
+            first_stage = library._flat_sidecar_dir(first, "OAE-212", config)
+            second_stage = library._flat_sidecar_dir(second, "SSIS-484", config)
+            self.assertNotEqual(first_stage, second_stage)
+            for stage, code, marker in (
+                    (first_stage, "OAE-212", b"oae"),
+                    (second_stage, "SSIS-484", b"ssis")):
+                stage.mkdir(parents=True)
+                (stage / f"{code}.nfo").write_text("<movie/>", encoding="utf-8")
+                (stage / "poster.jpg").write_bytes(marker + b" poster")
+                (stage / "fanart.jpg").write_bytes(marker + b" fanart")
+            (batch / "poster.jpg").write_bytes(b"stale shared poster")
+            (batch / "fanart.jpg").write_bytes(b"stale shared fanart")
+
+            for video, code, stage, marker in (
+                    (first, "OAE-212", first_stage, b"oae"),
+                    (second, "SSIS-484", second_stage, b"ssis")):
+                result = library._archive_file(
+                    video, str(output), code, mode="hardlink", rename=True,
+                    folder_name=code, by_month=False, sidecar_dir=stage)
+                self.assertTrue(result["archived"])
+                self.assertEqual((output / code / "poster.jpg").read_bytes(), marker + b" poster")
+                self.assertEqual((output / code / "fanart.jpg").read_bytes(), marker + b" fanart")
+
+    def test_failed_main_scrape_never_calls_archive_even_when_legacy_option_is_on(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            video = root / "downloads" / "ABC-123.mp4"
+            video.parent.mkdir()
+            video.write_bytes(b"source movie")
+            failed = {"success": False, "code": "ABC-123",
+                      "error": "poster 未创建", "filepath": str(video)}
+            with mock.patch.object(library, "_scrape_one", mock.AsyncMock(return_value=failed)), \
+                    mock.patch.object(library, "_archive_file") as archive_mock:
+                result = asyncio.run(library._process_completed_file(video, {
+                    "scrape_output_dir": str(root / "archive"),
+                    "scrape_watch_dir": str(video.parent),
+                    "scrape_meta_enabled": True, "scrape_organize_enabled": True,
+                    "archive_enabled": True, "scrape_move_on_fail": True,
+                }))
+            archive_mock.assert_not_called()
+            self.assertTrue(video.exists())
+            self.assertFalse(result["scrape_ok"])
+            self.assertIn("保留", result["note"])
+
+    def test_incomplete_archive_transaction_rolls_back_video_and_keeps_source(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            watch = root / "downloads"
+            stage = watch / "ABC-123"
+            video = watch / "ABC-123.mp4"
+            stage.mkdir(parents=True)
+            video.write_bytes(b"source movie")
+            (stage / "ABC-123.nfo").write_text("<movie/>", encoding="utf-8")
+            (stage / "poster.jpg").write_bytes(b"poster")
+            result = library._archive_file(
+                video, str(root / "archive"), "ABC-123", mode="hardlink",
+                rename=True, folder_name="ABC-123", by_month=False,
+                sidecar_dir=stage, require_sidecars=True)
+            self.assertFalse(result["archived"])
+            self.assertTrue(video.exists())
+            self.assertFalse((root / "archive" / "ABC-123" / "ABC-123.mp4").exists())
 
     def test_failed_copy_cleans_partial_target_and_preserves_source(self):
         with tempfile.TemporaryDirectory() as raw:
