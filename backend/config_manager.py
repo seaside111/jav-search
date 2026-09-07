@@ -116,6 +116,7 @@ DEFAULT_CONFIG = {
     "scrape_actor_subfolder_naming": "code", # code | code_title
     "scrape_jacket_artwork_enabled": True, # 封套同时生成裁切 poster 与完整横向 fanart；关闭则不裁切
     "scrape_actor_images_enabled": False,
+    "scrape_actor_images_in_movie_dir": True, # 是否在每部影片目录永久保留 actors/；关闭后使用全局缓存
     "scrape_actor_thumb_in_nfo": True,  # 在 NFO actor/thumb 中写入远程头像地址（Kodi/可移植性）
     "scrape_actor_images_dir": "",       # Emby metadata/people 路径
     "actor_scrape_auto": True,

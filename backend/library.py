@@ -196,6 +196,7 @@ def _mark_processed(video_path: Path, size: int) -> None:
     _save_processed()
 
 _monitor_task: Optional[asyncio.Task] = None
+_scan_lock = asyncio.Lock()
 _monitor_state: dict = {
     "running": False,
     "enabled": False,
@@ -208,7 +209,7 @@ _monitor_state: dict = {
     "message": "未启动",
 }
 
-# 按番号聚合的任务摘要：失败记录保留更久，重试同一番号时更新原记录。
+# 按源文件路径保存任务摘要：同一番号的多个文件互不覆盖，失败记录保留更久。
 _TASKS_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "scrape_tasks.json"
 _tasks: dict[str, dict] = {}
 _tasks_loaded = False
@@ -241,23 +242,36 @@ def _save_tasks() -> None:
         _log(f"保存任务记录失败（忽略）：{exc}")
 
 
+def _task_storage_key(code: str, filepath: str = "") -> str:
+    """Keep each source file independent; one code may have several files."""
+    value = (filepath or "").strip()
+    if value:
+        return "file:" + value.replace("\\", "/").casefold()
+    return "code:" + ((code or "").strip() or "未知番号").casefold()
+
+
 def _task_update(code: str, **changes) -> None:
     code = (code or "").strip() or "未知番号"
     _load_tasks()
-    previous = _tasks.get(code) or {}
+    filepath = str(changes.get("filepath") or "")
+    storage_key = _task_storage_key(code, filepath)
+    previous = _tasks.get(storage_key) or _tasks.get(code) or {}
+    if storage_key != code and code in _tasks:
+        _tasks.pop(code, None)
     item = dict(previous or {"code": code, "created_at": datetime.now().isoformat(timespec="seconds")})
     filtered = {k: v for k, v in changes.items() if v is not None}
     if previous and all(previous.get(k) == v for k, v in filtered.items()):
         return
     item.update(filtered)
     item["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    _tasks[code] = item
+    _tasks[storage_key] = item
     # 成功记录较少保留，失败记录保留更充分，避免失败排查信息被快速淘汰。
     ordered = sorted(_tasks.values(), key=lambda x: x.get("updated_at", ""), reverse=True)
     success = [x for x in ordered if x.get("status") == "success"][:_TASK_SUCCESS_MAX]
     failed = [x for x in ordered if x.get("status") != "success"][:_TASK_FAILURE_MAX]
     _tasks.clear()
-    _tasks.update({x.get("code", "未知番号"): x for x in success + failed})
+    _tasks.update({_task_storage_key(x.get("code", "未知番号"), x.get("filepath", "")): x
+                   for x in success + failed})
     _save_tasks()
 
 
@@ -1378,8 +1392,159 @@ async def _ensure_cover(movie: dict, code: str, proxy: Optional[str]) -> dict:
         movie["cover"] = cover
         movie["poster_source"] = source
         movie.setdefault("source_urls", {})[source] = item.get("url", "")
+        if (_is_placeholder_title(movie.get("title", ""), code)
+                and not _is_placeholder_title(item.get("title", ""), code)):
+            movie["title"] = item["title"]
+            _log(f"封面兜底同时校正标题：{code} ← {source}")
         _log(f"封面兜底命中：{code} ← {source}")
         return movie
+    return movie
+
+
+async def _ensure_downloadable_cover(movie: dict, code: str, config: dict,
+                                      proxy: Optional[str]) -> Optional[bytes]:
+    """Resolve an actually downloadable poster, with enabled JavDB as the first repair source.
+
+    A non-empty URL is not proof that artwork exists: signed CloudFront URLs expire and
+    anti-hotlink endpoints can later return an error page. Validate bytes before writing,
+    then perform an exact-code lookup. JavDB list search goes through its configured
+    FlareSolverr path; its detail page is also consulted when the fresh list cover fails.
+    """
+    current_url = (movie.get("cover") or "").strip()
+    if current_url:
+        current = await _fetch_cover(current_url, proxy)
+        if current and _image_dimensions(current) != (0, 0):
+            return current
+        _log(f"现有封面地址不可用，按番号切换备用来源：{code} ← {current_url[:60]}")
+
+    enabled = _enabled_artwork_sources(code, config)
+    # JavDB is the authoritative guarded fallback when enabled. Other enabled
+    # sources remain available after it, so a shield outage does not end recovery.
+    priority = {"javdb": 0, "javbus": 1, "dmm": 2, "avsox": 3,
+                "avmoo": 4, "jav321": 5, "fc2": 6}
+    for source in sorted(dict.fromkeys(enabled), key=lambda s: priority.get(s, 99)):
+        rows, status = await search_source_status(
+            code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=3)
+        item = _source_item_for_code(rows, code)
+        if not item:
+            _log(f"封面备用来源未命中：{code} ← {source}（状态 {status}）")
+            continue
+
+        candidates = [(item.get("cover") or "").strip()]
+        detail = None
+        detail_url = (item.get("url") or "").strip()
+        # The list cover is normally enough. If it is stale, consult the guarded
+        # detail endpoint; this is especially important for JavDB's current CDN URL.
+        for candidate_url in list(candidates):
+            data = await _fetch_cover(candidate_url, proxy) if candidate_url else None
+            if data and _image_dimensions(data) != (0, 0):
+                movie["cover"] = candidate_url
+                movie["poster_source"] = source
+                movie.setdefault("source_urls", {})[source] = detail_url
+                _merge_artwork(movie, item, source)
+                if (_is_placeholder_title(movie.get("title", ""), code)
+                        and not _is_placeholder_title(item.get("title", ""), code)):
+                    movie["title"] = item["title"]
+                    _log(f"封面恢复同时校正标题：{code} ← {source}")
+                _log(f"封面备用来源恢复成功：{code} ← {source}")
+                return data
+
+        if detail_url:
+            try:
+                from scrapers import enrich
+                resolved = await enrich(
+                    [{"url": detail_url, "source": source, "code": code}],
+                    proxy=proxy, concurrency=1, per_timeout=15.0, with_status=True)
+                entry = resolved[0] if resolved else (None, "error")
+                detail, detail_status = entry if isinstance(entry, tuple) else (
+                    entry, "ok" if entry else "empty")
+                detail_cover = (detail or {}).get("cover", "").strip()
+                if detail_cover and detail_cover not in candidates:
+                    data = await _fetch_cover(detail_cover, proxy)
+                    if data and _image_dimensions(data) != (0, 0):
+                        movie["cover"] = detail_cover
+                        movie["poster_source"] = source
+                        movie.setdefault("source_urls", {})[source] = detail_url
+                        _merge_artwork(movie, detail, source)
+                        if (_is_placeholder_title(movie.get("title", ""), code)
+                                and not _is_placeholder_title(detail.get("title", ""), code)):
+                            movie["title"] = detail["title"]
+                            _log(f"封面详情回源同时校正标题：{code} ← {source}")
+                        _log(f"封面详情回源恢复成功：{code} ← {source}")
+                        return data
+                if detail_status in {"timeout", "error"}:
+                    status = detail_status
+            except Exception as e:
+                status = f"error: {e}"
+        _log(f"封面备用来源图片不可用：{code} ← {source}（状态 {status}）")
+    return None
+
+
+def _is_placeholder_title(title: str, code: str = "") -> bool:
+    """Identify scraper/source labels that were accidentally returned as a movie title."""
+    text = (title or "").strip()
+    if code:
+        pattern = re.escape(code).replace(r"\-", r"[-_ ]?")
+        text = re.sub(r"^\s*" + pattern + r"[\s:：_-]*", "", text,
+                      flags=re.IGNORECASE).strip()
+    # A remaining Japanese title is substantive metadata, never a source label.
+    if re.search(r"[぀-ヿ㐀-鿿]", text):
+        return False
+    compact = re.sub(r"[^a-z0-9]", "", text.casefold())
+    return compact in {
+        "", "dmm", "fanza", "jav321", "jav321dmm", "jav321fanza",
+        "javdb", "javbus", "avsox", "avmoo", "detail", "dvd",
+    }
+
+
+async def _repair_placeholder_metadata(movie: dict, code: str, config: dict,
+                                       proxy: Optional[str]) -> dict:
+    """Replace a known placeholder title from an exact-code authoritative source."""
+    if not _is_placeholder_title(movie.get("title", ""), code):
+        return movie
+    enabled = _enabled_artwork_sources(code, config)
+    priority = {"javdb": 0, "javbus": 1, "dmm": 2, "avsox": 3,
+                "avmoo": 4, "fc2": 5}
+    for source in sorted((s for s in dict.fromkeys(enabled) if s != "jav321"),
+                         key=lambda s: priority.get(s, 99)):
+        rows, status = await search_source_status(
+            code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=3)
+        item = _source_item_for_code(rows, code)
+        if not item:
+            _log(f"标题校正来源未命中：{code} ← {source}（状态 {status}）")
+            continue
+        candidate = item
+        if _is_placeholder_title(candidate.get("title", ""), code) and item.get("url"):
+            try:
+                from scrapers import enrich
+                resolved = await enrich(
+                    [{"url": item["url"], "source": source, "code": code}],
+                    proxy=proxy, concurrency=1, per_timeout=15.0, with_status=True)
+                entry = resolved[0] if resolved else (None, "error")
+                detail = entry[0] if isinstance(entry, tuple) else entry
+                if detail:
+                    candidate = detail
+            except Exception as e:
+                _log(f"标题校正详情回源失败：{code} ← {source}: {e}")
+        title = (candidate.get("title") or "").strip()
+        if _is_placeholder_title(title, code):
+            continue
+        old_title = movie.get("title", "")
+        movie["title"] = title
+        movie.setdefault("source_urls", {})[source] = (
+            item.get("url") or candidate.get("url", ""))
+        # Keep useful detail fields while preserving non-placeholder metadata
+        # already supplied by the selected source.
+        for field in ("description", "release_date", "duration", "director",
+                      "studio", "label", "series", "score", "score_count"):
+            if not movie.get(field) and candidate.get(field):
+                movie[field] = candidate[field]
+        for field in ("actors", "tags", "samples", "magnets"):
+            if not movie.get(field) and candidate.get(field):
+                movie[field] = list(candidate[field])
+        _log(f"标题占位内容已校正：{code}《{old_title}》→《{title}》（{source}）")
+        return movie
+    _log(f"标题疑似占位内容但备用来源未能校正：{code}《{movie.get('title', '')}》")
     return movie
 
 
@@ -2178,6 +2343,12 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     # setting; no background sample-art search is scheduled.
     await _ensure_cover(movie, code, proxy)
     await _enhance_artwork_jav321(movie, code, proxy)
+    # URL 非空仍可能是已过期的签名地址。以真实可解析的图片字节作为成功标准，
+    # 并让已启用的 JavDB 通过过盾流程承担首个权威修复来源。
+    resolved_cover_bytes = await _ensure_downloadable_cover(movie, code, config, proxy)
+    # JAV321 等来源偶尔只返回站点占位词（如“JAV321 dmm”）。必须先按
+    # 精确番号从已启用的 JavDB/JavBus 校正，之后才能可靠判断是否需要日文翻译。
+    await _repair_placeholder_metadata(movie, code, config, proxy)
 
     # ── 标题/简介翻译 ──
     # 番号（字母+数字）不翻译，仅作前缀；只对真正的日文片名/简介长句翻译。
@@ -2246,7 +2417,9 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             or external_subtitle
             or (fanart_url == cover_url and not status["has_fanart"])
             or (jacket_mode and not status["has_fanart"]))
-        img = await _fetch_cover(cover_url, proxy) if need_cover_bytes else None
+        img = resolved_cover_bytes if need_cover_bytes else None
+        if need_cover_bytes and not img:
+            img = await _fetch_cover(cover_url, proxy)
         if img:
             try:
                 jacket = img
@@ -2902,7 +3075,8 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
                   keep_bytes: int = 300 * 1024 * 1024,
                   multipart_parts: Optional[list] = None,
                   subfolder_name: str = "",
-                  require_sidecars: bool = False) -> dict:
+                  require_sidecars: bool = False,
+                  keep_actor_images: bool = True) -> dict:
     """
     把视频归档到 归档目录/年月/番号/ 子目录下（Emby 单片单目录布局）。
     rename：开（刮削开）= 视频改名「番号.后缀」、随带番号命名的 NFO/封面；
@@ -3077,20 +3251,21 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
                     continue
             _log(f"归档提示：未找到附属文件 {dst_name}")
 
-    # 3) 演员头像本地缓存始终随影片归档；它是保底缓存，不依赖 Emby 全局 people 映射。
-    # 新版本使用可见的 actors；旧版 .actors 也合并进去，避免升级后丢失缓存。
-    actor_roots = [folder / "actors", folder / ".actors"]
-    if sidecar_dir:
-        actor_roots = [Path(sidecar_dir) / "actors", Path(sidecar_dir) / ".actors"] + actor_roots
-    for actors_src in actor_roots:
-      if actors_src.is_dir():
-        actors_dst = target_dir / "actors"
-        actors_dst.mkdir(parents=True, exist_ok=True)
-        for actor_img in actors_src.iterdir():
-            if not actor_img.is_file():
-                continue
-            if _transfer(actor_img, actors_dst / actor_img.name, sub_mode):
-                done.append(f"actors/{actor_img.name}")
+    # 3) 默认仍将演员头像随影片归档；用户可只保留全局缓存，从而不在
+    # 每部影片目录创建 actors。Emby API 会从内部暂存的本地图片读取字节。
+    if keep_actor_images:
+        actor_roots = [folder / "actors", folder / ".actors"]
+        if sidecar_dir:
+            actor_roots = [Path(sidecar_dir) / "actors", Path(sidecar_dir) / ".actors"] + actor_roots
+        for actors_src in actor_roots:
+          if actors_src.is_dir():
+            actors_dst = target_dir / "actors"
+            actors_dst.mkdir(parents=True, exist_ok=True)
+            for actor_img in actors_src.iterdir():
+                if not actor_img.is_file():
+                    continue
+                if _transfer(actor_img, actors_dst / actor_img.name, sub_mode):
+                    done.append(f"actors/{actor_img.name}")
 
     if require_sidecars:
         required = [target_dir / video_name, target_dir / f"{media_stem}.nfo",
@@ -3464,7 +3639,8 @@ async def _process_completed_file(video_path: Path, config: dict,
                            sidecar_dir=Path(sidecar_dir),
                            min_bytes=min_bytes, keep_bytes=keep_bytes,
                            multipart_parts=multipart_parts,
-                           require_sidecars=scrape_meta)
+                           require_sidecars=scrape_meta,
+                           keep_actor_images=config.get("scrape_actor_images_in_movie_dir", True))
         if mv.get("archived") and mode == "move":
             try:
                 video_path.unlink()
@@ -3798,7 +3974,8 @@ async def _scan_once(config: dict) -> int:
             final_status = "success" if rec.get("scrape_ok") and (
                 rec.get("moved") or rec.get("note") or not config.get("archive_enabled", True)) else "failed"
             _task_update(rec.get("code") or task_code, file=rec.get("file") or vf.name,
-                         filepath=fp, status=final_status, current="completed",
+                         filepath=fp, status=final_status,
+                         current="completed" if final_status == "success" else "failed",
                          scrape_status="success" if rec.get("scrape_ok") else "failed",
                          archive_status="success" if rec.get("moved") else ("skipped" if rec.get("note") else "failed"),
                          error=rec.get("scrape_error") or rec.get("archive_error") or "",
@@ -3830,6 +4007,20 @@ async def _scan_once(config: dict) -> int:
     return processed
 
 
+async def _scan_serialized(config: dict, reset_recent: bool = False) -> int:
+    """Run one scan at a time so a manual scan cannot overlap an older monitor pass."""
+    async with _scan_lock:
+        if reset_recent:
+            _monitor_state["recent"] = []
+            _monitor_state["processed_total"] = 0
+            # Paths remembered only for this process may now refer to files
+            # deleted and recreated by the user. Re-evaluate them on an
+            # explicit scan; successfully archived files remain protected by
+            # the persistent path+size signatures loaded inside _scan_once.
+            _processed.clear()
+        return await _scan_once(config)
+
+
 def _monitor_should_run(config: dict) -> bool:
     """监控是否该运行：刮削、规整、归档任一开启即运行。"""
     scrape_meta = config.get("scrape_meta_enabled", True)
@@ -3854,7 +4045,7 @@ async def _monitor_loop():
         _monitor_state["output_dir"] = config.get("scrape_output_dir", "")
         _monitor_state["scanning"] = True
         try:
-            n = await _scan_once(config)
+            n = await _scan_serialized(config)
             _monitor_state["last_scan"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             _monitor_state["message"] = f"上次扫描处理 {n} 个文件" if n else "空闲中"
         except Exception as e:
@@ -3911,13 +4102,18 @@ async def api_monitor_status():
 
 
 @router.get("/tasks")
-async def api_tasks(status: str = "", limit: int = 200):
-    """返回按番号聚合的任务摘要；只读展示，不影响后台任务。"""
+async def api_tasks(status: str = "", limit: int = 200, q: str = ""):
+    """返回按源文件保存的任务摘要；只读展示，不影响后台任务。"""
     _load_tasks()
     wanted = {x.strip().lower() for x in (status or "").split(",") if x.strip()}
     rows = sorted(_tasks.values(), key=lambda x: x.get("updated_at", ""), reverse=True)
     if wanted:
         rows = [x for x in rows if str(x.get("status", "")).lower() in wanted]
+    query = (q or "").strip().casefold()
+    if query:
+        rows = [x for x in rows if query in " ".join((
+            str(x.get("code", "")), str(x.get("file", "")),
+            str(x.get("filepath", "")), str(x.get("error", "")))).casefold()]
     return {"success": True, "total": len(rows), "tasks": rows[:max(1, min(int(limit or 200), 2000))]}
 
 
@@ -3928,9 +4124,10 @@ async def api_tasks_delete(codes: str = "", status: str = ""):
     code_set = {x.strip() for x in (codes or "").split(",") if x.strip()}
     status_set = {x.strip().lower() for x in (status or "").split(",") if x.strip()}
     before = len(_tasks)
-    for code, item in list(_tasks.items()):
-        if (code_set and code in code_set) or (status_set and str(item.get("status", "")).lower() in status_set):
-            _tasks.pop(code, None)
+    for storage_key, item in list(_tasks.items()):
+        if ((code_set and str(item.get("code", "")) in code_set)
+                or (status_set and str(item.get("status", "")).lower() in status_set)):
+            _tasks.pop(storage_key, None)
     _save_tasks()
     return {"success": True, "deleted": before - len(_tasks)}
 
@@ -3944,12 +4141,17 @@ async def api_monitor_refresh():
 
 @router.post("/scrape/run-once")
 async def api_run_once():
-    """立即手动触发一次扫描（不依赖监控开关）"""
+    """立即手动触发一次扫描（按已保存设置，不依赖监控开关）。"""
     config = load_config()
-    if not config.get("scrape_watch_dir"):
+    watch = (config.get("scrape_watch_dir") or "").strip()
+    output = (config.get("scrape_output_dir") or "").strip()
+    if not watch:
         raise HTTPException(status_code=400, detail="未配置监控目录")
-    n = await _scan_once(config)
-    return {"success": True, "processed": n, "recent": _monitor_state["recent"][:10]}
+    if not Path(watch).is_dir():
+        raise HTTPException(status_code=400, detail=f"监控目录不存在或不可访问: {watch}")
+    n = await _scan_serialized(config, reset_recent=True)
+    return {"success": True, "processed": n, "watch_dir": watch,
+            "output_dir": output, "recent": _monitor_state["recent"][:10]}
 
 
 @router.post("/scrape/archive/sync-sidecars")
@@ -4020,7 +4222,8 @@ async def api_scrape_single(req: ScrapeRequest):
             sidecar_dir=Path(result.get("sidecar_dir") or video_path.parent),
             min_bytes=int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024,
             keep_bytes=int(config.get("scrape_keep_size_mb", 300)) * 1024 * 1024,
-            require_sidecars=True)
+            require_sidecars=True,
+            keep_actor_images=config.get("scrape_actor_images_in_movie_dir", True))
         if mv.get("archived") and requested_mode == "move":
             try:
                 video_path.unlink()

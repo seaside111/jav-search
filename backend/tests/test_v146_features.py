@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -128,6 +129,61 @@ class JavDbFlareSolverrTests(unittest.TestCase):
         self.assertEqual(result["samples"], ["https://jav321/wide.jpg"])
         self.assertEqual(result["poster_source"], "jav321")
 
+    def test_expired_cover_is_repaired_from_enabled_javdb(self):
+        buf = BytesIO()
+        Image.new("RGB", (800, 1200), "blue").save(buf, format="JPEG")
+        valid_jpeg = buf.getvalue()
+        searched = []
+
+        async def fake_fetch(url, _proxy):
+            return valid_jpeg if "jdbstatic" in url else None
+
+        async def fake_search(code, mode, source, **_kwargs):
+            searched.append(source)
+            if source == "javdb":
+                return ([{"code": code, "source": "JavDB",
+                          "url": "https://javdb.com/v/iesp189",
+                          "cover": "https://c0.jdbstatic.com/covers/ie/iesp189.jpg"}], "ok")
+            return ([], "empty")
+
+        movie = {"code": "IESP-189", "source": "JAV321",
+                 "cover": "http://expired.cloudfront.example/cover.jpg",
+                 "samples": []}
+        with mock.patch.object(library, "_fetch_cover", side_effect=fake_fetch), \
+                mock.patch.object(library, "search_source_status", side_effect=fake_search):
+            data = asyncio.run(library._ensure_downloadable_cover(
+                movie, "IESP-189", {"sources": ["javbus", "javdb"]}, None))
+
+        self.assertEqual(data, valid_jpeg)
+        self.assertEqual(searched[0], "javdb")
+        self.assertEqual(movie["poster_source"], "javdb")
+        self.assertIn("jdbstatic.com/covers/", movie["cover"])
+
+    def test_jav321_placeholder_title_is_repaired_before_translation(self):
+        searched = []
+
+        async def fake_search(code, mode, source, **_kwargs):
+            searched.append(source)
+            if source == "javdb":
+                return ([{"code": code, "source": "JavDB",
+                          "url": "https://javdb.com/v/sddm934",
+                          "title": "SDDM-934 痴女アクメ地獄",
+                          "release_date": "2006-08-17"}], "ok")
+            return ([], "empty")
+
+        movie = {"code": "SDDM-934", "source": "JAV321",
+                 "title": "JAV321 dmm", "description": ""}
+        with mock.patch.object(library, "search_source_status", side_effect=fake_search):
+            result = asyncio.run(library._repair_placeholder_metadata(
+                movie, "SDDM-934", {"sources": ["javbus", "javdb"]}, None))
+
+        self.assertEqual(searched[0], "javdb")
+        self.assertEqual(result["title"], "SDDM-934 痴女アクメ地獄")
+        self.assertTrue(library._has_jp(
+            library._strip_code_prefix(result["title"], "SDDM-934")))
+        self.assertFalse(library._is_placeholder_title(
+            "SDDM-934 Beautiful Teacher", "SDDM-934"))
+
     def test_downloader_completion_requires_whole_torrent_state(self):
         self.assertFalse(downloader.is_download_complete(
             {"downloader_type": "qb"},
@@ -186,6 +242,36 @@ class JavDbFlareSolverrTests(unittest.TestCase):
                 "https://img.jav321/sample-1.jpg", None))
         self.assertEqual(data, b"cached-image")
         cached.assert_awaited_once_with("https://img.jav321/sample-1.jpg")
+
+    def test_image_cache_rejects_html_challenge_and_accepts_raster_signatures(self):
+        self.assertFalse(main._valid_image_bytes(
+            b"<!doctype html><title>Just a moment...</title>"))
+        self.assertTrue(main._valid_image_bytes(
+            b"\xff\xd8\xff\xe0" + b"\x00" * 20))
+        self.assertTrue(main._valid_image_bytes(
+            b"\x89PNG\r\n\x1a\n" + b"\x00" * 20))
+
+    def test_disk_image_cache_removes_historical_invalid_entry(self):
+        original_dir = main._IMG_DISK_DIR
+        original_enabled = main._IMG_DISK_ENABLED
+        with tempfile.TemporaryDirectory() as raw:
+            main._IMG_DISK_DIR = Path(raw)
+            main._IMG_DISK_ENABLED = True
+            url = "https://cdn.example/cover.jpg"
+            bad = main._img_disk_path(url, "image/jpeg")
+            bad.write_bytes(b"<html>challenge</html>")
+            try:
+                self.assertIsNone(main._img_disk_get_sync(url))
+                self.assertFalse(bad.exists())
+            finally:
+                main._IMG_DISK_DIR = original_dir
+                main._IMG_DISK_ENABLED = original_enabled
+
+    def test_frontend_cover_failure_retries_before_placeholder(self):
+        html = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
+            encoding="utf-8")
+        self.assertGreaterEqual(html.count("this.src=this.src+'&retry=1'"), 4)
+        self.assertIn("this.dataset.coverTry='thumb-retry'", html)
 
     def test_frontend_detail_failures_remain_retryable(self):
         html = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
@@ -728,6 +814,293 @@ class VideoClassificationTests(unittest.TestCase):
             finally:
                 actor_scraper.emby.sync_person_images = original_sync
         self.assertEqual(result["emby_updated"], 1)
+
+    def test_actor_portrait_sync_without_visible_movie_actors_folder(self):
+        original_download = actor_scraper._download
+        original_sync = actor_scraper.emby.sync_person_images
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            folder = root / "archive" / "ABC-123"
+            cache = root / "cache"
+            folder.mkdir(parents=True)
+            nfo = folder / "ABC-123.nfo"
+            nfo.write_text("<movie><uniqueid>ABC-123</uniqueid></movie>", encoding="utf-8")
+            tree = actor_scraper.ET.parse(nfo)
+
+            async def fake_download(_url, _proxy, with_status=False):
+                value = b"local-portrait" * 200
+                return (value, "ok") if with_status else value
+
+            async def fake_sync(_url, _key, portraits, **_kwargs):
+                self.assertEqual(portraits[0]["image"], b"local-portrait" * 200)
+                return {"results": [{"name": "Actor A", "updated": True,
+                                     "message": "ok"}], "retryable": False}
+
+            config = {
+                "scrape_actor_images_in_movie_dir": False,
+                "actor_scrape_cache_dir": str(cache),
+                "actor_scrape_sources": ["javbus"],
+                "actor_scrape_lookup_by_code": False,
+                "actor_scrape_write_nfo": True,
+                "emby_actor_sync_enabled": True,
+                "emby_url": "http://emby:8096", "emby_api_key": "key",
+            }
+            actor_scraper._download = fake_download
+            actor_scraper.emby.sync_person_images = fake_sync
+            try:
+                result = asyncio.run(actor_scraper.process_movie(
+                    folder, [{"name": "Actor A", "avatar": "https://img/a.jpg"}],
+                    "ABC-123", config, nfo, tree))
+            finally:
+                actor_scraper._download = original_download
+                actor_scraper.emby.sync_person_images = original_sync
+
+            self.assertEqual(result["emby_updated"], 1)
+            self.assertFalse((folder / "actors").exists())
+            self.assertTrue((cache / "Actor A" / "portrait.jpg").exists())
+            self.assertFalse((cache / "movie-staging").exists())
+
+    def test_actor_folder_setting_defaults_to_compatible_visible_storage(self):
+        self.assertTrue(DEFAULT_CONFIG["scrape_actor_images_in_movie_dir"])
+        frontend = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
+            encoding="utf-8")
+        self.assertIn('id="cfgActorImagesInMovieDir" checked', frontend)
+        self.assertIn("scrape_actor_images_in_movie_dir: document.getElementById", frontend)
+
+    def test_hidden_actor_storage_survives_retry_and_rehydrates_from_global_cache(self):
+        original_sync = actor_scraper.emby.sync_person_images
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            folder, cache = root / "movie", root / "cache"
+            folder.mkdir()
+            portrait = cache / "Actor A" / "portrait.jpg"
+            portrait.parent.mkdir(parents=True)
+            portrait.write_bytes(b"cached-portrait" * 200)
+            config = {"scrape_actor_images_in_movie_dir": False,
+                      "actor_scrape_cache_dir": str(cache),
+                      "emby_actor_sync_enabled": True,
+                      "emby_url": "http://emby", "emby_api_key": "key"}
+            calls = 0
+
+            async def fake_sync(_url, _key, portraits, **_kwargs):
+                nonlocal calls
+                calls += 1
+                self.assertEqual(portraits[0]["image"], b"cached-portrait" * 200)
+                if calls == 1:
+                    return {"results": [{"name": "Actor A", "updated": False,
+                                         "message": "pending"}], "retryable": True,
+                            "pending_names": ["Actor A"]}
+                return {"results": [{"name": "Actor A", "updated": True,
+                                     "message": "ok"}], "retryable": False}
+
+            actor_scraper.emby.sync_person_images = fake_sync
+            try:
+                first = asyncio.run(actor_scraper.sync_emby_folder(
+                    folder, config, "ABC-123", [{"name": "Actor A"}]))
+                staging = actor_scraper._movie_portrait_dir(folder, config)
+                self.assertTrue((staging / "Actor A.jpg").exists())
+                shutil.rmtree(staging.parent)
+                second = asyncio.run(actor_scraper.sync_emby_folder(
+                    folder, config, "ABC-123", [{"name": "Actor A"}]))
+            finally:
+                actor_scraper.emby.sync_person_images = original_sync
+
+            self.assertTrue(first["retryable"])
+            self.assertEqual(second["emby_updated"], 1)
+            self.assertFalse((folder / "actors").exists())
+            self.assertFalse((cache / "movie-staging").exists())
+
+    def test_archive_can_omit_actor_folder(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source, output = root / "source", root / "output"
+            source.mkdir()
+            video = source / "ABC-123.mp4"
+            video.write_bytes(b"video")
+            actors = source / "actors"
+            actors.mkdir()
+            (actors / "Actor A.jpg").write_bytes(b"portrait")
+            result = library._archive_file(
+                video, str(output), "ABC-123", mode="copy", rename=False,
+                by_month=False, keep_actor_images=False)
+            self.assertTrue(result["archived"])
+            self.assertFalse((output / "ABC-123" / "actors").exists())
+            self.assertTrue((actors / "Actor A.jpg").exists())
+
+    def test_forced_actor_rescan_requeries_code_and_replaces_wrong_portrait(self):
+        original_lookup = actor_scraper._actors_by_code
+        original_download = actor_scraper._download
+        downloaded = []
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            folder, cache = root / "movie", root / "cache"
+            folder.mkdir()
+            actors_dir = folder / "actors"
+            actors_dir.mkdir()
+            (actors_dir / "Actor A.jpg").write_bytes(b"wrong" * 500)
+            cached = cache / "Actor A"
+            cached.mkdir(parents=True)
+            (cached / "portrait.jpg").write_bytes(b"wrong" * 500)
+            (cached / "metadata.json").write_text(
+                '{"url":"https://wrong.test/a.jpg"}', encoding="utf-8")
+            nfo = folder / "ABC-123.nfo"
+            nfo.write_text(
+                "<movie><uniqueid>ABC-123</uniqueid><actor><name>Actor A</name>"
+                "<thumb>https://wrong.test/a.jpg</thumb></actor></movie>", encoding="utf-8")
+
+            async def fake_lookup(code, sources, _proxy, wanted=None):
+                self.assertEqual(code, "ABC-123")
+                self.assertEqual(sources, ["javbus"])
+                self.assertEqual(wanted, ["Actor A"])
+                return [{"name": "Actor A", "avatar": "https://correct.test/a.jpg"}]
+
+            async def fake_download(url, _proxy, with_status=False):
+                downloaded.append(url)
+                image = b"correct" * 500
+                return (image, "ok") if with_status else image
+
+            actor_scraper._actors_by_code = fake_lookup
+            actor_scraper._download = fake_download
+            try:
+                result = asyncio.run(actor_scraper.process_nfo(
+                    nfo, {"actor_scrape_cache_dir": str(cache),
+                          "actor_scrape_sources": ["javbus"],
+                          "actor_scrape_write_nfo": True,
+                          "scrape_actor_thumb_in_nfo": True},
+                    overwrite=True, sync_emby=False))
+            finally:
+                actor_scraper._actors_by_code = original_lookup
+                actor_scraper._download = original_download
+
+            self.assertEqual(result["saved"], 1)
+            self.assertEqual(downloaded, ["https://correct.test/a.jpg"])
+            self.assertEqual((actors_dir / "Actor A.jpg").read_bytes(), b"correct" * 500)
+            self.assertEqual((cached / "portrait.jpg").read_bytes(), b"correct" * 500)
+            written = nfo.read_text(encoding="utf-8")
+            self.assertIn("https://correct.test/a.jpg", written)
+            self.assertNotIn("https://wrong.test/a.jpg", written)
+
+    def test_forced_actor_rescan_button_describes_full_directory_refresh(self):
+        frontend = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
+            encoding="utf-8")
+        self.assertIn("强制重扫设定目录", frontend)
+        self.assertIn("忽略旧头像 URL 和缓存", frontend)
+        self.assertIn("JSON.stringify({root, overwrite: !!overwrite})", frontend)
+
+    def test_manual_library_scan_clears_old_recent_rows(self):
+        previous_recent = library._monitor_state["recent"]
+        previous_total = library._monitor_state["processed_total"]
+        previous_processed = set(library._processed)
+        library._monitor_state["recent"] = [{"file": "deleted-old-file.mp4"}]
+        library._monitor_state["processed_total"] = 9
+        library._processed.add("deleted-old-file.mp4")
+        try:
+            with mock.patch.object(library, "_scan_once", mock.AsyncMock(return_value=0)):
+                result = asyncio.run(library._scan_serialized({}, reset_recent=True))
+            self.assertEqual(result, 0)
+            self.assertEqual(library._monitor_state["recent"], [])
+            self.assertEqual(library._monitor_state["processed_total"], 0)
+            self.assertEqual(library._processed, set())
+        finally:
+            library._monitor_state["recent"] = previous_recent
+            library._monitor_state["processed_total"] = previous_total
+            library._processed.clear()
+            library._processed.update(previous_processed)
+
+    def test_manual_scan_uses_saved_paths_and_reports_them(self):
+        with tempfile.TemporaryDirectory() as raw:
+            config = {"scrape_watch_dir": raw, "scrape_output_dir": str(Path(raw) / "output")}
+            with mock.patch.object(library, "load_config", return_value=config), \
+                    mock.patch.object(library, "_scan_serialized",
+                                      mock.AsyncMock(return_value=0)) as scan:
+                result = asyncio.run(library.api_run_once())
+            scan.assert_awaited_once_with(config, reset_recent=True)
+            self.assertEqual(result["watch_dir"], raw)
+            self.assertEqual(result["output_dir"], str(Path(raw) / "output"))
+
+    def test_manual_scan_button_saves_settings_before_request(self):
+        frontend = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
+            encoding="utf-8")
+        function = frontend[frontend.index("async function runScrapeOnce()"):
+                            frontend.index("async function syncArchiveSidecars()")]
+        self.assertLess(function.index("await saveSettings(false)"),
+                        function.index("/api/library/scrape/run-once"))
+        self.assertGreater(function.rindex("/api/library/scrape/monitor/refresh"),
+                           function.index("/api/library/scrape/run-once"))
+        self.assertIn("保存设置并立即扫描", frontend)
+        self.assertIn("扫描目录：${data.watch_dir", function)
+
+    def test_failed_tasks_with_same_code_are_kept_per_source_file(self):
+        original_tasks = library._tasks
+        original_loaded = library._tasks_loaded
+        original_file = library._TASKS_FILE
+        with tempfile.TemporaryDirectory() as raw:
+            library._tasks = {}
+            library._tasks_loaded = True
+            library._TASKS_FILE = Path(raw) / "tasks.json"
+            try:
+                library._task_update(
+                    "KIRAY-052", file="KIRAY-052.mp4", filepath="/move/one/KIRAY-052.mp4",
+                    status="failed", scrape_status="failed", archive_status="failed",
+                    error="NFO 未创建; poster 未创建; fanart 未创建")
+                library._task_update(
+                    "KIRAY-052", file="KIRAY-052-CD2.mp4", filepath="/move/two/KIRAY-052-CD2.mp4",
+                    status="success", scrape_status="success", archive_status="success")
+                failed = asyncio.run(library.api_tasks(status="failed", q="kiray-052"))
+                all_rows = asyncio.run(library.api_tasks(q="KIRAY"))
+            finally:
+                library._tasks = original_tasks
+                library._tasks_loaded = original_loaded
+                library._TASKS_FILE = original_file
+        self.assertEqual(failed["total"], 1)
+        self.assertEqual(failed["tasks"][0]["file"], "KIRAY-052.mp4")
+        self.assertEqual(all_rows["total"], 2)
+
+    def test_task_page_exposes_failure_search_and_count(self):
+        frontend = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
+            encoding="utf-8")
+        self.assertIn('id="taskSearch"', frontend)
+        self.assertIn('id="taskCount"', frontend)
+        self.assertIn("&q=${encodeURIComponent(query)}", frontend)
+
+    def test_failed_scan_final_state_is_not_marked_completed(self):
+        previous_processed = set(library._processed)
+        previous_recent = list(library._monitor_state["recent"])
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            video = root / "KIRAY-052.mp4"
+            video.write_bytes(b"video")
+            failed = {"file": video.name, "code": "KIRAY-052", "scrape_ok": False,
+                      "scrape_error": "NFO 未创建; poster 未创建; fanart 未创建",
+                      "moved": False, "note": "刮削失败，源文件已保留且未规整",
+                      "time": "2026-09-07 10:22:16"}
+            updates = []
+            library._processed.clear()
+            try:
+                with mock.patch.object(library, "_download_state_snapshot",
+                                       mock.AsyncMock(return_value=(True, []))), \
+                        mock.patch.object(library, "_manual_group_stability",
+                                          return_value=(True, 2, 300)), \
+                        mock.patch.object(library, "_manual_file_stability",
+                                          return_value=(True, 2, 300)), \
+                        mock.patch.object(library, "_process_completed_file",
+                                          mock.AsyncMock(return_value=failed)), \
+                        mock.patch.object(library, "_task_update",
+                                          side_effect=lambda code, **changes:
+                                          updates.append((code, changes))):
+                    asyncio.run(library._scan_once({
+                        "scrape_watch_dir": str(root), "scrape_output_dir": "",
+                        "scrape_min_size_mb": 0, "scrape_keep_size_mb": 1,
+                    }))
+            finally:
+                library._processed.clear()
+                library._processed.update(previous_processed)
+                library._monitor_state["recent"] = previous_recent
+        final = updates[-1][1]
+        self.assertEqual(final["status"], "failed")
+        self.assertEqual(final["current"], "failed")
+        self.assertEqual(final["scrape_status"], "failed")
+        self.assertEqual(final["archive_status"], "skipped")
 
     def test_cached_actor_metadata_restores_thumb_url_into_nfo(self):
         with tempfile.TemporaryDirectory() as raw:
