@@ -1,4 +1,4 @@
-"""Optional JAV321 scraper, primarily used for artwork backfill."""
+"""Legacy JAV321 parser retained for import compatibility; not runtime-registered."""
 import re
 from typing import Optional
 from urllib.parse import urljoin

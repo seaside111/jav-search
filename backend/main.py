@@ -44,8 +44,8 @@ _VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
 try:
     _IMAGE_VERSION = _VERSION_FILE.read_text(encoding="utf-8").strip()
 except (OSError, UnicodeError):
-    _IMAGE_VERSION = "1.4.6.25"
-APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.25"
+    _IMAGE_VERSION = "1.4.6.26"
+APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.26"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -756,10 +756,6 @@ async def api_detail_resolve(req: ResolveDetailRequest):
         return {"success": True, "status": "disabled", "detail": None}
     proxy = config.get("proxy") or None
     url = (req.url or "").strip()
-    # JAV321 的详情由 POST /search 返回，响应 URL 往往仍是 /search，不能靠随后 GET
-    # 可靠复现；即使前端带来了该 URL，也应按番号重新 POST 搜索并直接复用解析结果。
-    if source == "jav321":
-        url = ""
     try:
         seed = None
         if not url:

@@ -197,6 +197,11 @@ def _mark_processed(video_path: Path, size: int) -> None:
 
 _monitor_task: Optional[asyncio.Task] = None
 _scan_lock = asyncio.Lock()
+_jav321_retry_task: Optional[asyncio.Task] = None
+_jav321_retry_state: dict = {
+    "running": False, "total": 0, "processed": 0, "recovered": 0,
+    "failed": 0, "message": "尚未运行", "last_run": "",
+}
 _monitor_state: dict = {
     "running": False,
     "enabled": False,
@@ -1375,14 +1380,14 @@ def _source_item_for_code(rows: list[dict], code: str) -> Optional[dict]:
 
 
 async def _ensure_cover(movie: dict, code: str, proxy: Optional[str]) -> dict:
-    """Fill only a missing cover: JAV321 first, shielded JavDB last.
+    """Fill a missing cover from the guarded JavDB fallback.
 
     This is intentionally a one-shot fallback used during the initial scrape.
     It does not fetch samples or create a persistent artwork retry task.
     """
     if movie.get("cover"):
         return movie
-    for source in ("jav321", "javdb"):
+    for source in ("javdb",):
         rows, status = await search_source_status(
             code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=3)
         item = _source_item_for_code(rows, code)
@@ -1411,17 +1416,43 @@ async def _ensure_downloadable_cover(movie: dict, code: str, config: dict,
     FlareSolverr path; its detail page is also consulted when the fresh list cover fails.
     """
     current_url = (movie.get("cover") or "").strip()
+    tried_urls: set[str] = set()
+    enabled = _enabled_artwork_sources(code, config)
+    current_source = (movie.get("poster_source") or movie.get("source") or "").strip().lower()
+    if current_source == "jav321":
+        _log(f"忽略历史 JAV321 封面并按番号重新取图：{code}")
+        movie["cover"] = ""
+        current_url = ""
     if current_url:
+        tried_urls.add(current_url)
         current = await _fetch_cover(current_url, proxy)
         if current and _image_dimensions(current) != (0, 0):
             return current
         _log(f"现有封面地址不可用，按番号切换备用来源：{code} ← {current_url[:60]}")
 
-    enabled = _enabled_artwork_sources(code, config)
+    # A merged search keeps each source's cover separately. Validate those
+    # URLs before making another upstream search, so one bad primary source can
+    # never hide a valid JavBus/JavDB image already present in the same result.
+    for candidate in movie.get("cover_candidates") or []:
+        source = (candidate.get("source") or "").strip().lower()
+        if source and source not in enabled:
+            continue
+        for candidate_url in (candidate.get("url"), candidate.get("thumb")):
+            candidate_url = (candidate_url or "").strip()
+            if not candidate_url or candidate_url in tried_urls:
+                continue
+            tried_urls.add(candidate_url)
+            data = await _fetch_cover(candidate_url, proxy)
+            if data and _image_dimensions(data) != (0, 0):
+                movie["cover"] = candidate_url
+                movie["poster_source"] = source
+                _log(f"封面候选恢复成功：{code} ← {source or '合并来源'}")
+                return data
+
     # JavDB is the authoritative guarded fallback when enabled. Other enabled
     # sources remain available after it, so a shield outage does not end recovery.
     priority = {"javdb": 0, "javbus": 1, "dmm": 2, "avsox": 3,
-                "avmoo": 4, "jav321": 5, "fc2": 6}
+                "avmoo": 4, "fc2": 5}
     for source in sorted(dict.fromkeys(enabled), key=lambda s: priority.get(s, 99)):
         rows, status = await search_source_status(
             code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=3)
@@ -1505,8 +1536,7 @@ async def _repair_placeholder_metadata(movie: dict, code: str, config: dict,
     enabled = _enabled_artwork_sources(code, config)
     priority = {"javdb": 0, "javbus": 1, "dmm": 2, "avsox": 3,
                 "avmoo": 4, "fc2": 5}
-    for source in sorted((s for s in dict.fromkeys(enabled) if s != "jav321"),
-                         key=lambda s: priority.get(s, 99)):
+    for source in sorted(dict.fromkeys(enabled), key=lambda s: priority.get(s, 99)):
         rows, status = await search_source_status(
             code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=3)
         item = _source_item_for_code(rows, code)
@@ -1545,52 +1575,6 @@ async def _repair_placeholder_metadata(movie: dict, code: str, config: dict,
         _log(f"标题占位内容已校正：{code}《{old_title}》→《{title}》（{source}）")
         return movie
     _log(f"标题疑似占位内容但备用来源未能校正：{code}《{movie.get('title', '')}》")
-    return movie
-
-
-def _poster_quality(data: Optional[bytes]) -> tuple[bool, int, int, int]:
-    """Return whether artwork is usable plus dimensions and an area score."""
-    if not data:
-        return False, 0, 0, 0
-    width, height = _image_dimensions(data)
-    area = width * height
-    usable = min(width, height) >= 300 and max(width, height) >= 500 and area >= 180_000
-    return usable, width, height, area
-
-
-async def _enhance_artwork_jav321(movie: dict, code: str,
-                                   proxy: Optional[str]) -> dict:
-    """Use fast exact-code JAV321 results to improve weak covers and fanart."""
-    current_url = (movie.get("cover") or "").strip()
-    current_data = await _fetch_cover(current_url, proxy) if current_url else None
-    current_ok, cur_w, cur_h, cur_area = _poster_quality(current_data)
-    rows, status = await search_source_status(
-        code, SEARCH_MODE_CODE, "jav321", proxy=proxy, max_results=1)
-    item = _source_item_for_code(rows, code)
-    if not item:
-        _log(f"JAV321 图片择优未命中：{code}（状态 {status}，保留主来源）")
-        return movie
-
-    candidate_url = (item.get("cover") or "").strip()
-    candidate_data = await _fetch_cover(candidate_url, proxy) if candidate_url else None
-    candidate_ok, cand_w, cand_h, cand_area = _poster_quality(candidate_data)
-    prefer_candidate = bool(movie.pop("_prefer_jav321_cover", False))
-    if candidate_ok and (prefer_candidate or not current_ok
-                         or cand_area >= int(cur_area * 1.25)):
-        movie["cover"] = candidate_url
-        movie["poster_source"] = "jav321"
-        movie.setdefault("source_urls", {})["JAV321"] = item.get("url", "")
-        _log(f"JAV321 封面择优：{code}（{cur_w}x{cur_h} → {cand_w}x{cand_h}）")
-    elif current_url:
-        _log(f"保留主来源封面：{code}（{cur_w}x{cur_h}；JAV321 {cand_w}x{cand_h}）")
-
-    # Prefer the exact-code gallery. This also repairs sample URLs supplied by
-    # an older polluted detail cache; every candidate is dimension-checked.
-    if item.get("samples"):
-        movie["samples"] = list(item["samples"])
-        movie["fanart_source"] = "jav321"
-        movie.setdefault("source_urls", {})["JAV321"] = item.get("url", "")
-        _log(f"JAV321 背景候选：{code}（{len(movie['samples'])} 张，写入前校验横向尺寸）")
     return movie
 
 
@@ -1647,7 +1631,7 @@ def _is_confirmed_jacket_cover(movie: dict, cover_url: str) -> bool:
         return False
     source = (movie.get("poster_source") or movie.get("source") or "").strip().lower()
     if source == "javbus":
-        javbus_cover = "/pics/cover/" in url and bool(
+        javbus_cover = bool(re.search(r"/(?:pics|imgs)/cover/", url)) and bool(
             re.search(r"_b\.(?:jpe?g|png|webp)$", url))
         dmm_package = "pics.dmm.co.jp/" in url and bool(
             re.search(r"pl\.(?:jpe?g|png|webp)$", url))
@@ -1655,11 +1639,6 @@ def _is_confirmed_jacket_cover(movie: dict, cover_url: str) -> bool:
     if source == "javdb":
         return "/covers/" in url and bool(
             re.search(r"\.(?:jpe?g|png|webp)$", url))
-    if source == "jav321":
-        # JAV321's primary col-md-3 image is package artwork. The byte-level
-        # size/aspect gate in _poster_bytes still rejects portrait covers and
-        # ordinary 16:9 stills before cropping.
-        return bool(re.search(r"\.(?:jpe?g|png|webp)$", url))
     return False
 
 
@@ -1726,7 +1705,7 @@ def _merge_artwork(target: dict, detail: dict, source: str = "") -> bool:
 
 def _enabled_artwork_sources(code: str, config: dict) -> list[str]:
     enabled = [s for s in (config.get("sources") or ["javbus", "javdb"])
-               if s in {"javbus", "javdb", "avsox", "avmoo", "fc2", "jav321", "dmm"}]
+               if s in {"javbus", "javdb", "avsox", "avmoo", "fc2", "dmm"}]
     if not _norm(code).startswith("fc2ppv"):
         enabled = [s for s in enabled if s != "fc2"]
     return enabled
@@ -1759,8 +1738,8 @@ async def _backfill_artwork(movie: dict, code: str, config: dict,
     # Prefer sources known to expose independent samples, then the current
     # source. Only enabled sources participate, so user source choices remain
     # authoritative.
-    priority = {"dmm": 0, "jav321": 1, "javdb": 2, "avsox": 3,
-                "avmoo": 4, "fc2": 5, "javbus": 6}
+    priority = {"dmm": 0, "javdb": 1, "avsox": 2,
+                "avmoo": 3, "fc2": 4, "javbus": 5}
     # 缺图时真正按来源逐个尝试。已有详情 URL 直接复用；没有 URL 的来源单独做一次
     # 小范围番号搜索，避免一次聚合搜索中某源超时后候选 URL 丢失。任一来源拿到
     # 独立 fanart 即停止，全部已启用来源都无结果才允许后续先归档。
@@ -1811,7 +1790,7 @@ async def _backfill_artwork(movie: dict, code: str, config: dict,
                     detail = enriched
                     _merge_artwork(movie, enriched, source)
             # 只有确实取得该番号的来源条目/详情才占补查额度。超时、异常、空结果
-            # 都保持 detail=None，继续尝试后面的 JAV321/DMM 等来源。
+            # 都保持 detail=None，继续尝试后面的 DMM/JavDB 等来源。
             if detail:
                 conclusive += 1
             if detail and movie.get("samples"):
@@ -2016,25 +1995,46 @@ async def _run_pending_artwork(config: dict) -> int:
         saved = []
         download_failed = False
         jacket_mode = _use_jacket_artwork(config, movie, poster_url)
-        if (not poster_path.exists() or (jacket_mode and not fanart_path.exists())) and poster_url:
-            data = await _fetch_cover(poster_url, config.get("proxy") or None)
+        cover_data = None
+        if (not poster_path.exists() or not fanart_path.exists()) and poster_url:
+            cover_data = await _fetch_cover(poster_url, config.get("proxy") or None)
+            if cover_data and _image_dimensions(cover_data) == (0, 0):
+                cover_data = None
+            data = cover_data
             if data:
                 jacket = data
-                data, cropped = _poster_bytes(data, jacket_mode)
+                data, cropped = _poster_bytes(cover_data, jacket_mode)
                 if cropped:
                     _log(f"完整横向封套已裁取右侧正面：{code}-poster.jpg")
             if data and _write_artwork_if_missing(poster_path, data):
                 saved.append(poster_path.name)
             elif not poster_path.exists():
                 download_failed = True
-            if data and jacket_mode and not fanart_path.exists() and _write_artwork_if_missing(fanart_path, jacket):
+            if (cover_data and jacket_mode and not fanart_path.exists()
+                    and _write_artwork_if_missing(fanart_path, jacket)):
                 saved.append(fanart_path.name)
         if not jacket_mode and not fanart_path.exists() and fanart_url:
             data, fanart_url = await _fetch_fanart(movie, config.get("proxy") or None)
+            if not data:
+                # Match fresh scraping: samples are optional, and one valid
+                # canonical cover is sufficient for both required artwork files.
+                data = cover_data
+                if data:
+                    _log(f"独立背景图补全失败，已复用主封面：{code}")
             if data and _write_artwork_if_missing(fanart_path, data):
                 saved.append(fanart_path.name)
             elif not fanart_path.exists():
                 download_failed = True
+        if not fanart_path.exists() and poster_path.exists():
+            try:
+                local_poster = poster_path.read_bytes()
+                if (_image_dimensions(local_poster) != (0, 0)
+                        and _write_artwork_if_missing(fanart_path, local_poster)):
+                    saved.append(fanart_path.name)
+                    download_failed = False
+                    _log(f"远程背景图不可用，已复用本地 poster 补齐 fanart：{code}")
+            except OSError as e:
+                _log(f"本地 poster 复用失败：{code}（{e}）")
         if poster_path.exists() and fanart_path.exists():
             _artwork_pending.pop(key, None)
             _save_artwork_pending()
@@ -2290,28 +2290,18 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
             movie.setdefault("source_urls", {})["JavBus"] = verified_item.get("url", "")
             _log(f"推送影片图片已按番号重新核验：{code} ← JavBus")
         else:
-            # JAV321 is the next exact-code direct source and may replace the
-            # unverified pushed cover even when its pixel count is merely equal.
-            movie["_prefer_jav321_cover"] = True
-            _log(f"JavBus 图片核验未命中：{code}，转 JAV321 精确检索")
+            _log(f"JavBus 图片核验未命中：{code}，转 JavDB 精确检索")
     else:
         _log(f"搜索元数据：{code}（首选 JavBus，代理 {'有' if proxy else '无'}）")
         results = await search(query=code, mode=SEARCH_MODE_CODE, proxy=proxy,
                                sources=["javbus"])
         if not results:
-            # Automatic scraping keeps the shielded source out of the normal
-            # path. JAV321 is a lightweight metadata/cover fallback; JavDB is
-            # used only when both the primary and lightweight fallback fail.
-            for source in ("jav321", "javdb"):
+            # JavDB is the guarded exact-code fallback when JavBus has no item.
+            for source in ("javdb",):
                 rows, source_status = await search_source_status(
                     code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=5)
                 candidate = _source_item_for_code(rows, code)
                 if candidate:
-                    if source == "jav321":
-                        # JAV321 samples are an explicit detail-page action;
-                        # automatic scraping only consumes its cover fallback.
-                        candidate = dict(candidate)
-                        candidate["samples"] = []
                     results = [candidate]
                     _log(f"自动刮削兜底命中：{code} ← {source}（状态 {source_status}）")
                     break
@@ -2322,8 +2312,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         # 列表条目可能缺详情，补全第一条
         movie = results[0]
         _log(f"命中影片：{code} 标题《{(movie.get('title') or '')[:40]}》来源 {movie.get('source','')}")
-        if (movie.get("source", "").lower() != "jav321"
-                and not movie.get("actors") and movie.get("url")):
+        if not movie.get("actors") and movie.get("url"):
             try:
                 from scrapers import enrich
                 enriched = await enrich([{"url": movie["url"],
@@ -2342,11 +2331,10 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     # available, poster/fanart are generated locally according to the jacket
     # setting; no background sample-art search is scheduled.
     await _ensure_cover(movie, code, proxy)
-    await _enhance_artwork_jav321(movie, code, proxy)
     # URL 非空仍可能是已过期的签名地址。以真实可解析的图片字节作为成功标准，
     # 并让已启用的 JavDB 通过过盾流程承担首个权威修复来源。
     resolved_cover_bytes = await _ensure_downloadable_cover(movie, code, config, proxy)
-    # JAV321 等来源偶尔只返回站点占位词（如“JAV321 dmm”）。必须先按
+    # 历史缓存或异常来源偶尔只返回站点占位词（如“JAV321 dmm”）。必须先按
     # 精确番号从已启用的 JavDB/JavBus 校正，之后才能可靠判断是否需要日文翻译。
     await _repair_placeholder_metadata(movie, code, config, proxy)
 
@@ -2412,11 +2400,12 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                       or not status["has_fanart"]):
         # 优先复用首页/详情已缓存的封面（命中即零上游请求）；未命中再回源（含 FC2 防盗链兜底）
         _log(f"获取封面（优先复用缓存）：{code} ← {cover_url[:60]}")
+        # One validated cover is the canonical artwork input. Keep its bytes
+        # available whenever either poster or fanart is missing, even if an
+        # optional sample URL exists and later fails.
         need_cover_bytes = (
-            overwrite or not status["has_poster"] or hard_subtitle_repair
-            or external_subtitle
-            or (fanart_url == cover_url and not status["has_fanart"])
-            or (jacket_mode and not status["has_fanart"]))
+            overwrite or not status["has_poster"] or not status["has_fanart"]
+            or hard_subtitle_repair or external_subtitle)
         img = resolved_cover_bytes if need_cover_bytes else None
         if need_cover_bytes and not img:
             img = await _fetch_cover(cover_url, proxy)
@@ -2463,7 +2452,19 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                 except Exception as e:
                     _log(f"背景图保存失败 {filepath}: {e}")
             else:
-                _log(f"独立背景图获取失败，保留已有图片：{code}")
+                # Samples are optional decoration. A valid primary cover must
+                # still complete the scrape: use the same original cover for
+                # fanart when the independent candidate is unavailable.
+                fallback = resolved_cover_bytes or await _fetch_cover(cover_url, proxy)
+                if fallback and _image_dimensions(fallback) != (0, 0):
+                    try:
+                        (metadata_dir / "fanart.jpg").write_bytes(fallback)
+                        saved_cover = True
+                        _log(f"独立背景图获取失败，已复用主封面生成 fanart：{code}")
+                    except Exception as e:
+                        _log(f"背景图回退保存失败 {filepath}: {e}")
+                else:
+                    _log(f"独立背景图获取失败，且主封面不可用：{code}")
 
     folder_title = name_zh
     # 文件夹标题单独开启翻译时，只把 name_part（纯标题）交给翻译器；演员列表始终保持源站原名，
@@ -4091,6 +4092,120 @@ def ensure_monitor():
     # 停用时由循环自身检测后退出
 
 
+def _jav321_cover_retry_candidates(config: dict) -> list[tuple[dict, Path, str]]:
+    """Select failed source files that are still in the watch tree and lack poster."""
+    _load_tasks()
+    watch_text = (config.get("scrape_watch_dir") or "").strip()
+    if not watch_text:
+        return []
+    try:
+        watch = Path(watch_text).resolve()
+    except OSError:
+        return []
+    candidates = []
+    for task in _tasks.values():
+        error = str(task.get("error") or "")
+        if (str(task.get("status") or "").lower() != "failed"
+                or str(task.get("scrape_status") or "").lower() != "failed"
+                or not ("poster" in error.casefold() or "封面" in error)):
+            continue
+        filepath = str(task.get("filepath") or "").strip()
+        code = str(task.get("code") or "").strip()
+        if not filepath or not code:
+            continue
+        path = Path(filepath)
+        try:
+            resolved = path.resolve()
+            if not path.is_file() or (resolved != watch and watch not in resolved.parents):
+                continue
+        except OSError:
+            continue
+        sidecar_dir = _flat_sidecar_dir(path, code, config)
+        if _get_file_status(path, code, sidecar_dir=sidecar_dir).get("has_poster"):
+            continue
+        candidates.append((dict(task), path, code))
+    return candidates
+
+
+async def _retry_failed_covers_with_jav321(config: dict,
+                                            candidates: list[tuple[dict, Path, str]]) -> None:
+    """Run the retired source only as an explicit, one-shot cover rescue."""
+    from scrapers import jav321
+
+    state = _jav321_retry_state
+    state.update({"running": True, "total": len(candidates), "processed": 0,
+                  "recovered": 0, "failed": 0,
+                  "message": f"准备重试 {len(candidates)} 个封面失败任务"})
+    proxy = config.get("proxy") or None
+    try:
+        async with _scan_lock:
+            for _old_task, video, code in candidates:
+                state["message"] = f"正在用 JAV321 重试 {code}"
+                source_size = video.stat().st_size
+                _task_update(code, filepath=str(video), file=video.name,
+                             status="running", current="jav321_cover_retry",
+                             scrape_status="running", error="")
+                try:
+                    rows = await asyncio.wait_for(
+                        jav321.search_list(code, SEARCH_MODE_CODE, proxy=proxy, max_results=3),
+                        timeout=25.0)
+                    item = _source_item_for_code(rows, code)
+                    cover_url = str((item or {}).get("cover") or "").strip()
+                    image = await _fetch_cover(cover_url, proxy) if cover_url else None
+                    width, height = _image_dimensions(image or b"")
+                    if not image or width < 300 or height < 300:
+                        raise RuntimeError("JAV321 未返回可用的精确番号封面")
+
+                    sidecar_dir = _flat_sidecar_dir(video, code, config)
+                    metadata_dir = sidecar_dir or video.parent
+                    metadata_dir.mkdir(parents=True, exist_ok=True)
+                    poster, cropped = _poster_bytes(
+                        image, confirmed_jacket=config.get("scrape_jacket_artwork_enabled", False))
+                    (metadata_dir / "poster.jpg").write_bytes(poster)
+                    fanart_path = metadata_dir / "fanart.jpg"
+                    if not fanart_path.exists():
+                        fanart_path.write_bytes(image)
+                    _log(f"JAV321 人工封面补救成功：{code}（{width}x{height}"
+                         f"{'，poster 已裁切' if cropped else ''}），继续原刮削/归档流程")
+
+                    record = await _process_completed_file(video, config)
+                    final_status = "success" if record.get("scrape_ok") and (
+                        record.get("moved") or record.get("note")
+                        or not config.get("archive_enabled", True)) else "failed"
+                    _record_recent(record)
+                    _task_update(code, filepath=str(video), file=video.name,
+                                 status=final_status,
+                                 current="completed" if final_status == "success" else "failed",
+                                 scrape_status="success" if record.get("scrape_ok") else "failed",
+                                 archive_status="success" if record.get("moved") else (
+                                     "skipped" if record.get("note") else "failed"),
+                                 error=record.get("scrape_error") or record.get("archive_error") or "",
+                                 record=record, jav321_cover_retry=True)
+                    if final_status == "success":
+                        state["recovered"] += 1
+                        if record.get("moved"):
+                            # move 模式执行到这里时源文件已经不存在，使用处理前
+                            # 记录的大小写入已处理签名，保持与正常扫描路径一致。
+                            _mark_processed(video, source_size)
+                    else:
+                        state["failed"] += 1
+                except Exception as exc:
+                    state["failed"] += 1
+                    message = f"JAV321 封面补救失败: {exc}"
+                    _log(f"{message}（{code}）")
+                    _task_update(code, filepath=str(video), file=video.name,
+                                 status="failed", current="failed",
+                                 scrape_status="failed", archive_status="skipped",
+                                 error=message, jav321_cover_retry=True)
+                finally:
+                    state["processed"] += 1
+    finally:
+        state["running"] = False
+        state["last_run"] = datetime.now().isoformat(timespec="seconds")
+        state["message"] = (f"重试完成：成功 {state['recovered']}，失败 {state['failed']}，"
+                            f"共处理 {state['processed']}")
+
+
 # ─────────────────────────────────────────
 # 路由
 # ─────────────────────────────────────────
@@ -4152,6 +4267,37 @@ async def api_run_once():
     n = await _scan_serialized(config, reset_recent=True)
     return {"success": True, "processed": n, "watch_dir": watch,
             "output_dir": output, "recent": _monitor_state["recent"][:10]}
+
+
+@router.get("/scrape/retry-jav321-covers")
+async def api_jav321_cover_retry_status():
+    return {"success": True, **_jav321_retry_state}
+
+
+@router.post("/scrape/retry-jav321-covers")
+async def api_retry_failed_covers_with_jav321():
+    """Explicitly retry only failed, still-present, poster-less watch files."""
+    global _jav321_retry_task
+    if _jav321_retry_task and not _jav321_retry_task.done():
+        return {"success": True, "started": False, "already_running": True,
+                **_jav321_retry_state}
+    config = load_config()
+    watch = (config.get("scrape_watch_dir") or "").strip()
+    if not watch or not Path(watch).is_dir():
+        raise HTTPException(status_code=400, detail="监控目录未配置、不存在或不可访问")
+    candidates = _jav321_cover_retry_candidates(config)
+    if not candidates:
+        _jav321_retry_state.update({
+            "running": False, "total": 0, "processed": 0, "recovered": 0,
+            "failed": 0, "message": "没有符合条件的封面失败任务",
+            "last_run": datetime.now().isoformat(timespec="seconds"),
+        })
+        return {"success": True, "started": False, "eligible": 0,
+                **_jav321_retry_state}
+    _jav321_retry_task = asyncio.create_task(
+        _retry_failed_covers_with_jav321(config, candidates))
+    return {"success": True, "started": True, "eligible": len(candidates),
+            "message": f"已启动 {len(candidates)} 个 JAV321 封面补救任务"}
 
 
 @router.post("/scrape/archive/sync-sidecars")

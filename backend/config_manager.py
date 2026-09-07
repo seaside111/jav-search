@@ -9,7 +9,7 @@ CONFIG_PATH = Path(os.getenv("CONFIG_DIR", "/config")) / "settings.json"
 
 DEFAULT_CONFIG = {
     "proxy": "",                         # HTTP代理，如 http://192.168.1.1:7890
-    "sources": ["javbus", "javdb"],      # 可选: javbus/javdb/avsox/avmoo/jav321/dmm
+    "sources": ["javbus", "javdb"],      # 可选: javbus/javdb/avsox/avmoo/dmm
     "dmm_api_id": "",                    # DMM/FANZA 官方联盟 API ID
     "dmm_affiliate_id": "",              # DMM/FANZA Affiliate ID
     # V1.4.2：JavDB 反爬增强
@@ -203,8 +203,17 @@ def _migrate_unify_archive(config: dict, saved: dict) -> dict:
 
 
 def _without_removed_keys(config: dict) -> dict:
-    return {key: value for key, value in config.items()
-            if key not in REMOVED_CONFIG_KEYS}
+    cleaned = {key: value for key, value in config.items()
+               if key not in REMOVED_CONFIG_KEYS}
+    # Retire JAV321 from saved installations as well as new settings. Its
+    # legacy parser file remains importable, but it is absent from the runtime
+    # source registry and cannot participate in live search or scraping.
+    for key in ("sources", "latest_sources"):
+        if isinstance(cleaned.get(key), list):
+            filtered = [source for source in cleaned[key]
+                        if str(source).strip().lower() != "jav321"]
+            cleaned[key] = filtered or list(DEFAULT_CONFIG[key])
+    return cleaned
 
 
 def load() -> dict:

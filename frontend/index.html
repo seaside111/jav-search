@@ -537,19 +537,55 @@
   .task-result { min-width:180px; max-width:320px; color:var(--text-muted); line-height:1.5; word-break:break-word; }
   .task-result.error { color:var(--red); }
 
+  .settings-page { display:none; padding:22px; max-width:1100px; margin:0 auto; }
+  .settings-page.active { display:block; }
+  .settings-page-head { display:flex; align-items:center; gap:12px; margin-bottom:16px; }
+  .settings-page-head h2 { margin:0; font-size:20px; }
+  .settings-page .settings-panel {
+    width:100%; height:auto; min-height:0; overflow:visible;
+    border-radius:var(--radius); display:block;
+  }
+  .settings-page .settings-tabs {
+    top:64px; padding:14px 18px; border-bottom:1px solid var(--border);
+  }
+  .settings-page .panel-body { max-width:920px; margin:0 auto; padding:28px 24px; }
+  .settings-page .sources-check { flex-wrap:wrap; }
+  .settings-page .save-bar {
+    display:flex; align-items:center; gap:16px; padding:14px 24px;
+    z-index:6; border-radius:0 0 var(--radius) var(--radius);
+  }
+  .settings-page .save-btn { width:auto; min-width:160px; }
+  .settings-page .save-msg { text-align:left; flex:1; }
+
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
 
   @media (max-width: 600px) {
-    header { padding: 0 12px; gap: 10px; }
-    .logo span { display: none; }
+    header { padding: 0 10px; gap: 6px; height:56px; }
+    .logo, .version-chip { display:none; }
+    .search-wrap, .search-input-wrap { min-width:0; gap:6px; }
+    #searchInput { padding:9px 9px 9px 34px; }
+    header .btn { padding:9px 12px; }
+    header .btn-icon { padding:9px 8px; }
     .mode-select { display: none; }
     main { padding: 14px; }
     :root { --card-w: 160px; }
     .settings-panel { width: 100%; border-radius: var(--radius) var(--radius) 0 0; height: 85vh; }
     .panel-overlay { align-items: flex-end; justify-content: center; }
+    .tasks-page, .settings-page { padding:12px; }
+    .settings-page-head { margin-bottom:12px; }
+    .settings-page .settings-panel { height:auto; border-radius:var(--radius); }
+    .settings-page .settings-tabs {
+      position:static; flex-wrap:nowrap; overflow-x:auto; padding:12px;
+      scrollbar-width:none; -webkit-overflow-scrolling:touch;
+    }
+    .settings-page .settings-tabs::-webkit-scrollbar { display:none; }
+    .settings-page .panel-body { padding:20px 16px; }
+    .settings-page .save-bar { position:static; flex-direction:column; align-items:stretch; padding:16px; }
+    .settings-page .save-btn { width:100%; }
+    .settings-page .save-msg { text-align:center; }
   }
 </style>
 </head>
@@ -575,7 +611,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.25</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.26</div>
   <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -628,13 +664,13 @@
   <div id="pagination" class="pagination"></div>
 </main>
 
-<!-- SETTINGS PANEL -->
-<div class="panel-overlay" id="settingsOverlay">
-  <div class="settings-panel" onclick="event.stopPropagation()">
-    <div class="panel-header">
-      <h2>⚙ 设置</h2>
-      <button class="panel-close" onclick="closeSettings()">✕</button>
-    </div>
+<!-- SETTINGS PAGE -->
+<div class="settings-page" id="settingsPage">
+  <div class="settings-page-head">
+    <button class="btn" onclick="closeSettings()">← 返回搜索</button>
+    <h2>⚙ 设置</h2>
+  </div>
+  <div class="settings-panel">
     <!-- 分栏导航 -->
     <div class="settings-tabs">
       <button class="settings-tab active" data-tab="general" onclick="switchTab('general')">常规</button>
@@ -665,10 +701,9 @@
             <label class="source-chk"><input type="checkbox" id="srcAvsox"> AVSOX</label>
             <label class="source-chk"><input type="checkbox" id="srcAvmoo"> AVMOO</label>
             <label class="source-chk"><input type="checkbox" id="srcFc2"> FC2</label>
-            <label class="source-chk"><input type="checkbox" id="srcJav321"> JAV321</label>
             <label class="source-chk"><input type="checkbox" id="srcDmm"> DMM/FANZA</label>
           </div>
-          <span class="setting-hint">这些开关用于搜索；首页最新仅展示支持最新列表的来源。详情页缺少样品图时，会在已启用来源中按 JAV321 → JavDB 回退。自动目录刮削的缺封面兜底固定为 JAV321 → JavDB。DMM/FANZA 必须配置下方官方联盟 API 凭据。</span>
+          <span class="setting-hint">这些开关用于搜索；首页最新仅展示支持最新列表的来源。详情页缺少样品图时会从已启用的 JavDB 补充；自动目录刮削缺封面时也按番号从 JavDB 兜底。DMM/FANZA 必须配置下方官方联盟 API 凭据。</span>
         </div>
 
         <div class="setting-group">
@@ -771,7 +806,7 @@
             <label class="source-chk" style="font-size:13px">
               <input type="checkbox" id="cfgShowLatest" checked> 首页展示最新片源
             </label>
-            <span class="setting-hint">未搜索时，首页自动展示所选且支持最新列表的数据源；JAV321、DMM/FANZA 当前不提供首页最新列表。</span>
+            <span class="setting-hint">未搜索时，首页自动展示所选且支持最新列表的数据源；DMM/FANZA 当前不提供首页最新列表。</span>
           </div>
           <div class="setting-row">
             <label class="setting-label">首页最新数量 · JavBus</label>
@@ -1153,6 +1188,14 @@
           <div class="setting-hint" id="scrapeRunMsg"></div>
         </div>
         <div class="setting-group">
+          <h3>JAV321 封面失败补救</h3>
+          <div class="setting-row">
+            <span class="setting-hint">JAV321 不参与首页、普通搜索和自动刮削。点击后只处理任务记录中“刮削失败且提示 poster/封面失败”、源视频仍在当前监控目录、并且对应目录确实没有 poster 的项目。成功取得精确番号封面后，会继续原来的刮削、规整和归档流程。</span>
+            <button class="jackett-test-btn" id="btnJav321CoverRetry" style="margin-left:0;align-self:flex-start" onclick="runJav321CoverRetry()">用 JAV321 重试封面失败任务</button>
+            <div class="setting-hint" id="jav321CoverRetryMsg">尚未运行</div>
+          </div>
+        </div>
+        <div class="setting-group">
           <h3>最近处理</h3>
           <div id="scrapeRecent" class="setting-hint">暂无记录</div>
         </div>
@@ -1440,14 +1483,68 @@ const PREFETCH_AHEAD = 0;
 // ② 对当前页用 new Image() 强制立即下载（绕过卡片 <img loading=lazy> 的折叠延迟），
 // 让「首屏所有封面尽快显示」。只拉封面图片字节，不抓任何详情。
 const _coverPrewarmed = new Set();
+function coverCandidateUrls(m) {
+  const urls = [];
+  const add = value => {
+    const url = String(value || '').trim();
+    if (url && !urls.includes(url)) urls.push(url);
+  };
+  add(m && m.cover);
+  add(m && m.cover_thumb);
+  for (const candidate of ((m && m.cover_candidates) || [])) {
+    add(candidate && candidate.url);
+    add(candidate && candidate.thumb);
+  }
+  return urls;
+}
+
+function mergeCoverCandidates(target, incoming) {
+  if (!target || !incoming) return;
+  target.cover_candidates = Array.isArray(target.cover_candidates)
+    ? target.cover_candidates.slice() : [];
+  const additions = Array.isArray(incoming.cover_candidates)
+    ? incoming.cover_candidates.slice() : [];
+  if (incoming.cover || incoming.cover_thumb) additions.unshift({
+    url: incoming.cover || '', thumb: incoming.cover_thumb || '', source: incoming.source || ''
+  });
+  const known = new Set(coverCandidateUrls(target));
+  for (const candidate of additions) {
+    const key = String((candidate && (candidate.url || candidate.thumb)) || '').trim();
+    if (key && !known.has(key)) {
+      target.cover_candidates.push(candidate);
+      known.add(key);
+    }
+  }
+}
+
+function retryCover(img, idx, detailView) {
+  const urls = coverCandidateUrls(currentResults[idx]);
+  let pos = Number(img.dataset.coverPos || 0);
+  if (img.dataset.coverRetried !== '1') {
+    img.dataset.coverRetried = '1';
+    img.src = `${API}/api/img?url=${encodeURIComponent(urls[pos] || '')}&retry=1`;
+    return;
+  }
+  pos += 1;
+  if (pos < urls.length) {
+    img.dataset.coverPos = String(pos);
+    img.dataset.coverRetried = '0';
+    img.src = `${API}/api/img?url=${encodeURIComponent(urls[pos])}`;
+    return;
+  }
+  if (detailView) img.outerHTML = '<div class="detail-no-cover">🎬</div>';
+  else img.parentElement.innerHTML = '<div class="no-cover">🎬</div>';
+}
+
 function prewarmCoversAround(p) {
   const totalPages = viewTotalPages();
   for (const pg of [p, p - 1, p + 1]) {       // 当前页优先，再相邻 ±1 页
     if (pg < 1 || pg > totalPages) continue;
     for (const i of pageIndices(pg)) {
       const m = currentResults[i];
-      if (!m || !m.cover) continue;
-      const u = `${API}/api/img?url=${encodeURIComponent(m.cover)}`;
+      const firstCover = coverCandidateUrls(m)[0];
+      if (!firstCover) continue;
+      const u = `${API}/api/img?url=${encodeURIComponent(firstCover)}`;
       if (_coverPrewarmed.has(u)) continue;
       _coverPrewarmed.add(u);
       const img = new Image();
@@ -1503,6 +1600,10 @@ function pageIndices(p) {
 // 把详情字段并入列表条目（详情优先，空值不覆盖）
 function mergeDetail(base, d) {
   if (!d) return base;
+  const previousArtwork = {
+    cover: base.cover, cover_thumb: base.cover_thumb,
+    source: base.source, cover_candidates: base.cover_candidates || []
+  };
   const out = Object.assign({}, base);
   for (const k in d) {
     const v = d[k];
@@ -1512,9 +1613,11 @@ function mergeDetail(base, d) {
   }
   out.sources = base.sources || out.sources;
   out.detail_loaded = true;
-  // 保持对象引用稳定：主详情与 JAV321 补抓可能并行返回，原地合并可避免
+  // 保持对象引用稳定：主详情与额外来源补抓可能并行返回，原地合并可避免
   // 较晚完成的一方把另一方刚写入的样品图或详情状态覆盖掉。
   Object.assign(base, out);
+  mergeCoverCandidates(base, previousArtwork);
+  mergeCoverCandidates(base, d);
   return base;
 }
 
@@ -1603,9 +1706,14 @@ function upgradePageCards(p) {
     // 让列表卡片随详情同步更新（此前只刷新正文、封面一直停在列表级图）。
     const m = currentResults[i];
     const coverImg = card.querySelector('.card-cover img');
-    if (coverImg && m && m.cover && coverImg.dataset.fb !== '1') {
-      const want = `${API}/api/img?url=${encodeURIComponent(m.cover)}`;
-      if (coverImg.getAttribute('src') !== want) coverImg.src = want;
+    const firstCover = coverCandidateUrls(m)[0];
+    if (coverImg && firstCover) {
+      const want = `${API}/api/img?url=${encodeURIComponent(firstCover)}`;
+      if (coverImg.getAttribute('src') !== want) {
+        coverImg.dataset.coverPos = '0';
+        coverImg.dataset.coverRetried = '0';
+        coverImg.src = want;
+      }
     }
     if (card.dataset.translated === '1') continue;   // 保留用户翻译结果
     const body = card.querySelector('.card-body');
@@ -1694,14 +1802,10 @@ function cardBodyInner(m, idx) {
 }
 
 function renderCard(m, idx) {
-  const coverSrc = m.cover ? `${API}/api/img?url=${encodeURIComponent(m.cover)}` : '';
-  // 瞬时代理/CDN 失败先重试一次，再回退列表缩略图，最后才显示占位图标。
-  const thumbSrc = m.cover_thumb ? `${API}/api/img?url=${encodeURIComponent(m.cover_thumb)}` : '';
-  const onErr = thumbSrc
-    ? `if(!this.dataset.coverTry){this.dataset.coverTry='main-retry';this.src=this.src+'&retry=1';}else if(this.dataset.coverTry==='main-retry'){this.dataset.coverTry='thumb';this.src='${escAttr(thumbSrc)}';}else if(this.dataset.coverTry==='thumb'){this.dataset.coverTry='thumb-retry';this.src=this.src+'&retry=1';}else{this.parentElement.innerHTML='<div class=no-cover>🎬</div>';}`
-    : `if(!this.dataset.coverTry){this.dataset.coverTry='main-retry';this.src=this.src+'&retry=1';}else{this.parentElement.innerHTML='<div class=no-cover>🎬</div>';}`;
+  const firstCover = coverCandidateUrls(m)[0];
+  const coverSrc = firstCover ? `${API}/api/img?url=${encodeURIComponent(firstCover)}` : '';
   const cover = coverSrc
-    ? `<img src="${escAttr(coverSrc)}" alt="" loading="lazy" onerror="${escAttr(onErr)}">`
+    ? `<img src="${escAttr(coverSrc)}" alt="" loading="lazy" data-cover-pos="0" onerror="retryCover(this, ${idx}, false)">`
     : `<div class="no-cover">🎬</div>`;
 
   const scoreBadge = m.score ? `<div class="score-badge">★ ${escHtml(m.score)}</div>` : '';
@@ -2128,20 +2232,20 @@ function detailSourceUrl(m, source) {
   return hit ? hit[1] : '';
 }
 
-// 详情样品图优先 JAV321；没有样品图时再回退 JavDB，且只在用户点开详情时请求。
+// 详情缺少样品图时从已启用的 JavDB 按需补充。
 function detailExtraSources(m) {
   if (!m || !m.code) return [];
-  const enabled = new Set((configuredSources.length ? configuredSources : ['javbus', 'jav321', 'javdb'])
+  const enabled = new Set((configuredSources.length ? configuredSources : ['javbus', 'javdb'])
     .map(normalizedSource));
   const primary = normalizedSource(m.source);
   const state = m._extra_detail_state || {};
   if (m.samples && m.samples.length) return [];
-  return ['jav321', 'javdb'].filter(source =>
+  return ['javdb'].filter(source =>
     enabled.has(source) && source !== primary && !state[source]);
 }
 
 // 详情里「磁力 / 样品图」区块是否仍在后台补抓中（显示「抓取中」用）：
-//  ① 合并卡待补抓 JAV321 样品图；或
+//  ① 合并卡待补抓 JavDB 样品图；或
 //  ② 慢源（JavDB/FC2 走 FlareSolverr）单条详情尚未加载完
 //     —— 此时封面/标题已用列表级数据先行展示，只有磁力/样品图等待补全。
 function detailExtraPending(m) {
@@ -2192,7 +2296,7 @@ function renderDetailExtra(m, idx) {
   // 还没补抓且当前没有样品图/磁力时，显示加载提示。
   if (detailExtraPending(m) && !samplesHtml && !magnetsHtml) {
     html += `<div><div class="detail-section-label">磁力链 / 样品图</div>
-      <div style="color:var(--text-dim);font-size:13px"><span class="drawer-spinner"></span> 正在补充详情 / 样品图（JAV321，缺失时回退 JavDB）…</div></div>`;
+      <div style="color:var(--text-dim);font-size:13px"><span class="drawer-spinner"></span> 正在从 JavDB 补充详情 / 样品图…</div></div>`;
   }
   return html;
 }
@@ -2208,8 +2312,7 @@ function mergeExtraDetail(m, d, source, resolvedUrl) {
   });
   if (resolvedUrl) {
     m.source_urls = Object.assign({}, m.source_urls || {});
-    const label = source === 'jav321' ? 'JAV321' : source;
-    m.source_urls[label] = resolvedUrl;
+    m.source_urls[source] = resolvedUrl;
   }
 }
 
@@ -2257,14 +2360,10 @@ async function ensureExtraDetails(idx) {
 // 用「当前手头的数据」构建详情弹窗内容（可能是列表级的部分数据，也可能是补全后的完整数据）。
 // 拆成独立函数，便于：先用列表级数据秒开 → 详情补全后用完整数据重渲染。
 function buildDetailContent(m, idx) {
-  const coverSrc = m.cover ? `${API}/api/img?url=${encodeURIComponent(m.cover)}` : '';
-  // 与卡片一致：大封面 404 时先回退缩略图，再失败才占位
-  const thumbSrc = m.cover_thumb ? `${API}/api/img?url=${encodeURIComponent(m.cover_thumb)}` : '';
-  const onErr = thumbSrc
-    ? `if(!this.dataset.coverTry){this.dataset.coverTry='main-retry';this.src=this.src+'&retry=1';}else if(this.dataset.coverTry==='main-retry'){this.dataset.coverTry='thumb';this.src='${escAttr(thumbSrc)}';}else if(this.dataset.coverTry==='thumb'){this.dataset.coverTry='thumb-retry';this.src=this.src+'&retry=1';}else{this.outerHTML='<div class=detail-no-cover>🎬</div>';}`
-    : `if(!this.dataset.coverTry){this.dataset.coverTry='main-retry';this.src=this.src+'&retry=1';}else{this.outerHTML='<div class=detail-no-cover>🎬</div>';}`;
+  const firstCover = coverCandidateUrls(m)[0];
+  const coverSrc = firstCover ? `${API}/api/img?url=${encodeURIComponent(firstCover)}` : '';
   const coverHtml = coverSrc
-    ? `<img class="detail-cover" src="${escAttr(coverSrc)}" alt="" onerror="${escAttr(onErr)}">`
+    ? `<img class="detail-cover" src="${escAttr(coverSrc)}" alt="" data-cover-pos="0" onerror="retryCover(this, ${idx}, true)">`
     : `<div class="detail-no-cover">🎬</div>`;
 
   const scoreText = m.score ? (m.score + (m.score_count ? ` (${m.score_count}人评)` : '')) : '';
@@ -2361,7 +2460,7 @@ async function openDetail(idx) {
   document.getElementById('detailModal').scrollTop = 0;
   document.getElementById('detailOverlay').classList.add('open');
 
-  // JAV321 样品图补抓与主来源详情并行；缺失时同一流程继续回退 JavDB。
+  // JavDB 样品图补抓与主来源详情并行。
   if (detailExtraSources(m0).length) ensureExtraDetails(idx);
 
   // ② 详情未加载的慢源（JavDB/FC2 走 FlareSolverr）：后台补抓完整详情，
@@ -2372,7 +2471,7 @@ async function openDetail(idx) {
     refreshDetailContent(idx);
   }
 
-  // ③ 样品图已按 JAV321 → JavDB 顺序在弹窗打开时按需补抓。
+  // ③ 样品图已在弹窗打开时按需从 JavDB 补抓。
 }
 
 function closeDetail() {
@@ -2439,7 +2538,10 @@ function searchJackettFromDetail(idx, query) {
 // SETTINGS
 // ══════════════════════════════════════════
 async function openSettings() {
-  document.getElementById('settingsOverlay').classList.add('open');
+  closeTasks();
+  document.getElementById('settingsPage').classList.add('active');
+  document.querySelector('main').style.display = 'none';
+  window.scrollTo({top: 0, behavior: 'auto'});
   try {
     // no-store：避免浏览器缓存导致刚保存的数据源/设置读回旧值
     const resp = await fetch(`${API}/api/config`, { cache: 'no-store' });
@@ -2450,7 +2552,6 @@ async function openSettings() {
     document.getElementById('srcAvsox').checked  = (cfg.sources || []).includes('avsox');
     document.getElementById('srcAvmoo').checked  = (cfg.sources || []).includes('avmoo');
     document.getElementById('srcFc2').checked    = (cfg.sources || []).includes('fc2');
-    document.getElementById('srcJav321').checked = (cfg.sources || []).includes('jav321');
     document.getElementById('srcDmm').checked    = (cfg.sources || []).includes('dmm');
     document.getElementById('cfgDmmApiId').value = cfg.dmm_api_id || '';
     document.getElementById('cfgDmmAffiliateId').value = cfg.dmm_affiliate_id || '';
@@ -2551,17 +2652,23 @@ async function openSettings() {
     if (cfg.jackett_url && cfg.jackett_api_key) await checkJackettStatus();
     if (cfg.qb_url || cfg.tr_url) checkQbStatus();
     refreshScrapeStatus();
+    refreshJav321CoverRetryStatus();
   } catch (e) { /* ignore */ }
 }
 
 function switchTab(name) {
-  document.querySelectorAll('.settings-tab').forEach(t =>
+  document.querySelectorAll('#settingsPage .settings-tab').forEach(t =>
     t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.settings-pane').forEach(p =>
     p.classList.toggle('active', p.id === 'pane-' + name));
 }
 
-function closeSettings() { document.getElementById('settingsOverlay').classList.remove('open'); }
+function closeSettings() {
+  const page = document.getElementById('settingsPage');
+  const wasActive = page.classList.contains('active');
+  page.classList.remove('active');
+  if (wasActive) document.querySelector('main').style.display = '';
+}
 
 // ── qBittorrent 状态 ──
 async function testQb() {
@@ -2630,6 +2737,7 @@ function renderScrapeRecent(recent) {
 let taskTimer = null;
 let taskStatusFilter = '';
 function openTasks() {
+  closeSettings();
   document.getElementById('tasksPage').classList.add('active');
   document.querySelector('main').style.display = 'none';
   loadTasks(taskStatusFilter);
@@ -2651,7 +2759,7 @@ async function loadTasks(status) {
     const box = document.getElementById('taskList');
     if (!data.tasks?.length) { box.innerHTML = '<div class="setting-hint">暂无任务记录</div>'; return; }
     const badge = {running:'运行中', success:'成功', failed:'失败'};
-    const phase = {downloading:'下载中', scraping:'刮削中', completed:'已完成', failed:'失败'};
+    const phase = {downloading:'下载中', scraping:'刮削中', jav321_cover_retry:'JAV321 补救', completed:'已完成', failed:'失败'};
     const resultLabel = {running:'处理中', success:'成功', failed:'失败', pending:'等待', skipped:'跳过'};
     const statusBadge = (value, fallback = '—') => {
       const key = String(value || '').toLowerCase();
@@ -2716,6 +2824,55 @@ async function runScrapeOnce() {
       } catch (e) { /* 状态刷新失败不改变本次手动扫描结果 */ }
     }
     btn.disabled = false;
+  }
+}
+
+let jav321CoverRetryTimer = null;
+async function refreshJav321CoverRetryStatus() {
+  const msg = document.getElementById('jav321CoverRetryMsg');
+  const btn = document.getElementById('btnJav321CoverRetry');
+  if (!msg || !btn) return;
+  try {
+    const resp = await fetch(`${API}/api/library/scrape/retry-jav321-covers`, {cache:'no-store'});
+    const data = await safeJson(resp);
+    btn.disabled = !!data.running;
+    msg.style.color = data.running ? 'var(--accent)' : (data.failed ? 'var(--red)' : 'var(--text-dim)');
+    msg.textContent = data.message || '尚未运行';
+    if (data.running) {
+      clearTimeout(jav321CoverRetryTimer);
+      jav321CoverRetryTimer = setTimeout(refreshJav321CoverRetryStatus, 2000);
+    } else {
+      clearTimeout(jav321CoverRetryTimer);
+      jav321CoverRetryTimer = null;
+      loadTasks(taskStatusFilter);
+      refreshScrapeStatus();
+    }
+  } catch (e) {
+    btn.disabled = false;
+    msg.style.color = 'var(--red)';
+    msg.textContent = '状态获取失败：' + e.message;
+  }
+}
+
+async function runJav321CoverRetry() {
+  const msg = document.getElementById('jav321CoverRetryMsg');
+  const btn = document.getElementById('btnJav321CoverRetry');
+  msg.style.color = 'var(--text-muted)';
+  msg.textContent = '正在保存设置并检查失败任务…';
+  btn.disabled = true;
+  try {
+    const saved = await saveSettings(false);
+    if (!saved) throw new Error('当前设置保存失败，未启动补救任务');
+    const resp = await fetch(`${API}/api/library/scrape/retry-jav321-covers`, {method:'POST'});
+    const data = await safeJson(resp);
+    if (!resp.ok || !data.success) throw new Error(data.detail || '启动失败');
+    msg.style.color = data.started || data.already_running ? 'var(--accent)' : 'var(--text-dim)';
+    msg.textContent = data.message || (data.already_running ? '补救任务正在运行' : '没有符合条件的任务');
+    await refreshJav321CoverRetryStatus();
+  } catch (e) {
+    btn.disabled = false;
+    msg.style.color = 'var(--red)';
+    msg.textContent = '启动失败：' + e.message;
   }
 }
 
@@ -2925,7 +3082,6 @@ async function saveSettings(refreshMonitor = true) {
   if (document.getElementById('srcAvsox').checked)  sources.push('avsox');
   if (document.getElementById('srcAvmoo').checked)  sources.push('avmoo');
   if (document.getElementById('srcFc2').checked)    sources.push('fc2');
-  if (document.getElementById('srcJav321').checked) sources.push('jav321');
   if (document.getElementById('srcDmm').checked)    sources.push('dmm');
   if (!sources.length) { showToast('至少选择一个数据源'); return; }
   let maxResults = parseInt(document.getElementById('cfgMaxResults').value) || 300;
@@ -3080,7 +3236,6 @@ function showToast(msg) {
 }
 
 document.getElementById('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
-document.getElementById('settingsOverlay').addEventListener('click', function(e) { if (e.target === this) closeSettings(); });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     // 灯箱开着时，Esc 只关灯箱、保留详情弹窗，方便继续浏览
@@ -3108,6 +3263,7 @@ function mergeLatestBatch(items) {
       // 补充来源详情页 URL。单源卡也一并记上，保证后续被合并时不丢自己的 URL）。
       it.source_urls = it.source_urls || {};
       if (it.source && it.url) it.source_urls[it.source] = it.url;
+      mergeCoverCandidates(it, it);
       latestCodeIndex[key] = currentResults.length;
       currentResults.push(it);
       added++;
@@ -3120,6 +3276,17 @@ function mergeLatestBatch(items) {
       cur.source_urls = cur.source_urls || {};
       if (it.source_urls) Object.assign(cur.source_urls, it.source_urls);
       if (it.source && it.url && !cur.source_urls[it.source]) cur.source_urls[it.source] = it.url;
+      mergeCoverCandidates(cur, it);
+      // Sources return in network order, but the canonical list item must not.
+      // Promote a later JavBus result over JavDB/other sources while retaining
+      // every cover as a validated browser fallback.
+      const sourcePriority = { javbus: 0, javdb: 1, dmm: 2, avmoo: 3, avsox: 4, fc2: 5 };
+      const rank = value => sourcePriority[normalizedSource(value)] ?? 99;
+      if (rank(it.source) < rank(cur.source)) {
+        for (const key of ['source', 'url', 'cover', 'cover_thumb', 'title', 'release_date']) {
+          if (it[key]) cur[key] = it[key];
+        }
+      }
       // 补充缺失字段（不覆盖已有）
       for (const k of ['cover', 'title', 'release_date', 'duration', 'director',
                        'studio', 'label', 'series', 'score', 'score_count']) {
@@ -3135,7 +3302,7 @@ function mergeLatestBatch(items) {
 
 // 首页最新结果缓存到 sessionStorage，避免返回首页时重新抓取。
 // sessionStorage 在同一标签页内（含整页跳转）保留，关闭标签才清，软 TTL 20 分钟。
-const _LATEST_CACHE_KEY = 'jav_latest_cache';
+const _LATEST_CACHE_KEY = 'jav_latest_cache_v2';
 const _LATEST_CACHE_TTL = 20 * 60 * 1000;
 function saveLatestCache() {
   if (!isHomeLatest) return;
@@ -3273,7 +3440,7 @@ async function loadRuntimeConfig() {
     showLatestCfg = cfg.show_latest !== false;
     configuredSources = (cfg.sources && cfg.sources.length)
       ? cfg.sources
-      : ['javbus', 'jav321', 'javdb'];
+      : ['javbus', 'javdb'];
     // 首页最新的来源：优先 latest_sources，回退到 sources
     configuredLatestSources = (cfg.latest_sources && cfg.latest_sources.length)
       ? cfg.latest_sources
@@ -3292,7 +3459,7 @@ async function checkVersion() {
   try {
     const resp = await fetch(`${API}/api/version`, { cache: 'no-store' });
     const d = await safeJson(resp);
-      chip.textContent = 'v' + (d.current || '1.4.6.25');
+      chip.textContent = 'v' + (d.current || '1.4.6.26');
     if (d.update_available && d.latest) {
       chip.classList.add('has-update', 'clickable');
       chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;

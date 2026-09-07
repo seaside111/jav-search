@@ -50,7 +50,17 @@ class JavDbFlareSolverrTests(unittest.TestCase):
         for key in config_manager.REMOVED_CONFIG_KEYS:
             self.assertNotIn(key, migrated)
 
-    def test_detail_resolver_prefers_jav321_code_search_over_non_durable_url(self):
+    def test_retired_jav321_is_removed_from_saved_source_lists(self):
+        cleaned = config_manager._without_removed_keys({
+            "sources": ["javbus", "jav321", "javdb"],
+            "latest_sources": ["jav321", "javbus"],
+        })
+        self.assertEqual(cleaned["sources"], ["javbus", "javdb"])
+        self.assertEqual(cleaned["latest_sources"], ["javbus"])
+        only_retired = config_manager._without_removed_keys({"sources": ["jav321"]})
+        self.assertEqual(only_retired["sources"], ["javbus", "javdb"])
+
+    def test_retired_jav321_detail_source_is_disabled(self):
         import scrapers
         detail = {
             "code": "CLOT-041", "source": "JAV321", "detail_loaded": True,
@@ -66,9 +76,9 @@ class JavDbFlareSolverrTests(unittest.TestCase):
                 code="CLOT-041", source="jav321",
                 url="https://www.jav321.com/search")))
 
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["detail"]["samples"], detail["samples"])
-        search_mock.assert_awaited_once()
+        self.assertEqual(result["status"], "disabled")
+        self.assertIsNone(result["detail"])
+        search_mock.assert_not_awaited()
         enrich_mock.assert_not_awaited()
 
     def test_pushed_intake_keeps_clicked_detail_artwork(self):
@@ -105,29 +115,30 @@ class JavDbFlareSolverrTests(unittest.TestCase):
         self.assertEqual(result, [(None, "mismatch")])
         cache_put.assert_not_called()
 
-    def test_jav321_replaces_only_materially_better_cover_and_supplies_fanart(self):
+    def test_merged_cover_candidate_recovers_when_primary_url_fails(self):
         def jpeg(width, height):
             buf = BytesIO()
             Image.new("RGB", (width, height), "red").save(buf, format="JPEG")
             return buf.getvalue()
 
-        movie = {"code": "NCG-011", "cover": "https://primary/small.jpg",
-                 "source": "javbus", "samples": []}
-        jav321_item = {"code": "NCG-011", "cover": "https://jav321/large.jpg",
-                       "samples": ["https://jav321/wide.jpg"],
-                       "url": "https://www.jav321.com/search", "source": "JAV321"}
+        movie = {"code": "NCG-011", "cover": "https://primary/broken.jpg",
+                 "source": "JavBus", "samples": [], "cover_candidates": [
+                     {"url": "https://primary/broken.jpg", "source": "JavBus"},
+                     {"url": "https://javdb/valid.jpg", "source": "JavDB"},
+                 ]}
 
         async def fetch(url, _proxy):
-            return jpeg(240, 360) if "small" in url else jpeg(1200, 800)
+            return None if "broken" in url else jpeg(1200, 800)
 
-        with mock.patch.object(library, "search_source_status",
-                               mock.AsyncMock(return_value=([jav321_item], "ok"))), \
-                mock.patch.object(library, "_fetch_cover", side_effect=fetch):
-            result = asyncio.run(library._enhance_artwork_jav321(
-                movie, "NCG-011", None))
-        self.assertEqual(result["cover"], "https://jav321/large.jpg")
-        self.assertEqual(result["samples"], ["https://jav321/wide.jpg"])
-        self.assertEqual(result["poster_source"], "jav321")
+        with mock.patch.object(library, "_fetch_cover", side_effect=fetch), \
+                mock.patch.object(library, "search_source_status",
+                                  mock.AsyncMock()) as search_mock:
+            result = asyncio.run(library._ensure_downloadable_cover(
+                movie, "NCG-011", {"sources": ["javbus", "javdb"]}, None))
+        self.assertEqual(result, jpeg(1200, 800))
+        self.assertEqual(movie["cover"], "https://javdb/valid.jpg")
+        self.assertEqual(movie["poster_source"], "javdb")
+        search_mock.assert_not_awaited()
 
     def test_expired_cover_is_repaired_from_enabled_javdb(self):
         buf = BytesIO()
@@ -270,34 +281,35 @@ class JavDbFlareSolverrTests(unittest.TestCase):
     def test_frontend_cover_failure_retries_before_placeholder(self):
         html = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
             encoding="utf-8")
-        self.assertGreaterEqual(html.count("this.src=this.src+'&retry=1'"), 4)
-        self.assertIn("this.dataset.coverTry='thumb-retry'", html)
+        self.assertIn("function coverCandidateUrls(m)", html)
+        self.assertIn("function retryCover(img, idx, detailView)", html)
+        self.assertIn("pos < urls.length", html)
 
     def test_frontend_detail_failures_remain_retryable(self):
         html = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
             encoding="utf-8")
         self.assertIn("/api/details/resolve", html)
-        # JAV321 优先；没有样品图才继续回退 JavDB，且失败保持可重试。
-        self.assertIn("['jav321', 'javdb'].filter", html)
+        self.assertIn("return ['javdb'].filter", html)
         self.assertIn("if (m.samples && m.samples.length) break", html)
         self.assertNotIn("m._javdb_extra_loaded = true", html)
         self.assertNotIn("idxs.forEach(i => { if (currentResults[i]) currentResults[i].detail_loaded = true; })", html)
 
-    def test_jav321_is_preferred_over_shielded_javdb_for_merged_artwork(self):
+    def test_javbus_remains_primary_and_all_cover_candidates_are_retained(self):
         import scrapers
         merged = scrapers._merge_lists([
             ("javdb", [{"code": "CLOT-041", "title": "JavDB title",
                         "cover": "https://javdb/cover.jpg", "source": "JavDB",
                         "url": "https://javdb/item"}]),
-            ("jav321", [{"code": "CLOT-041", "title": "JAV321 title",
-                         "cover": "https://jav321/cover.jpg", "source": "JAV321",
-                         "url": "https://jav321/item",
-                         "samples": ["https://jav321/sample.jpg"]}]),
+            ("javbus", [{"code": "CLOT-041", "title": "JavBus title",
+                         "cover": "https://javbus/cover.jpg", "source": "JavBus",
+                         "url": "https://javbus/item"}]),
         ])
-        self.assertEqual(merged[0]["source"], "JAV321")
-        self.assertEqual(merged[0]["cover"], "https://jav321/cover.jpg")
-        self.assertEqual(merged[0]["samples"], ["https://jav321/sample.jpg"])
+        self.assertEqual(merged[0]["source"], "JavBus")
+        self.assertEqual(merged[0]["cover"], "https://javbus/cover.jpg")
+        self.assertEqual([c["url"] for c in merged[0]["cover_candidates"]],
+                         ["https://javbus/cover.jpg", "https://javdb/cover.jpg"])
         self.assertEqual(merged[0]["source_urls"]["JavDB"], "https://javdb/item")
+        self.assertNotIn("jav321", scrapers.SOURCE_MODULES)
 
     def test_javdb_artwork_lookup_gets_slow_source_timeout_budget(self):
         import scrapers
@@ -1030,6 +1042,107 @@ class VideoClassificationTests(unittest.TestCase):
         self.assertIn("保存设置并立即扫描", frontend)
         self.assertIn("扫描目录：${data.watch_dir", function)
 
+    def test_settings_uses_full_page_navigation_and_keeps_controls_wired(self):
+        frontend = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
+            encoding="utf-8")
+        self.assertIn('class="settings-page" id="settingsPage"', frontend)
+        self.assertNotIn('id="settingsOverlay"', frontend)
+        self.assertIn("document.getElementById('settingsPage').classList.add('active')", frontend)
+        self.assertIn("document.querySelectorAll('#settingsPage .settings-tab')", frontend)
+        self.assertIn('onclick="saveSettings()"', frontend)
+        self.assertIn('onclick="runJav321CoverRetry()"', frontend)
+        self.assertIn('/api/library/scrape/retry-jav321-covers', frontend)
+
+    def test_jav321_manual_rescue_only_selects_failed_posterless_watch_files(self):
+        original_tasks = library._tasks
+        original_loaded = library._tasks_loaded
+        original_file = library._TASKS_FILE
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            watch = root / "watch"
+            outside = root / "outside"
+            watch.mkdir()
+            outside.mkdir()
+            eligible = watch / "SKY-062.avi"
+            ignored = outside / "ABC-123.avi"
+            eligible.write_bytes(b"video")
+            ignored.write_bytes(b"video")
+            library._tasks = {}
+            library._tasks_loaded = True
+            library._TASKS_FILE = root / "tasks.json"
+            try:
+                library._task_update(
+                    "SKY-062", file=eligible.name, filepath=str(eligible),
+                    status="failed", scrape_status="failed",
+                    error="poster 未创建；fanart 未创建")
+                library._task_update(
+                    "ABC-123", file=ignored.name, filepath=str(ignored),
+                    status="failed", scrape_status="failed", error="封面获取失败")
+                candidates = library._jav321_cover_retry_candidates({
+                    "scrape_watch_dir": str(watch)})
+                self.assertEqual([(p.name, code) for _, p, code in candidates],
+                                 [("SKY-062.avi", "SKY-062")])
+                stage = watch / "SKY-062"
+                stage.mkdir()
+                (stage / "poster.jpg").write_bytes(b"already exists")
+                self.assertEqual(library._jav321_cover_retry_candidates({
+                    "scrape_watch_dir": str(watch)}), [])
+            finally:
+                library._tasks = original_tasks
+                library._tasks_loaded = original_loaded
+                library._TASKS_FILE = original_file
+
+    def test_jav321_manual_rescue_writes_cover_and_continues_original_pipeline(self):
+        original_tasks = library._tasks
+        original_loaded = library._tasks_loaded
+        original_file = library._TASKS_FILE
+        original_state = dict(library._jav321_retry_state)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            watch = root / "watch"
+            watch.mkdir()
+            video = watch / "SKY-062.avi"
+            video.write_bytes(b"video")
+            image_file = BytesIO()
+            Image.new("RGB", (750, 500), "blue").save(image_file, format="JPEG")
+            cover_bytes = image_file.getvalue()
+            item = {"code": "SKY-062", "source": "JAV321",
+                    "cover": "https://jav321.example/sky062.jpg"}
+            config = {"scrape_watch_dir": str(watch),
+                      "scrape_jacket_artwork_enabled": True,
+                      "archive_enabled": False}
+            library._tasks = {}
+            library._tasks_loaded = True
+            library._TASKS_FILE = root / "tasks.json"
+            library._task_update(
+                "SKY-062", file=video.name, filepath=str(video),
+                status="failed", scrape_status="failed", error="poster 未创建")
+            candidates = library._jav321_cover_retry_candidates(config)
+            record = {"file": video.name, "code": "SKY-062", "scrape_ok": True,
+                      "scrape_error": "", "moved": False,
+                      "note": "归档已关闭，保留原处", "time": "now"}
+            try:
+                with mock.patch.object(jav321, "search_list",
+                                       mock.AsyncMock(return_value=[item])), \
+                        mock.patch.object(library, "_fetch_cover",
+                                          mock.AsyncMock(return_value=cover_bytes)), \
+                        mock.patch.object(library, "_process_completed_file",
+                                          mock.AsyncMock(return_value=record)) as process:
+                    asyncio.run(library._retry_failed_covers_with_jav321(config, candidates))
+                stage = watch / "SKY-062"
+                self.assertEqual((stage / "fanart.jpg").read_bytes(), cover_bytes)
+                with Image.open(stage / "poster.jpg") as poster:
+                    self.assertEqual(poster.size, (398, 500))
+                process.assert_awaited_once_with(video, config)
+                self.assertEqual(library._jav321_retry_state["recovered"], 1)
+                self.assertEqual(next(iter(library._tasks.values()))["status"], "success")
+            finally:
+                library._tasks = original_tasks
+                library._tasks_loaded = original_loaded
+                library._TASKS_FILE = original_file
+                library._jav321_retry_state.clear()
+                library._jav321_retry_state.update(original_state)
+
     def test_failed_tasks_with_same_code_are_kept_per_source_file(self):
         original_tasks = library._tasks
         original_loaded = library._tasks_loaded
@@ -1601,7 +1714,6 @@ class VideoClassificationTests(unittest.TestCase):
             "code": "ABC-123", "cover": "https://primary/poster.jpg", "samples": [],
             "source_urls": {
                 "DMM/FANZA": "dmmapi://abc00123",
-                "JAV321": "https://jav321/item",
                 "JavDB": "https://javdb/item",
             },
         }
@@ -1613,7 +1725,7 @@ class VideoClassificationTests(unittest.TestCase):
             calls.append(source)
             if source == "javdb":
                 return [({"samples": ["https://javdb/fanart.jpg"]}, "ok")]
-            return [(None, "timeout")]  # 模拟 DMM 与 JAV321 超时/请求失败
+            return [(None, "timeout")]  # 模拟 DMM 超时/请求失败
 
         scrapers.enrich = fake_enrich
         try:
@@ -1623,7 +1735,7 @@ class VideoClassificationTests(unittest.TestCase):
                  "scrape_artwork_fallback_limit": 1}, None))
         finally:
             scrapers.enrich = original
-        self.assertEqual(calls, ["dmm", "jav321", "javdb"])
+        self.assertEqual(calls, ["dmm", "javdb"])
         self.assertEqual(movie["samples"], ["https://javdb/fanart.jpg"])
 
     def test_ambiguous_same_code_files_are_not_guessed_as_cd_parts(self):
@@ -2154,13 +2266,57 @@ class NamingAndTrackerTests(unittest.TestCase):
     def test_jacket_artwork_mode_requires_confirmed_horizontal_cover(self):
         movie = {
             "source": "JavBus",
-            "cover": "https://img.example/pics/cover/abc_b.jpg",
+            "cover": "https://www.javbus.com/imgs/cover/rrj_b.jpg",
             "samples": [],
         }
         self.assertTrue(library._use_jacket_artwork(
             {"scrape_jacket_artwork_enabled": True}, movie, movie["cover"]))
         self.assertFalse(library._use_jacket_artwork(
             {"scrape_jacket_artwork_enabled": False}, movie, movie["cover"]))
+
+    def test_one_valid_javbus_cover_always_creates_poster_and_fanart(self):
+        cover_url = "https://www.javbus.com/imgs/cover/rrj_b.jpg"
+        sample_url = "https://samples.example/unavailable.jpg"
+        source = BytesIO()
+        Image.new("RGB", (750, 500), "blue").save(source, format="JPEG")
+        cover_bytes = source.getvalue()
+
+        async def fetch(url, _proxy):
+            return cover_bytes if url == cover_url else None
+
+        movie = {
+            "code": "SKY-062", "title": "SKY-062 スカイエンジェル Vol.32",
+            "source": "JavBus", "poster_source": "javbus", "cover": cover_url,
+            "samples": [sample_url], "actors": [{"name": "菅野亜梨沙"}],
+            "url": "https://www.javbus.com/SKY-062", "detail_loaded": True,
+        }
+        for crop_enabled in (False, True):
+            with self.subTest(crop_enabled=crop_enabled), tempfile.TemporaryDirectory() as raw:
+                video = Path(raw) / "SKY-062.avi"
+                video.write_bytes(b"video")
+                config = {
+                    "sources": ["javbus", "javdb"],
+                    "scrape_translate_enabled": False,
+                    "scrape_jacket_artwork_enabled": crop_enabled,
+                    "scrape_actor_images_enabled": False,
+                    "emby_actor_sync_enabled": False,
+                }
+                with mock.patch.object(intake, "resolve_for_file",
+                                       mock.AsyncMock(return_value=(None, None))), \
+                        mock.patch.object(library, "_resolve_code",
+                                          mock.AsyncMock(return_value="SKY-062")), \
+                        mock.patch.object(library, "search",
+                                          mock.AsyncMock(return_value=[dict(movie)])), \
+                        mock.patch.object(library, "_fetch_cover", side_effect=fetch):
+                    result = asyncio.run(library._scrape_one(str(video), False, config))
+                self.assertTrue(result["success"], result.get("error"))
+                poster = Path(raw) / "poster.jpg"
+                fanart = Path(raw) / "fanart.jpg"
+                self.assertTrue(poster.exists())
+                self.assertTrue(fanart.exists())
+                self.assertEqual(fanart.read_bytes(), cover_bytes)
+                with Image.open(poster) as image:
+                    self.assertEqual(image.size, (398, 500) if crop_enabled else (750, 500))
 
     def test_title_and_actor_folder_name(self):
         name = library._archive_folder_name(
@@ -3089,7 +3245,7 @@ class NamingAndTrackerTests(unittest.TestCase):
                 self.assertTrue(library._queue_artwork_backfill(
                     target, "DLDSS-509", None,
                     {"scrape_artwork_fallback_limit": 2,
-                     "sources": ["javbus", "javdb", "jav321"]}))
+                     "sources": ["javbus", "javdb", "avsox"]}))
             finally:
                 library._ARTWORK_PENDING_FILE = original_file
                 library._artwork_pending = original_pending
