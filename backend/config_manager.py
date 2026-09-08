@@ -10,7 +10,7 @@ CONFIG_PATH = app_data_dir() / "settings.json"
 
 DEFAULT_CONFIG = {
     "proxy": "",                         # HTTP代理，如 http://192.168.1.1:7890
-    "sources": ["javbus", "javdb"],      # 可选: javbus/javdb/avsox/avmoo/jav321/dmm
+    "sources": ["javbus", "javdb"],      # 可选: javbus/javdb/avsox/avmoo/dmm
     "dmm_api_id": "",                    # DMM/FANZA 官方联盟 API ID
     "dmm_affiliate_id": "",              # DMM/FANZA Affiliate ID
     # V1.4.2：JavDB 反爬增强
@@ -120,6 +120,7 @@ DEFAULT_CONFIG = {
     "scrape_actor_subfolder_naming": "code", # code | code_title
     "scrape_jacket_artwork_enabled": True, # 封套同时生成裁切 poster 与完整横向 fanart；关闭则不裁切
     "scrape_actor_images_enabled": False,
+    "scrape_actor_images_in_movie_dir": True, # 是否在每部影片目录永久保留 actors/；关闭后使用全局缓存
     "scrape_actor_thumb_in_nfo": True,  # 在 NFO actor/thumb 中写入远程头像地址（Kodi/可移植性）
     "scrape_actor_images_dir": "",       # Emby metadata/people 路径
     "actor_scrape_auto": True,
@@ -206,8 +207,17 @@ def _migrate_unify_archive(config: dict, saved: dict) -> dict:
 
 
 def _without_removed_keys(config: dict) -> dict:
-    return {key: value for key, value in config.items()
-            if key not in REMOVED_CONFIG_KEYS}
+    cleaned = {key: value for key, value in config.items()
+               if key not in REMOVED_CONFIG_KEYS}
+    # Retire JAV321 from saved installations as well as new settings. Its
+    # legacy parser file remains importable, but it is absent from the runtime
+    # source registry and cannot participate in live search or scraping.
+    for key in ("sources", "latest_sources"):
+        if isinstance(cleaned.get(key), list):
+            filtered = [source for source in cleaned[key]
+                        if str(source).strip().lower() != "jav321"]
+            cleaned[key] = filtered or list(DEFAULT_CONFIG[key])
+    return cleaned
 
 
 def load() -> dict:

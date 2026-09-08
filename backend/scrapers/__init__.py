@@ -12,7 +12,7 @@ import asyncio
 import re
 from typing import Optional
 
-from . import javbus, javdb, avsox, avmoo, fc2, jav321, dmm
+from . import javbus, javdb, avsox, avmoo, fc2, dmm
 from . import _detailcache
 
 SEARCH_MODE_CODE = "code"
@@ -26,17 +26,24 @@ SOURCE_MODULES = {
     "avsox": avsox,
     "avmoo": avmoo,
     "fc2": fc2,        # V1.4.3：FC2-PPV 专用源（fc2ppvdb.com，无码/素人）
-    "jav321": jav321,
     "dmm": dmm,
 }
 
 # 合并时来源优先级（数字小者优先，作为主条目保留封面/标题）
 # FC2 番号体系独立、不与其它源重叠，优先级随意，置末即可
-# JavBus remains the stable primary source. Between the two image-rich
-# fallbacks, prefer direct/lightweight JAV321; use shielded JAVDB to enrich
-# fields it uniquely provides (ratings, magnets, tags, etc.).
-_SOURCE_PRIORITY = {"javbus": 0, "jav321": 1, "javdb": 2, "dmm": 3,
-                    "avmoo": 4, "avsox": 5, "fc2": 6}
+# JavBus remains the stable primary source; JavDB supplies guarded detail and
+# artwork fallback. JAV321 was retired from runtime because its result pages
+# frequently expose non-image/expired artwork URLs that suppressed valid covers.
+_SOURCE_PRIORITY = {"javbus": 0, "javdb": 1, "dmm": 2,
+                    "avmoo": 3, "avsox": 4, "fc2": 5}
+
+
+def _cover_candidate(item: dict) -> dict | None:
+    url = (item.get("cover") or "").strip()
+    thumb = (item.get("cover_thumb") or "").strip()
+    if not url and not thumb:
+        return None
+    return {"url": url, "thumb": thumb, "source": item.get("source", "")}
 
 
 def _normalize_code(code: str) -> str:
@@ -73,11 +80,18 @@ def _merge_lists(lists_by_source: list[tuple[str, list[dict]]]) -> list[dict]:
             if key not in merged:
                 merged[key] = dict(item)
                 merged[key]["sources"] = [item.get("source", "")]
+                candidate = _cover_candidate(item)
+                merged[key]["cover_candidates"] = [candidate] if candidate else []
                 # 记录各来源各自的详情页 URL（供合并卡按需补抓非主来源的样品图/磁力）
                 merged[key]["source_urls"] = {item.get("source", ""): item.get("url", "")}
                 order.append(key)
             else:
                 ex = merged[key]
+                candidate = _cover_candidate(item)
+                known_urls = {c.get("url") or c.get("thumb")
+                              for c in ex.setdefault("cover_candidates", [])}
+                if candidate and (candidate.get("url") or candidate.get("thumb")) not in known_urls:
+                    ex["cover_candidates"].append(candidate)
                 if item.get("source") and item["source"] not in ex.get("sources", []):
                     ex.setdefault("sources", []).append(item["source"])
                 if item.get("source"):
@@ -156,6 +170,8 @@ async def search(
         for it in out:
             it.setdefault("sources", [it.get("source", "")])
             it.setdefault("source_urls", {it.get("source", ""): it.get("url", "")})
+            candidate = _cover_candidate(it)
+            it.setdefault("cover_candidates", [candidate] if candidate else [])
         return out[:max_results]
 
     return _merge_lists(collected)[:max_results]

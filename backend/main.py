@@ -48,8 +48,8 @@ _VERSION_FILE = resource_path("VERSION")
 try:
     _IMAGE_VERSION = _VERSION_FILE.read_text(encoding="utf-8").strip()
 except (OSError, UnicodeError):
-    _IMAGE_VERSION = "1.4.6.27"
-APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.27"
+    _IMAGE_VERSION = "1.4.6.28"
+APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.28"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -323,6 +323,7 @@ class ConfigUpdateRequest(BaseModel):
     scrape_actor_subfolder_naming: Optional[str] = None
     scrape_jacket_artwork_enabled: Optional[bool] = None
     scrape_actor_images_enabled: Optional[bool] = None
+    scrape_actor_images_in_movie_dir: Optional[bool] = None
     scrape_actor_thumb_in_nfo: Optional[bool] = None
     scrape_actor_images_dir: Optional[str] = None
     actor_scrape_auto: Optional[bool] = None
@@ -519,6 +520,20 @@ _EXT_CTYPE = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp",
               "gif": "image/gif", "avif": "image/avif"}
 
 
+def _valid_image_bytes(data: bytes) -> bool:
+    """Reject HTML/challenge/error bodies before they enter the persistent image cache."""
+    if not data or len(data) < 12:
+        return False
+    return bool(
+        data.startswith(b"\xff\xd8\xff")
+        or data.startswith(b"\x89PNG\r\n\x1a\n")
+        or data.startswith((b"GIF87a", b"GIF89a"))
+        or (data.startswith(b"RIFF") and data[8:12] == b"WEBP")
+        or (len(data) >= 12 and data[4:8] == b"ftyp"
+            and data[8:12] in (b"avif", b"avis", b"mif1", b"msf1"))
+    )
+
+
 def _img_disk_path(url: str, ctype: str = "") -> Path:
     """URL → 磁盘缓存文件路径（sha256 命名，扩展名记录 content-type）。"""
     h = _hashlib.sha256(url.encode("utf-8")).hexdigest()
@@ -545,7 +560,13 @@ def _img_disk_get_sync(url: str) -> Optional[tuple[bytes, str]]:
         if not p:
             return None
         data = p.read_bytes()
-        if not data:
+        if not _valid_image_bytes(data):
+            # Older versions could cache a 200 HTML challenge page as .jpg when
+            # the upstream omitted Content-Type. Remove it so this request can refetch.
+            try:
+                p.unlink()
+            except OSError:
+                pass
             return None
         ctype = _EXT_CTYPE.get(p.suffix.lstrip(".").lower(), "image/jpeg")
         try:
@@ -710,7 +731,7 @@ async def fetch_image_cached(url: str) -> Optional[tuple[bytes, str]]:
                             continue
                         ctype = resp.headers.get("content-type", "")
                         # 必须是 200 且确实是图片（防盗链常返回 HTML 验证页）
-                        if resp.status_code == 200 and resp.content and \
+                        if resp.status_code == 200 and _valid_image_bytes(resp.content) and \
                            (ctype.startswith("image/") or "image" in ctype or not ctype):
                             content = resp.content
                             ctype = ctype or "image/jpeg"
@@ -810,10 +831,6 @@ async def api_detail_resolve(req: ResolveDetailRequest):
         return {"success": True, "status": "disabled", "detail": None}
     proxy = config.get("proxy") or None
     url = (req.url or "").strip()
-    # JAV321 的详情由 POST /search 返回，响应 URL 往往仍是 /search，不能靠随后 GET
-    # 可靠复现；即使前端带来了该 URL，也应按番号重新 POST 搜索并直接复用解析结果。
-    if source == "jav321":
-        url = ""
     try:
         seed = None
         if not url:

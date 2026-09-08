@@ -227,6 +227,17 @@ class WindowsUpdaterTests(unittest.TestCase):
         self.assertIn('class="update-dot"', html)
         self.assertIn('startWindowsUpdate(d)', html)
 
+    def test_windows_release_channel_is_independent_from_docker_latest(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / ".github" / "workflows" / "windows-build.yml").read_text(
+            encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        self.assertIn('tags:\n      - "windows-v*"', workflow)
+        self.assertIn('--prerelease --latest=false', workflow)
+        self.assertNotIn('ghcr.io/', workflow)
+        self.assertIn('当前版本为 `1.4.6.28`', readme)
+        self.assertIn('两个更新通道互不比较', readme)
+
 
 if __name__ == "__main__":
     unittest.main()

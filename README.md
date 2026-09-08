@@ -1,6 +1,14 @@
 # JAV Search
 
-面向群晖及其他 Docker 环境的影片检索、下载与媒体库整理 Web 应用。将多来源信息搜索、资源发现、下载器推送、自动刮削归档和 Emby 媒体库适配整合在一个可视化界面中。
+此分支是 JAV Search 的 **Windows 桌面版**，当前版本为 `1.4.6.28`。它使用 Windows 本机目录、本机下载器和独立安装器，将多来源搜索、资源发现、自动刮削归档及 Emby 适配整合在桌面窗口中。
+
+> Windows 发布只使用 `windows-v*` 标签和 `JAV-Search-v*-Windows-x64-Setup.exe` 安装器，并作为独立 Pre-release 提供。Docker 正式版使用 `v*` 标签和 GHCR `latest`；两个更新通道互不比较，也不会互相覆盖。
+
+## Windows 安装与更新
+
+从 [GitHub Releases](https://github.com/seaside111/jav-search/releases) 下载名称包含 `Windows-x64-Setup.exe` 的 Windows 安装器。程序内更新只选择版本号与 `windows-v*` 标签一致、同时带有匹配 SHA256 文件的安装器。
+
+Windows 版配置、缓存和任务记录默认保存在 `%LOCALAPPDATA%\JAV Search`。刮削监控目录、归档目录、下载器保存目录和 Emby 路径均填写 Windows 本机绝对路径；归档方式只提供复制和移动。
 
 ---
 
@@ -17,7 +25,9 @@
 
 ---
 
-## 快速部署（群晖）
+## Docker 部署参考
+
+以下内容供需要查看 Docker 主线部署方式的用户参考。Windows 桌面版不使用 Docker 卷、`/config`、容器路径或 GHCR `latest` 更新。
 
 ```bash
 # 1. 上传整个项目到群晖，如 /volume1/docker/jav-search

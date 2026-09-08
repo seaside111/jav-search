@@ -1,5 +1,6 @@
 """Independent actor portrait scraper and background task API."""
 import asyncio
+import hashlib
 import json
 import re
 import shutil
@@ -252,6 +253,8 @@ async def _remove_emby_pending(folder: Path, config: dict):
 async def _queue_javdb_pending(actors: list[dict], folder: Path, config: dict):
     """Register only actors still missing after the normal low-cost sources."""
     def has_local(actor: dict) -> bool:
+        if not config.get("scrape_actor_images_in_movie_dir", True):
+            return _cached_image(actor["name"], config) is not None
         path = folder / "actors" / f"{_safe(actor['name'])}.jpg"
         return path.exists() and path.stat().st_size > 1024
 
@@ -317,9 +320,10 @@ async def _apply_directory_portrait(item: dict, folders: list[str], config: dict
         folder = Path(value)
         if not folder.is_dir():
             continue
-        local = folder / "actors" / f"{_safe(name)}.jpg"
-        local.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(portrait, local)
+        if config.get("scrape_actor_images_in_movie_dir", True):
+            local = folder / "actors" / f"{_safe(name)}.jpg"
+            local.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(portrait, local)
         nfo = next(folder.glob("*.nfo"), None)
         actors, code = [], ""
         if nfo:
@@ -506,12 +510,51 @@ def _cached_avatar(name: str, config: dict) -> tuple[str, str]:
     return "", ""
 
 
+def _movie_portrait_dir(folder: Path, config: dict) -> Path:
+    """Return the local actors directory used as Emby's byte source.
+
+    When users opt out of visible per-movie folders, keep the same actors/name.jpg
+    contract in an internal staging directory under the persistent actor cache.
+    """
+    if config.get("scrape_actor_images_in_movie_dir", True):
+        return folder / "actors"
+    cache = Path(config.get("actor_scrape_cache_dir") or CONFIG_PATH.parent / "actor-cache")
+    key = hashlib.sha256(str(folder.resolve()).encode("utf-8")).hexdigest()[:24]
+    return cache / "movie-staging" / key / "actors"
+
+
+def _ensure_movie_portrait(name: str, folder: Path, config: dict) -> Optional[Path]:
+    """Materialize a cached portrait locally before Emby reads its bytes."""
+    local = _movie_portrait_dir(folder, config) / f"{_safe(name)}.jpg"
+    if local.exists() and local.stat().st_size > 1024:
+        return local
+    cached = _cached_image(name, config)
+    if cached is None:
+        return None
+    local.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(cached, local)
+    return local
+
+
+def _cleanup_movie_staging(folder: Path, config: dict):
+    if config.get("scrape_actor_images_in_movie_dir", True):
+        return
+    actors = _movie_portrait_dir(folder, config)
+    try:
+        if actors.parent.is_dir():
+            shutil.rmtree(actors.parent)
+        if actors.parent.parent.is_dir() and not any(actors.parent.parent.iterdir()):
+            actors.parent.parent.rmdir()
+    except OSError as exc:
+        _log(f"演员头像内部暂存清理失败（{folder}）：{exc}")
+
+
 async def _save_actor(actor: dict, folder: Path, config: dict,
                       proxy: Optional[str], overwrite: bool) -> bool:
     name = (actor.get("name") or "").strip()
     if not name:
         return False
-    local = folder / "actors" / f"{_safe(name)}.jpg"
+    local = _movie_portrait_dir(folder, config) / f"{_safe(name)}.jpg"
     cache_dir = Path(config.get("actor_scrape_cache_dir") or CONFIG_PATH.parent / "actor-cache") / _safe(name)
     cached = _cached_image(name, config)
     if local.exists() and local.stat().st_size > 1024 and not overwrite:
@@ -546,9 +589,12 @@ async def _save_actor(actor: dict, folder: Path, config: dict,
         (cache_dir / "metadata.json").write_text(json.dumps({
             "name": name, "url": avatar, "source": actor.get("avatar_source", ""),
             "updated": datetime.now().isoformat(timespec="seconds")}, ensure_ascii=False, indent=2), encoding="utf-8")
-    local.parent.mkdir(parents=True, exist_ok=True)
-    if overwrite or not local.exists():
-        shutil.copy2(cached, local)
+    # 关闭影片目录保存时，普通刮削只需持久化全局缓存。Emby 同步开始前
+    # 会在程序缓存区的 actors/ 暂存目录中落地同一图片并读取其字节。
+    if config.get("scrape_actor_images_in_movie_dir", True):
+        local.parent.mkdir(parents=True, exist_ok=True)
+        if overwrite or not local.exists():
+            shutil.copy2(cached, local)
     people = (config.get("scrape_actor_images_dir") or "").strip()
     if people:
         person = Path(people) / _safe(name)
@@ -620,8 +666,8 @@ async def sync_emby_folder(folder: Path, config: dict, code: str = "",
     portraits = []
     for actor in actors or []:
         name = (actor.get("name") or "").strip()
-        local = folder / "actors" / f"{_safe(name)}.jpg"
-        if name and local.exists() and local.stat().st_size > 1024:
+        local = _ensure_movie_portrait(name, folder, config) if name else None
+        if local is not None:
             portraits.append({"name": name, "image": local.read_bytes(),
                               "content_type": "image/jpeg"})
     if not portraits:
@@ -660,6 +706,7 @@ async def sync_emby_folder(folder: Path, config: dict, code: str = "",
              f"（{len(batch.get('pending_names') or portraits)} 位）")
     elif queue_retry and not batch.get("retryable"):
         await _remove_emby_pending(folder, config)
+        _cleanup_movie_staging(folder, config)
     _log(f"Emby 当前影片目录同步完成：{code or folder.name}"
          f"（头像 {len(portraits)}，更新 {updated}）")
     return {**batch, "actors": actors or [], "emby_updated": updated}
@@ -695,6 +742,7 @@ async def run_emby_pending_once(config: Optional[dict] = None) -> dict:
         notify_media=False, poll_delays=())
     if result.get("emby_updated", 0) > 0 and not result.get("retryable"):
         await _remove_emby_pending(folder, config)
+        _cleanup_movie_staging(folder, config)
         _log(f"Emby 延迟重试成功：{task.get('code') or folder.name}"
              f"（更新 {result.get('emby_updated', 0)} 位）")
     else:
@@ -740,14 +788,37 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
     proxy = config.get("proxy") or None
     sources = _sources(config)
     actors = [dict(a) for a in (actors or []) if a.get("name")]
-    for actor in actors:
-        if not _usable_avatar(actor.get("avatar", "")):
-            avatar, source = _cached_avatar(actor["name"], config)
-            if avatar:
-                actor["avatar"], actor["avatar_source"] = avatar, source
-    if not actors and code and config.get("actor_scrape_lookup_by_code", True):
+    if overwrite:
+        # A forced rescan must not redownload an incorrect URL from the NFO or
+        # metadata cache. Resolve the movie again and replace matching URLs.
+        for actor in actors:
+            actor["avatar"] = ""
+            actor.pop("avatar_source", None)
+        refreshed = await _actors_by_code(
+            code, sources, proxy, [a["name"] for a in actors]) if code else []
+        refreshed_by_name = {_key(a.get("name", "")): a for a in refreshed
+                             if a.get("name")}
+        known = {_key(a.get("name", "")) for a in actors}
+        for actor in actors:
+            current = refreshed_by_name.get(_key(actor.get("name", "")))
+            if current and _usable_avatar(current.get("avatar", "")):
+                actor["avatar"] = current["avatar"]
+                actor["avatar_source"] = current.get("avatar_source", "")
+        for actor in refreshed:
+            if _key(actor.get("name", "")) not in known:
+                actors.append(dict(actor))
+        _log(f"强制重扫已忽略旧头像与缓存：{code or folder.name}"
+             f"（重新查询 {len(actors)} 位演员）")
+    else:
+        for actor in actors:
+            if not _usable_avatar(actor.get("avatar", "")):
+                avatar, source = _cached_avatar(actor["name"], config)
+                if avatar:
+                    actor["avatar"], actor["avatar_source"] = avatar, source
+    if not actors and code and (overwrite or config.get("actor_scrape_lookup_by_code", True)):
         actors = await _actors_by_code(code, sources, proxy)
-    elif actors and code and config.get("actor_scrape_lookup_by_code", True):
+    elif (not overwrite and actors and code
+          and config.get("actor_scrape_lookup_by_code", True)):
         # One code lookup per source is cheaper and more accurate than searching
         # every actor by name; AVSOX/AVMOO can provide portraits on movie details.
         missing = [a for a in actors if not _usable_avatar(a.get("avatar", ""))]
@@ -762,11 +833,12 @@ async def process_movie(folder: Path, actors: list, code: str, config: dict,
                 _log(f"演员番号补查未取得头像：{code}，转为按演员名回退查询")
     # A code lookup may discover new actors whose portrait URL is absent from
     # the source response but already known by the persistent actor cache.
-    for actor in actors:
-        if not _usable_avatar(actor.get("avatar", "")):
-            avatar, source = _cached_avatar(actor["name"], config)
-            if avatar:
-                actor["avatar"], actor["avatar_source"] = avatar, source
+    if not overwrite:
+        for actor in actors:
+            if not _usable_avatar(actor.get("avatar", "")):
+                avatar, source = _cached_avatar(actor["name"], config)
+                if avatar:
+                    actor["avatar"], actor["avatar_source"] = avatar, source
     saved = 0
     interval = _request_interval(config)
     for actor_index, actor in enumerate(actors):
