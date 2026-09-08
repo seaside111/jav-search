@@ -2305,8 +2305,8 @@ class NamingAndTrackerTests(unittest.TestCase):
                                        mock.AsyncMock(return_value=(None, None))), \
                         mock.patch.object(library, "_resolve_code",
                                           mock.AsyncMock(return_value="SKY-062")), \
-                        mock.patch.object(library, "search",
-                                          mock.AsyncMock(return_value=[dict(movie)])), \
+                        mock.patch.object(library, "search_source_status",
+                                          mock.AsyncMock(return_value=([dict(movie)], "ok"))), \
                         mock.patch.object(library, "_fetch_cover", side_effect=fetch):
                     result = asyncio.run(library._scrape_one(str(video), False, config))
                 self.assertTrue(result["success"], result.get("error"))
@@ -2317,6 +2317,230 @@ class NamingAndTrackerTests(unittest.TestCase):
                 self.assertEqual(fanart.read_bytes(), cover_bytes)
                 with Image.open(poster) as image:
                     self.assertEqual(image.size, (398, 500) if crop_enabled else (750, 500))
+
+    def test_direct_fc2_watch_scrape_uses_dedicated_source(self):
+        self.assertEqual(library._code_from_name("FC2PPV1234567"),
+                         "FC2-PPV-1234567")
+        self.assertEqual(library._code_from_name("FC2-1234567"),
+                         "FC2-PPV-1234567")
+        source = BytesIO()
+        Image.new("RGB", (1200, 800), "blue").save(source, format="JPEG")
+        cover_bytes = source.getvalue()
+        searched = []
+
+        async def source_search(code, _mode, source_name, **_kwargs):
+            searched.append(source_name)
+            if source_name == "fc2":
+                return ([{
+                    "code": code, "title": f"{code} Amateur Movie",
+                    "source": "FC2", "poster_source": "fc2",
+                    "cover": "https://fourhoi.com/fc2-ppv-1234567/cover-n.jpg",
+                    "url": "https://fc2ppvdb.com/articles/1234567",
+                    "detail_loaded": True, "actors": [], "samples": [],
+                }], "ok")
+            return ([], "ok")
+
+        with tempfile.TemporaryDirectory() as raw:
+            video = Path(raw) / "FC2-PPV-1234567.mp4"
+            video.write_bytes(b"video")
+            config = {
+                # FC2 is intentionally absent from homepage/search sources.
+                "sources": ["javbus", "javdb"],
+                "scrape_translate_enabled": False,
+                "scrape_jacket_artwork_enabled": False,
+                "scrape_actor_images_enabled": False,
+                "emby_actor_sync_enabled": False,
+            }
+            with mock.patch.object(intake, "resolve_for_file",
+                                   mock.AsyncMock(return_value=(None, None))), \
+                    mock.patch.object(library, "search_source_status",
+                                      side_effect=source_search), \
+                    mock.patch.object(library, "_fetch_cover",
+                                      mock.AsyncMock(return_value=cover_bytes)):
+                result = asyncio.run(library._scrape_one(str(video), False, config))
+            self.assertTrue((Path(raw) / "poster.jpg").exists())
+            self.assertTrue((Path(raw) / "fanart.jpg").exists())
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertEqual(searched, ["fc2"])
+
+    def test_direct_normal_uncensored_code_reaches_enabled_avsox(self):
+        source = BytesIO()
+        Image.new("RGB", (1200, 800), "green").save(source, format="JPEG")
+        cover_bytes = source.getvalue()
+        searched = []
+
+        async def source_search(code, _mode, source_name, **_kwargs):
+            searched.append(source_name)
+            if source_name == "avsox":
+                return ([{
+                    "code": code, "title": f"{code} 無碼作品",
+                    "source": "AVSOX", "poster_source": "avsox",
+                    "cover": "https://avsox.example/cover.jpg",
+                    "url": "https://avsox.example/movie/061326_01",
+                    "detail_loaded": True, "actors": [], "samples": [],
+                }], "ok")
+            return ([], "ok")
+
+        with tempfile.TemporaryDirectory() as raw:
+            video = Path(raw) / "061326_01.mp4"
+            video.write_bytes(b"video")
+            config = {
+                "sources": ["javbus", "avsox"],
+                "scrape_translate_enabled": False,
+                "scrape_jacket_artwork_enabled": False,
+                "scrape_actor_images_enabled": False,
+                "emby_actor_sync_enabled": False,
+            }
+            with mock.patch.object(intake, "resolve_for_file",
+                                   mock.AsyncMock(return_value=(None, None))), \
+                    mock.patch.object(library, "_resolve_code",
+                                      mock.AsyncMock(return_value="061326_01")), \
+                    mock.patch.object(library, "search_source_status",
+                                      side_effect=source_search), \
+                    mock.patch.object(library, "_fetch_cover",
+                                      mock.AsyncMock(return_value=cover_bytes)):
+                result = asyncio.run(library._scrape_one(str(video), False, config))
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertEqual(searched, ["javbus", "avsox"])
+
+    def test_pushed_uncensored_cover_is_not_replaced_by_javbus(self):
+        source = BytesIO()
+        Image.new("RGB", (1200, 800), "purple").save(source, format="JPEG")
+        cover_bytes = source.getvalue()
+        pushed = {
+            "code": "HEYZO-1234", "title": "HEYZO-1234 Original title",
+            "source": "AVSOX", "poster_source": "avsox",
+            "cover": "https://avsox.example/heyzo-1234.jpg",
+            "url": "https://avsox.example/movie/heyzo-1234",
+            "detail_loaded": True, "actors": [], "samples": ["https://wrong/sample.jpg"],
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            video = Path(raw) / "HEYZO-1234.mp4"
+            video.write_bytes(b"video")
+            config = {
+                "sources": ["javbus", "avsox"],
+                "scrape_translate_enabled": False,
+                "scrape_jacket_artwork_enabled": False,
+                "scrape_actor_images_enabled": False,
+                "emby_actor_sync_enabled": False,
+            }
+            with mock.patch.object(intake, "resolve_for_file",
+                                   mock.AsyncMock(return_value=("hash", pushed))), \
+                    mock.patch.object(library, "search",
+                                      mock.AsyncMock(side_effect=AssertionError(
+                                          "pushed cover must not be replaced by a general search"))), \
+                    mock.patch.object(library, "_fetch_cover",
+                                      mock.AsyncMock(return_value=cover_bytes)):
+                result = asyncio.run(library._scrape_one(str(video), False, config))
+        self.assertTrue(result["success"], result.get("error"))
+
+    def test_failed_scrape_stale_nfo_is_rewritten_with_current_translation(self):
+        cover_url = "https://www.javbus.com/imgs/cover/rrj_b.jpg"
+        source = BytesIO()
+        Image.new("RGB", (750, 500), "blue").save(source, format="JPEG")
+        cover_bytes = source.getvalue()
+        movie = {
+            "code": "SKY-062", "title": "SKY-062 スカイエンジェル Vol.32",
+            "source": "JavBus", "poster_source": "javbus", "cover": cover_url,
+            "samples": [], "actors": [{"name": "菅野亜梨沙"}],
+            "url": "https://www.javbus.com/SKY-062",
+            "detail_loaded": True,
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            video = Path(raw) / "SKY-062.avi"
+            video.write_bytes(b"video")
+            nfo = Path(raw) / "SKY-062.nfo"
+            nfo.write_text(
+                "<movie><title>SKY-062 スカイエンジェル Vol.32</title></movie>",
+                encoding="utf-8")
+            config = {
+                "sources": ["javbus", "javdb"],
+                "scrape_translate_enabled": True,
+                "default_translate_provider": "baidu",
+                "scrape_jacket_artwork_enabled": False,
+                "scrape_actor_images_enabled": False,
+                "emby_actor_sync_enabled": False,
+            }
+            with mock.patch.object(intake, "resolve_for_file",
+                                   mock.AsyncMock(return_value=(None, None))), \
+                    mock.patch.object(library, "_resolve_code",
+                                      mock.AsyncMock(return_value="SKY-062")), \
+                    mock.patch.object(library, "search_source_status",
+                                      mock.AsyncMock(return_value=([dict(movie)], "ok"))), \
+                    mock.patch.object(library, "_fetch_cover",
+                                      mock.AsyncMock(return_value=cover_bytes)), \
+                    mock.patch.object(library, "translate", mock.AsyncMock(return_value={
+                        "success": True, "result": "天空天使 Vol.32", "provider": "baidu"})):
+                result = asyncio.run(library._scrape_one(str(video), False, config))
+            written = nfo.read_text(encoding="utf-8")
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertIn("<title>SKY-062 天空天使 Vol.32</title>", written)
+        self.assertEqual(library.ET.fromstring(written).findtext("title"),
+                         "SKY-062 天空天使 Vol.32")
+
+    def test_completed_task_repairs_only_stale_japanese_nfo_titles(self):
+        original_tasks = library._tasks
+        original_loaded = library._tasks_loaded
+        original_checked = set(library._nfo_title_repair_checked)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            watch = root / "watch"
+            archive = root / "archive" / "SKY-062"
+            stage = watch / "SKY-062"
+            watch.mkdir()
+            archive.mkdir(parents=True)
+            stage.mkdir()
+            video = watch / "Arisa Kanno - Sky Angel (SKY-062).avi"
+            video.write_bytes(b"video")
+            old_nfo = """<movie><title>SKY-062 スカイエンジェル</title>
+              <originaltitle>SKY-062 スカイエンジェル</originaltitle>
+              <uniqueid type="num">SKY-062</uniqueid></movie>"""
+            source_nfo = stage / f"{video.stem}.nfo"
+            archived_nfo = archive / f"{video.stem}.nfo"
+            archived_video = archive / video.name
+            source_nfo.write_text(old_nfo, encoding="utf-8")
+            archived_nfo.write_text(old_nfo, encoding="utf-8")
+            archived_video.write_bytes(b"video")
+            task = {
+                "code": "SKY-062", "filepath": str(video), "status": "success",
+                "record": {"code": "SKY-062", "title_zh": "SKY-062 天空天使",
+                           "target_dir": str(archive)},
+            }
+            library._tasks = {library._task_storage_key("SKY-062", str(video)): task}
+            library._tasks_loaded = True
+            library._nfo_title_repair_checked.clear()
+            try:
+                changed = library._repair_recorded_nfo_title(video, {
+                    "scrape_watch_dir": str(watch), "scrape_translate_enabled": True,
+                    "scrape_organize_enabled": True,
+                    "scrape_video_rename_enabled": True})
+                second = library._repair_recorded_nfo_title(video, {
+                    "scrape_watch_dir": str(watch), "scrape_translate_enabled": True,
+                    "scrape_organize_enabled": True,
+                    "scrape_video_rename_enabled": True})
+            finally:
+                library._tasks = original_tasks
+                library._tasks_loaded = original_loaded
+                library._nfo_title_repair_checked.clear()
+                library._nfo_title_repair_checked.update(original_checked)
+            repaired_archive_nfo = archive / "SKY-062.nfo"
+            for nfo in (source_nfo, repaired_archive_nfo):
+                tree = library.ET.parse(nfo)
+                self.assertEqual(tree.findtext("title"), "SKY-062 天空天使")
+                self.assertEqual(tree.findtext("originaltitle"),
+                                 "SKY-062 スカイエンジェル")
+            self.assertFalse(archived_video.exists())
+            self.assertTrue((archive / "SKY-062.avi").exists())
+            self.assertFalse(archived_nfo.exists())
+        self.assertCountEqual(changed, [stage, archive])
+        self.assertEqual(second, [])
+
+    def test_settings_save_does_not_refresh_monitor_twice(self):
+        frontend = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
+            encoding="utf-8")
+        save_body = frontend.split("async function saveSettings", 1)[1].split(
+            "// ══════════════════════════════════════════\n// UTILS", 1)[0]
+        self.assertNotIn("/api/library/scrape/monitor/refresh", save_body)
 
     def test_title_and_actor_folder_name(self):
         name = library._archive_folder_name(
@@ -2544,6 +2768,39 @@ class NamingAndTrackerTests(unittest.TestCase):
             self.assertTrue(video.exists())
             self.assertFalse(result["scrape_ok"])
             self.assertIn("保留", result["note"])
+
+    def test_process_completed_file_passes_enabled_video_rename_to_archive(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            video = root / "downloads" / "Arisa Kanno - Sky Angel (SKY-062).avi"
+            video.parent.mkdir()
+            video.write_bytes(b"source movie")
+            scraped = {
+                "success": True, "code": "SKY-062", "filepath": str(video),
+                "title_original": "スカイエンジェル", "folder_title": "天空天使",
+                "title_zh": "SKY-062 天空天使", "actors": [],
+                "sidecar_dir": str(video.parent / "SKY-062"),
+            }
+            archived = {"archived": True, "moved_original": False,
+                        "target_dir": str(root / "archive" / "SKY-062"),
+                        "files": ["SKY-062.avi"]}
+            with mock.patch.object(library, "_scrape_one",
+                                   mock.AsyncMock(return_value=scraped)), \
+                    mock.patch.object(library, "_archive_file",
+                                      return_value=archived) as archive_mock:
+                result = asyncio.run(library._process_completed_file(video, {
+                    "scrape_output_dir": str(root / "archive"),
+                    "scrape_watch_dir": str(video.parent),
+                    "scrape_meta_enabled": True,
+                    "scrape_organize_enabled": True,
+                    "scrape_video_rename_enabled": True,
+                    "archive_enabled": True,
+                    "archive_mode": "hardlink",
+                    "archive_by_month": False,
+                    "scrape_folder_naming": "code",
+                }))
+            self.assertTrue(result["moved"])
+            self.assertTrue(archive_mock.call_args.kwargs["rename"])
 
     def test_incomplete_archive_transaction_rolls_back_video_and_keeps_source(self):
         with tempfile.TemporaryDirectory() as raw:

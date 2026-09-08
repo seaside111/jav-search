@@ -86,6 +86,29 @@ class TranslationAdapterTests(unittest.TestCase):
                 "A and B", {"api_key": "k", "base_url": "https://translation.googleapis.com"}, "auto", "zh", 30))
         self.assertEqual(result["result"], "A & B")
 
+    def test_all_added_provider_dispatch_paths_return_translation(self):
+        providers = {
+            "baidu": "translate_baidu", "aliyun": "translate_aliyun",
+            "deepl": "translate_deepl", "youdao": "translate_youdao",
+            "microsoft": "translate_microsoft", "google": "translate_google",
+            "openai": "translate_openai_compatible",
+            "deepseek": "translate_openai_compatible",
+            "grok": "translate_openai_compatible",
+            "openrouter": "translate_openai_compatible",
+            "siliconflow": "translate_openai_compatible",
+            "custom_openai": "translate_openai_compatible",
+            "claude": "translate_claude", "gemini": "translate_gemini",
+        }
+        for provider, function_name in providers.items():
+            with self.subTest(provider=provider), mock.patch.object(
+                    translator, function_name,
+                    mock.AsyncMock(return_value={
+                        "success": True, "result": "中文", "provider": provider})) as call:
+                result = asyncio.run(translator.translate(
+                    "日本語", provider, {"translate_provider_configs": {provider: {}}}))
+            self.assertTrue(result["success"])
+            call.assert_awaited_once()
+
 
 class TranslationConfigTests(unittest.TestCase):
     def test_nested_translation_secrets_are_masked(self):

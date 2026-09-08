@@ -611,7 +611,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.26</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.27</div>
   <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -3196,12 +3196,8 @@ async function saveSettings(refreshMonitor = true) {
         setTimeout(checkJackettStatus, 300);
       }
       if (payload.qb_url || payload.tr_url) setTimeout(checkQbStatus, 300);
-      // 通知后端按最新配置启停监控，再刷新状态
-      if (refreshMonitor) {
-        try {
-          await fetch(`${API}/api/library/scrape/monitor/refresh`, { method: 'POST' });
-        } catch (e) { /* ignore */ }
-      }
+      // POST /api/config 已由后端按新配置刷新监控；这里不再重复调用，
+      // 避免一次保存产生两条相同的“配置变更”日志。
       setTimeout(refreshScrapeStatus, 500);
       return true;
     } else {
@@ -3459,7 +3455,7 @@ async function checkVersion() {
   try {
     const resp = await fetch(`${API}/api/version`, { cache: 'no-store' });
     const d = await safeJson(resp);
-      chip.textContent = 'v' + (d.current || '1.4.6.26');
+      chip.textContent = 'v' + (d.current || '1.4.6.27');
     if (d.update_available && d.latest) {
       chip.classList.add('has-update', 'clickable');
       chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;

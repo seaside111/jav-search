@@ -69,7 +69,7 @@ docker stop jav-search && docker rm jav-search
 # 再次执行上面的 docker run 命令即可
 ```
 
-> 当前正式版本为 `v1.4.6.26`，也可以将镜像标签 `:latest` 换成固定版本标签 `:v1.4.6.26`。
+> 当前正式版本为 `v1.4.6.27`，也可以将镜像标签 `:latest` 换成固定版本标签 `:v1.4.6.27`。
 
 版本检测读取 GitHub 的最新正式 Release（`/releases/latest`），不是直接读取 GHCR 的 `:latest` 标签。正式版本必须推送版本 tag；GitHub Actions 会自动创建对应 Release，并把 tag 注入镜像的 `/api/version`。Beta Release 不会作为正式版本参与检测。
 

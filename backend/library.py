@@ -104,7 +104,7 @@ def _strip_trailing_part(name: str) -> str:
 # （10musume/1pondo/Carib 060226_01、heydouga-4017-001）等。
 # 顺序很重要：更「专」「长」的格式排在前，避免被宽松规则截断（如 heydouga 不被截成 HEYDOUGA-4017）。
 _CODE_PATTERNS = [
-    re.compile(r'\b(FC2-?PPV-?\d{5,8})(?![0-9])', re.IGNORECASE),        # FC2-PPV-1234567（容许 _1/_2 分集尾巴）
+    re.compile(r'\b(FC2-?(?:PPV-?)?\d{5,8})(?![0-9])', re.IGNORECASE),  # FC2-PPV-1234567 / FC2-1234567
     re.compile(r'\b([A-Z]{3,10}-\d{3,5}-\d{2,4})\b', re.IGNORECASE),     # heydouga-4017-001（厂牌-数字-数字）
     re.compile(r'\b([A-Z]{1,8}\d{1,4}-\d{2,6})\b', re.IGNORECASE),      # T28-304（字母+数字-数字）
     re.compile(r'\b(\d{3,4}[A-Z]{2,6}-\d{2,5})\b', re.IGNORECASE),       # 390JAC-234 / 259LUXU-1234
@@ -218,6 +218,7 @@ _monitor_state: dict = {
 _TASKS_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "scrape_tasks.json"
 _tasks: dict[str, dict] = {}
 _tasks_loaded = False
+_nfo_title_repair_checked: set[tuple[str, str]] = set()
 _TASK_SUCCESS_MAX = 300
 _TASK_FAILURE_MAX = 2000
 
@@ -280,6 +281,107 @@ def _task_update(code: str, **changes) -> None:
     _save_tasks()
 
 
+def _rewrite_nfo_title(path: Path, expected_title: str, code: str) -> bool:
+    """Replace only <title> when this NFO proves it belongs to *code*."""
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+        ids = [(node.text or "").strip() for node in root.findall("uniqueid")
+               if (node.text or "").strip()]
+        if code and ids and all(_norm(value) != _norm(code) for value in ids):
+            return False
+        if code and not ids and _norm(code) not in _norm(path.stem):
+            return False
+        title = root.find("title")
+        current_title = (title.text or "").strip() if title is not None else ""
+        if current_title == expected_title:
+            return False
+        # Restrict the automatic migration to the known failure signature:
+        # an untranslated Japanese title despite a non-Japanese translated
+        # title recorded by the successful task. Preserve later user edits.
+        if not _has_kana(current_title) or _has_kana(expected_title):
+            return False
+        if title is None:
+            title = ET.Element("title")
+            root.insert(0, title)
+        title.text = expected_title
+        ET.indent(tree, space="  ")
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tree.write(tmp, encoding="utf-8", xml_declaration=True)
+        tmp.replace(path)
+        return True
+    except Exception as exc:
+        _log(f"修复 NFO 中文标题失败：{path}（{exc}）")
+        return False
+
+
+def _repair_recorded_archive_name(target_dir: Path, source_video: Path,
+                                  code: str) -> bool:
+    """Apply the saved rename policy to the one archived file from this task."""
+    old_video = target_dir / source_video.name
+    desired_video = target_dir / f"{_safe_name(code)}{source_video.suffix.lower()}"
+    if (not old_video.is_file() or old_video == desired_video
+            or desired_video.exists()):
+        return False
+    old_nfo = target_dir / f"{old_video.stem}.nfo"
+    desired_nfo = target_dir / f"{desired_video.stem}.nfo"
+    if old_nfo.is_file() and desired_nfo.exists():
+        _log(f"归档标准 NFO 已存在，保留当前视频名避免冲突：{desired_nfo}")
+        return False
+    video_renamed = False
+    try:
+        old_video.rename(desired_video)
+        video_renamed = True
+        if old_nfo.is_file():
+            old_nfo.rename(desired_nfo)
+        _log(f"已按当前设置修复归档视频文件名：{old_video.name} → {desired_video.name}")
+        return True
+    except Exception as exc:
+        if video_renamed and desired_video.exists() and not old_video.exists():
+            try:
+                desired_video.rename(old_video)
+            except OSError:
+                pass
+        _log(f"修复归档视频文件名失败：{old_video}（{exc}）")
+        return False
+
+
+def _repair_recorded_nfo_title(video_path: Path, config: dict) -> list[Path]:
+    """Repair the stale-NFO bug from a completed task without re-archiving media."""
+    _load_tasks()
+    task = _tasks.get(_task_storage_key("", str(video_path))) or {}
+    record = task.get("record") if isinstance(task.get("record"), dict) else {}
+    expected = str(record.get("title_zh") or task.get("title_zh") or "").strip()
+    code = str(record.get("code") or task.get("code") or "").strip()
+    checked_key = (str(video_path), expected)
+    if checked_key in _nfo_title_repair_checked:
+        return []
+    if (not config.get("scrape_translate_enabled", True)
+            or str(task.get("status") or "").lower() != "success"
+            or not expected or not code):
+        return []
+
+    paths = []
+    sidecar_dir = _flat_sidecar_dir(video_path, code, config) or video_path.parent
+    paths.append(sidecar_dir / f"{video_path.stem}.nfo")
+    target_text = str(record.get("target_dir") or "").strip()
+    target_dir = Path(target_text) if target_text else None
+    if target_dir and target_dir.is_dir():
+        paths.extend(sorted(target_dir.glob("*.nfo")))
+
+    changed_dirs = []
+    for nfo in dict.fromkeys(paths):
+        if nfo.is_file() and _rewrite_nfo_title(nfo, expected, code):
+            changed_dirs.append(nfo.parent)
+            _log(f"已按任务记录修复 NFO 中文标题：{code} → {nfo}")
+    if (target_dir and target_dir in changed_dirs
+            and config.get("scrape_organize_enabled", True)
+            and config.get("scrape_video_rename_enabled", True)):
+        _repair_recorded_archive_name(target_dir, video_path, code)
+    _nfo_title_repair_checked.add(checked_key)
+    return list(dict.fromkeys(changed_dirs))
+
+
 # ─────────────────────────────────────────
 # 请求模型
 # ─────────────────────────────────────────
@@ -310,7 +412,12 @@ def _match_code(text: str) -> str:
         if m:
             if len(m.groups()) == 2:
                 return f"{m.group(1).upper()}-{m.group(2)}"
-            return m.group(1).upper()
+            value = m.group(1).upper()
+            if value.startswith("FC2"):
+                number = re.search(r"\d{5,8}", value)
+                if number:
+                    return f"FC2-PPV-{number.group(0)}"
+            return value
     return ""
 
 
@@ -924,10 +1031,15 @@ async def _resolve_code(video_path: Path, config: dict) -> str:
 
 # 日文（含假名/汉字）检测：用于判断是否需要翻译
 _JP_RE = re.compile(r'[぀-ヿ㐀-鿿]')
+_KANA_RE = re.compile(r'[ぁ-ゖァ-ヺー]')
 
 
 def _has_jp(text: str) -> bool:
     return bool(_JP_RE.search(text or ""))
+
+
+def _has_kana(text: str) -> bool:
+    return bool(_KANA_RE.search(text or ""))
 
 
 def _safe_name(name: str) -> str:
@@ -1379,15 +1491,23 @@ def _source_item_for_code(rows: list[dict], code: str) -> Optional[dict]:
     return None
 
 
-async def _ensure_cover(movie: dict, code: str, proxy: Optional[str]) -> dict:
-    """Fill a missing cover from the guarded JavDB fallback.
+async def _ensure_cover(movie: dict, code: str, config: dict,
+                        proxy: Optional[str]) -> dict:
+    """Fill a missing cover from the exact-code automatic source chain.
 
     This is intentionally a one-shot fallback used during the initial scrape.
     It does not fetch samples or create a persistent artwork retry task.
     """
     if movie.get("cover"):
         return movie
-    for source in ("javdb",):
+    preferred = (movie.get("source") or "").strip().lower()
+    if preferred in {"dmm/fanza", "fanza"}:
+        preferred = "dmm"
+    allowed = {"javbus", "javdb", "dmm", "avsox", "avmoo", "fc2"}
+    sources = list(_automatic_scrape_sources(code, config))
+    if preferred in allowed and preferred not in sources:
+        sources.insert(0, preferred)
+    for source in sources:
         rows, status = await search_source_status(
             code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=3)
         item = _source_item_for_code(rows, code)
@@ -1419,6 +1539,11 @@ async def _ensure_downloadable_cover(movie: dict, code: str, config: dict,
     tried_urls: set[str] = set()
     enabled = _enabled_artwork_sources(code, config)
     current_source = (movie.get("poster_source") or movie.get("source") or "").strip().lower()
+    if current_source in {"dmm/fanza", "fanza"}:
+        current_source = "dmm"
+    if (current_source in {"javbus", "javdb", "dmm", "avsox", "avmoo", "fc2"}
+            and current_source not in enabled):
+        enabled.insert(0, current_source)
     if current_source == "jav321":
         _log(f"忽略历史 JAV321 封面并按番号重新取图：{code}")
         movie["cover"] = ""
@@ -1534,6 +1659,12 @@ async def _repair_placeholder_metadata(movie: dict, code: str, config: dict,
     if not _is_placeholder_title(movie.get("title", ""), code):
         return movie
     enabled = _enabled_artwork_sources(code, config)
+    current_source = (movie.get("source") or "").strip().lower()
+    if current_source in {"dmm/fanza", "fanza"}:
+        current_source = "dmm"
+    if (current_source in {"javbus", "javdb", "dmm", "avsox", "avmoo", "fc2"}
+            and current_source not in enabled):
+        enabled.insert(0, current_source)
     priority = {"javdb": 0, "javbus": 1, "dmm": 2, "avsox": 3,
                 "avmoo": 4, "fc2": 5}
     for source in sorted(dict.fromkeys(enabled), key=lambda s: priority.get(s, 99)):
@@ -1704,11 +1835,23 @@ def _merge_artwork(target: dict, detail: dict, source: str = "") -> bool:
 
 
 def _enabled_artwork_sources(code: str, config: dict) -> list[str]:
+    # FC2 has its own identifier namespace and dedicated MissAV/fourhoi-backed
+    # scraper. The source checkboxes mainly control search/latest presentation;
+    # a recognised FC2 file in the watch folder must remain scrapeable.
+    if _norm(code).startswith("fc2ppv"):
+        return ["fc2"]
     enabled = [s for s in (config.get("sources") or ["javbus", "javdb"])
                if s in {"javbus", "javdb", "avsox", "avmoo", "fc2", "dmm"}]
-    if not _norm(code).startswith("fc2ppv"):
-        enabled = [s for s in enabled if s != "fc2"]
-    return enabled
+    return [s for s in enabled if s != "fc2"]
+
+
+def _automatic_scrape_sources(code: str, config: dict) -> list[str]:
+    """Return deterministic exact-code metadata sources for watch scraping."""
+    if _norm(code).startswith("fc2ppv"):
+        return ["fc2"]
+    enabled = set(_enabled_artwork_sources(code, config))
+    return [source for source in ("javbus", "javdb", "dmm", "avsox", "avmoo")
+            if source in enabled]
 
 
 async def _backfill_artwork(movie: dict, code: str, config: dict,
@@ -2278,33 +2421,28 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                 _log(f"原源补抓失败（用已有内容继续）：{code}: {e}")
         _log(f"用推送元数据刮削：{code} 标题《{(movie.get('title') or '')[:40]}》来源 {movie.get('source','')}")
         # Old frontend/detail-cache versions could attach another movie's
-        # samples to otherwise correct pushed metadata. Re-resolve artwork by
-        # exact code for every downloaded file; keep textual metadata intact.
+        # samples to otherwise correct pushed metadata. Discard those optional
+        # samples, retain the selected source's cover, and validate its bytes
+        # below. A forced JavBus lookup here could replace valid FC2/uncensored
+        # artwork when the same identifier also existed on another source.
         movie["samples"] = []
-        verified_artwork = await search(
-            query=code, mode=SEARCH_MODE_CODE, proxy=proxy, sources=["javbus"])
-        verified_item = _source_item_for_code(verified_artwork, code)
-        if verified_item and verified_item.get("cover"):
-            movie["cover"] = verified_item["cover"]
-            movie["poster_source"] = "javbus"
-            movie.setdefault("source_urls", {})["JavBus"] = verified_item.get("url", "")
-            _log(f"推送影片图片已按番号重新核验：{code} ← JavBus")
-        else:
-            _log(f"JavBus 图片核验未命中：{code}，转 JavDB 精确检索")
+        _log(f"保留推送来源封面并校验图片内容：{code} ← {movie.get('source', '')}")
     else:
-        _log(f"搜索元数据：{code}（首选 JavBus，代理 {'有' if proxy else '无'}）")
-        results = await search(query=code, mode=SEARCH_MODE_CODE, proxy=proxy,
-                               sources=["javbus"])
-        if not results:
-            # JavDB is the guarded exact-code fallback when JavBus has no item.
-            for source in ("javdb",):
-                rows, source_status = await search_source_status(
-                    code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=5)
-                candidate = _source_item_for_code(rows, code)
-                if candidate:
-                    results = [candidate]
-                    _log(f"自动刮削兜底命中：{code} ← {source}（状态 {source_status}）")
-                    break
+        source_order = _automatic_scrape_sources(code, config)
+        if not source_order:
+            _log(f"未配置可用于自动刮削的数据源：{code}")
+            return {"success": False, "filepath": filepath, "code": code,
+                    "error": "未配置可用于自动刮削的数据源"}
+        _log(f"搜索元数据：{code}（来源 {' → '.join(source_order)}，代理 {'有' if proxy else '无'}）")
+        results = []
+        for source in source_order:
+            rows, source_status = await search_source_status(
+                code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=5)
+            candidate = _source_item_for_code(rows, code)
+            if candidate:
+                results = [candidate]
+                _log(f"自动刮削命中：{code} ← {source}（状态 {source_status}）")
+                break
         if not results:
             _log(f"未找到影片信息：{code}（站点不可达或无该番号）")
             return {"success": False, "filepath": filepath, "code": code, "error": "未找到影片信息"}
@@ -2312,7 +2450,9 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         # 列表条目可能缺详情，补全第一条
         movie = results[0]
         _log(f"命中影片：{code} 标题《{(movie.get('title') or '')[:40]}》来源 {movie.get('source','')}")
-        if not movie.get("actors") and movie.get("url"):
+        # A dedicated source may legitimately return a complete detail record
+        # with no actors (common for FC2). Do not fetch the same detail twice.
+        if not movie.get("detail_loaded") and movie.get("url"):
             try:
                 from scrapers import enrich
                 enriched = await enrich([{"url": movie["url"],
@@ -2330,7 +2470,7 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     # Automatic scraping only falls back for a missing cover. Once a cover is
     # available, poster/fanart are generated locally according to the jacket
     # setting; no background sample-art search is scheduled.
-    await _ensure_cover(movie, code, proxy)
+    await _ensure_cover(movie, code, config, proxy)
     # URL 非空仍可能是已过期的签名地址。以真实可解析的图片字节作为成功标准，
     # 并让已启用的 JavDB 通过过盾流程承担首个权威修复来源。
     resolved_cover_bytes = await _ensure_downloadable_cover(movie, code, config, proxy)
@@ -2381,17 +2521,22 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     folder = path.parent
     saved_nfo = saved_cover = False
 
-    if overwrite or not status["has_nfo"] or hard_subtitle_repair:
-        try:
-            nfo_file = metadata_dir / f"{path.stem}.nfo"
-            nfo_file.write_text(_build_nfo(
-                movie, title_for_nfo, plot_zh,
-                config.get("scrape_actor_thumb_in_nfo", True),
-                hard_subtitle=hard_subtitle), encoding="utf-8")
-            saved_nfo = True
-            _log(f"已写入 NFO：{nfo_file.name}")
-        except Exception as e:
-            _log(f"NFO 写入失败 {filepath}: {e}")
+    # Reaching this point means the movie requires a real scrape (the complete,
+    # valid NFO+poster+fanart fast path returned above). Always refresh the NFO
+    # with the metadata and translation produced in this run. A previous failed
+    # attempt may have left a syntactically valid but stale Japanese NFO while
+    # poster/fanart were missing; merely checking that the file exists used to
+    # preserve that stale title forever.
+    try:
+        nfo_file = metadata_dir / f"{path.stem}.nfo"
+        nfo_file.write_text(_build_nfo(
+            movie, title_for_nfo, plot_zh,
+            config.get("scrape_actor_thumb_in_nfo", True),
+            hard_subtitle=hard_subtitle), encoding="utf-8")
+        saved_nfo = True
+        _log(f"已写入 NFO：{nfo_file.name}")
+    except Exception as e:
+        _log(f"NFO 写入失败 {filepath}: {e}")
 
     cover_url, fanart_url = _artwork_urls(movie)
     jacket_mode = _use_jacket_artwork(config, movie, cover_url)
@@ -3629,6 +3774,11 @@ async def _process_completed_file(video_path: Path, config: dict,
         # 归档方式取全局 archive_mode（默认 hardlink 保留原文件；move 才移走+清原目录）
         mode = (config.get("archive_mode") or "hardlink").lower()
         rename_video = organize_on and config.get("scrape_video_rename_enabled", True)
+        _log(f"归档设置：规整 {'开' if organize_on else '关'}，"
+             f"视频重命名 {'开' if rename_video else '关'}，"
+             f"文件夹命名 {config.get('scrape_folder_naming', 'code')}，模式 {mode}")
+        if not rename_video:
+            _log(f"按当前设置保留原视频文件名：{video_path.name}（如需改为番号，请同时开启“规整”和“归档时重命名视频文件”）")
         # Even for requested move mode, first materialize and validate a
         # hardlink/copy archive while the source remains untouched. Only after
         # every required artifact exists do we remove the source video.
@@ -3819,6 +3969,17 @@ async def _scan_once(config: dict) -> int:
     for vf in initial_videos:
         n_total += 1
         fp = str(vf)
+        repaired_dirs = _repair_recorded_nfo_title(vf, config)
+        source_stage = (_flat_sidecar_dir(
+            vf, _recognize_code(vf, watch), config) or vf.parent)
+        archive_repairs = [folder for folder in repaired_dirs if folder != source_stage]
+        if archive_repairs and config.get("emby_url") and config.get("emby_api_key"):
+            try:
+                import actor_scraper
+                for folder in archive_repairs:
+                    await actor_scraper.notify_emby_folder(folder, config)
+            except Exception as exc:
+                _log(f"NFO 标题修复后的 Emby 刷新通知失败（下次媒体库扫描仍会读取）：{exc}")
         if fp in _processed:
             n_done_before += 1
             continue
