@@ -60,7 +60,7 @@ class JavDbFlareSolverrTests(unittest.TestCase):
         only_retired = config_manager._without_removed_keys({"sources": ["jav321"]})
         self.assertEqual(only_retired["sources"], ["javbus", "javdb"])
 
-    def test_retired_jav321_detail_source_is_disabled(self):
+    def test_jav321_is_allowed_only_as_detail_fallback(self):
         import scrapers
         detail = {
             "code": "CLOT-041", "source": "JAV321", "detail_loaded": True,
@@ -68,18 +68,42 @@ class JavDbFlareSolverrTests(unittest.TestCase):
             "url": "https://www.jav321.com/search",
         }
         search_mock = mock.AsyncMock(return_value=([detail], "ok"))
-        enrich_mock = mock.AsyncMock(return_value=[])
-        with mock.patch.object(main, "load_config", return_value={"sources": ["jav321"]}), \
+        enrich_mock = mock.AsyncMock(return_value=[(detail, "ok")])
+        with mock.patch.object(main, "load_config", return_value={"sources": ["javbus"]}), \
                 mock.patch.object(scrapers, "search_source_status", search_mock), \
                 mock.patch.object(main, "enrich", enrich_mock):
             result = asyncio.run(main.api_detail_resolve(main.ResolveDetailRequest(
                 code="CLOT-041", source="jav321",
                 url="https://www.jav321.com/search")))
 
-        self.assertEqual(result["status"], "disabled")
-        self.assertIsNone(result["detail"])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["detail"]["samples"], ["https://img.jav321/sample-1.jpg"])
         search_mock.assert_not_awaited()
-        enrich_mock.assert_not_awaited()
+        enrich_mock.assert_awaited_once()
+
+    def test_javbus_parses_samples_and_magnet_fragment(self):
+        html = """
+        <div id="sample-waterfall">
+          <a href="/pics/sample/9635_1.jpg"><img src="/pics/thumb/9635_1.jpg"></a>
+          <a href="https://img.test/9635_2.jpg"></a>
+        </div>
+        """
+        samples = _javbus_base._parse_javbus_samples(
+            _javbus_base.BeautifulSoup(html, "html.parser"), "https://www.javbus.com")
+        self.assertEqual(samples, [
+            "https://www.javbus.com/pics/sample/9635_1.jpg",
+            "https://img.test/9635_2.jpg",
+        ])
+        magnets = _javbus_base._parse_javbus_magnets("""
+          <tr><td><a href="magnet:?xt=urn:btih:ABC">SUN-067</a><b>高清</b></td>
+              <td><a href="magnet:?xt=urn:btih:ABC">2.49GB</a></td>
+              <td>2026-08-30</td></tr>
+        """)
+        self.assertEqual(magnets, [{
+            "name": "SUN-067", "link": "magnet:?xt=urn:btih:ABC",
+            "size": "2.49GB", "date": "2026-08-30", "hd": True,
+            "subtitle": False,
+        }])
 
     def test_pushed_intake_keeps_clicked_detail_artwork(self):
         original_file = intake._FILE
@@ -289,8 +313,10 @@ class JavDbFlareSolverrTests(unittest.TestCase):
         html = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
             encoding="utf-8")
         self.assertIn("/api/details/resolve", html)
-        self.assertIn("return ['javdb'].filter", html)
-        self.assertIn("if (m.samples && m.samples.length) break", html)
+        self.assertIn("sources.push('javbus')", html)
+        self.assertIn("sources.push('jav321')", html)
+        self.assertIn("source === 'jav321' && m.samples && m.samples.length", html)
+        self.assertNotIn("return ['javdb'].filter", html)
         self.assertNotIn("m._javdb_extra_loaded = true", html)
         self.assertNotIn("idxs.forEach(i => { if (currentResults[i]) currentResults[i].detail_loaded = true; })", html)
 
@@ -2102,6 +2128,18 @@ class VideoClassificationTests(unittest.TestCase):
         item = jav321._parse(html, query="ABC-123", url="https://www.jav321.com/video/abc-123")
         self.assertEqual(item["cover"], "https://www.jav321.com/images/cover.jpg")
         self.assertEqual(item["samples"], ["https://www.jav321.com/images/sample1.jpg"])
+
+    def test_jav321_wide_column_dmm_poster_is_not_a_sample(self):
+        html = """
+        <html><h3>SUN-067 title</h3><div>品番：SUN-067</div>
+        <div class="col-md-3"><img src="http://pics.dmm.co.jp/video/sun067ps.jpg"></div>
+        <div class="col-md-9">
+          <a href="http://pics.dmm.co.jp/video/sun067pl.jpg"><img src="poster.jpg"></a>
+          <a href="http://pics.dmm.co.jp/video/sun067jp-1.jpg"><img src="thumb.jpg"></a>
+        </div></html>
+        """
+        item = jav321._parse(html, query="SUN-067", url="https://www.jav321.com/search")
+        self.assertEqual(item["samples"], ["http://pics.dmm.co.jp/video/sun067jp-1.jpg"])
 
     def test_jav321_rejects_nearby_fuzzy_code(self):
         html = """

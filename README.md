@@ -1,6 +1,6 @@
 # JAV Search
 
-此分支是 JAV Search 的 **Windows 桌面版**，当前版本为 `1.4.6.28`。它使用 Windows 本机目录、本机下载器和独立安装器，将多来源搜索、资源发现、自动刮削归档及 Emby 适配整合在桌面窗口中。
+此分支是 JAV Search 的 **Windows 桌面版**，当前版本为 `1.4.6.29`。它使用 Windows 本机目录、本机下载器和独立安装器，将多来源搜索、资源发现、自动刮削归档及 Emby 适配整合在桌面窗口中。
 
 > Windows 发布只使用 `windows-v*` 标签和 `JAV-Search-v*-Windows-x64-Setup.exe` 安装器，并作为独立 Pre-release 提供。Docker 正式版使用 `v*` 标签和 GHCR `latest`；两个更新通道互不比较，也不会互相覆盖。
 

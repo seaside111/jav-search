@@ -614,7 +614,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.28</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.29</div>
   <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -2294,20 +2294,19 @@ function detailSourceUrl(m, source) {
   return hit ? hit[1] : '';
 }
 
-// 详情缺少样品图时从已启用的 JavDB 按需补充。
+// 详情扩展固定使用 JavBus；若 JavBus 仍无样品图，再用 JAV321 做最后兜底。
 function detailExtraSources(m) {
   if (!m || !m.code) return [];
-  const enabled = new Set((configuredSources.length ? configuredSources : ['javbus', 'javdb'])
-    .map(normalizedSource));
   const primary = normalizedSource(m.source);
   const state = m._extra_detail_state || {};
-  if (m.samples && m.samples.length) return [];
-  return ['javdb'].filter(source =>
-    enabled.has(source) && source !== primary && !state[source]);
+  const sources = [];
+  if (primary !== 'javbus' && !state.javbus) sources.push('javbus');
+  if ((!m.samples || !m.samples.length) && !state.jav321) sources.push('jav321');
+  return sources;
 }
 
 // 详情里「磁力 / 样品图」区块是否仍在后台补抓中（显示「抓取中」用）：
-//  ① 合并卡待补抓 JavDB 样品图；或
+//  ① 合并卡待补抓 JavBus 磁力/样品图（必要时 JAV321 兜底）；或
 //  ② 慢源（JavDB/FC2 走 FlareSolverr）单条详情尚未加载完
 //     —— 此时封面/标题已用列表级数据先行展示，只有磁力/样品图等待补全。
 function detailExtraPending(m) {
@@ -2361,7 +2360,7 @@ function renderDetailExtra(m, idx) {
   // 还没补抓且当前没有样品图/磁力时，显示加载提示。
   if (detailExtraPending(m) && !samplesHtml && !magnetsHtml) {
     html += `<div><div class="detail-section-label">磁力链 / 样品图</div>
-      <div style="color:var(--text-dim);font-size:13px"><span class="drawer-spinner"></span> 正在从 JavDB 补充详情 / 样品图…</div></div>`;
+      <div style="color:var(--text-dim);font-size:13px"><span class="drawer-spinner"></span> 正在从 JavBus 补充磁力 / 样品图…</div></div>`;
   }
   return html;
 }
@@ -2391,7 +2390,7 @@ async function ensureExtraDetails(idx) {
   m._extra_detail_loading = m._extra_detail_loading || {};
   try {
     for (const source of detailExtraSources(m)) {
-      if (m.samples && m.samples.length) break;
+      if (source === 'jav321' && m.samples && m.samples.length) break;
       m._extra_detail_loading[source] = true;
       try {
         const resp = await fetch(`${API}/api/details/resolve`, {
@@ -2525,9 +2524,6 @@ async function openDetail(idx) {
   document.getElementById('detailModal').scrollTop = 0;
   document.getElementById('detailOverlay').classList.add('open');
 
-  // JavDB 样品图补抓与主来源详情并行。
-  if (detailExtraSources(m0).length) ensureExtraDetails(idx);
-
   // ② 详情未加载的慢源（JavDB/FC2 走 FlareSolverr）：后台补抓完整详情，
   //    回来后用完整数据重渲染弹窗，并同步升级列表卡片（含封面）。
   if (!m0.detail_loaded) {
@@ -2536,7 +2532,9 @@ async function openDetail(idx) {
     refreshDetailContent(idx);
   }
 
-  // ③ 样品图已在弹窗打开时按需从 JavDB 补抓。
+  // ③ 主详情完成后按 JavBus → JAV321 的固定顺序补磁力/样品图。
+  const current = currentResults[idx];
+  if (detailExtraSources(current).length) ensureExtraDetails(idx);
 }
 
 function closeDetail() {
@@ -3576,7 +3574,7 @@ async function loadRuntimeConfig() {
 async function checkVersion() {
   const chip = document.getElementById('versionChip');
   if (!chip) return;
-  const currentText = (chip.textContent.match(/[\d.]+/) || ['1.4.6.28'])[0];
+  const currentText = (chip.textContent.match(/[\d.]+/) || ['1.4.6.29'])[0];
   chip.classList.remove('has-update', 'clickable');
   chip.onclick = null;
   chip.title = platformInfo.windows_desktop ? '正在检测 Windows 更新…' : '正在检测 Docker 正式版更新…';
@@ -3584,7 +3582,7 @@ async function checkVersion() {
   try {
     const resp = await fetch(`${API}/api/version`, { cache: 'no-store' });
     const d = await safeJson(resp);
-    const current = d.current || '1.4.6.28';
+    const current = d.current || '1.4.6.29';
     if (d.update_available && d.latest) {
       chip.classList.add('has-update', 'clickable');
       chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;

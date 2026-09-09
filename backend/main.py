@@ -48,8 +48,8 @@ _VERSION_FILE = resource_path("VERSION")
 try:
     _IMAGE_VERSION = _VERSION_FILE.read_text(encoding="utf-8").strip()
 except (OSError, UnicodeError):
-    _IMAGE_VERSION = "1.4.6.28"
-APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.28"
+    _IMAGE_VERSION = "1.4.6.29"
+APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.29"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -822,12 +822,14 @@ async def api_details(req: DetailsRequest):
 @app.post("/api/details/resolve")
 async def api_detail_resolve(req: ResolveDetailRequest):
     """Resolve one enabled source by known URL or code, then fetch/cache detail."""
-    from scrapers import SOURCE_MODULES, search_source_status
+    from scrapers import SOURCE_MODULES, DETAIL_FALLBACK_MODULES, search_source_status
     source = (req.source or "").strip().lower()
     code = (req.code or "").strip()
     config = load_config()
     enabled = [str(s).lower() for s in (config.get("sources") or [])]
-    if source not in SOURCE_MODULES or source not in enabled:
+    detail_fallback = source == "jav321"
+    known_source = source in SOURCE_MODULES or source in DETAIL_FALLBACK_MODULES
+    if not known_source or (source not in enabled and not detail_fallback):
         return {"success": True, "status": "disabled", "detail": None}
     proxy = config.get("proxy") or None
     url = (req.url or "").strip()

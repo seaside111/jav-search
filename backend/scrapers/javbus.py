@@ -53,4 +53,5 @@ async def get_latest(proxy: Optional[str] = None, max_results: int = 40) -> list
 # 详情
 # ──────────────────────────────────────────────
 async def fetch_detail(url: str, proxy: Optional[str] = None) -> Optional[dict]:
-    return await base.fetch_detail(url, JAVBUS_BASE, SOURCE, proxy)
+    return await base.fetch_detail(
+        url, JAVBUS_BASE, SOURCE, proxy, include_javbus_extras=True)

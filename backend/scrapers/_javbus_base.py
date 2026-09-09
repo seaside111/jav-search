@@ -10,6 +10,7 @@ V1.3 架构要点：列表抓取 与 详情抓取 彻底分离
 """
 import re
 import asyncio
+import random
 from typing import Optional
 import httpx
 from bs4 import BeautifulSoup
@@ -204,7 +205,57 @@ async def fetch_list_only(
 # ──────────────────────────────────────────────
 # 详情页解析
 # ──────────────────────────────────────────────
-async def fetch_detail(url: str, base_url: str, source: str, proxy: Optional[str] = None) -> Optional[dict]:
+def _parse_javbus_samples(soup: BeautifulSoup, base_url: str) -> list[str]:
+    """Parse JavBus' server-rendered sample gallery, preferring full-size links."""
+    samples = []
+    seen = set()
+    for node in soup.select(
+        "#sample-waterfall a[href], #sample-waterfall img, "
+        "a[href*='/pics/sample/'], img[src*='/pics/sample/']"
+    ):
+        if node.name == "img" and node.find_parent("a") is not None:
+            continue
+        value = (node.get("href") or node.get("data-original")
+                 or node.get("data-src") or node.get("src") or "")
+        full = _abs_url(value.strip(), base_url)
+        if full and full not in seen:
+            seen.add(full)
+            samples.append(full)
+    return samples[:40]
+
+
+def _parse_javbus_magnets(html: str) -> list[dict]:
+    """Parse the HTML fragment returned by JavBus' magnet AJAX endpoint."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    magnets = []
+    seen = set()
+    for row in soup.select("tr"):
+        link_tag = row.select_one("a[href^='magnet:']")
+        if not link_tag:
+            continue
+        link = (link_tag.get("href") or "").strip()
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        cells = row.select("td")
+        name = link_tag.get_text(" ", strip=True)
+        size = cells[1].get_text(" ", strip=True) if len(cells) > 1 else ""
+        date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else ""
+        flags = cells[0].get_text(" ", strip=True) if cells else name
+        magnets.append({
+            "name": name,
+            "link": link,
+            "size": size,
+            "date": date,
+            "hd": "高清" in flags or bool(re.search(r"\bHD\b", flags, re.I)),
+            "subtitle": "字幕" in flags,
+        })
+    return magnets
+
+
+async def fetch_detail(url: str, base_url: str, source: str,
+                       proxy: Optional[str] = None,
+                       include_javbus_extras: bool = False) -> Optional[dict]:
     headers = make_headers(base_url)
     proxy_arg = proxy or None
     try:
@@ -214,7 +265,31 @@ async def fetch_detail(url: str, base_url: str, source: str, proxy: Optional[str
             resp = await client.get(url)
             if resp.status_code != 200:
                 return None
-            return parse_detail(resp.text, url, base_url, source)
+            detail = parse_detail(resp.text, url, base_url, source)
+            if not detail or not include_javbus_extras:
+                return detail
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            detail["samples"] = _parse_javbus_samples(soup, base_url)
+            detail["magnets"] = []
+            detail["_javbus_extras_checked"] = True
+
+            gid = re.search(r"\bvar\s+gid\s*=\s*(\d+)\s*;", resp.text)
+            uc = re.search(r"\bvar\s+uc\s*=\s*(\d+)\s*;", resp.text)
+            img = re.search(r"\bvar\s+img\s*=\s*(['\"])(.*?)\1\s*;", resp.text)
+            if gid and uc and img:
+                ajax_url = base_url.rstrip("/") + "/ajax/uncledatoolsbyajax.php"
+                headers = {"X-Requested-With": "XMLHttpRequest", "Referer": str(resp.url)}
+                try:
+                    mag_resp = await client.get(ajax_url, params={
+                        "gid": gid.group(1), "lang": "zh", "img": img.group(2),
+                        "uc": uc.group(1), "floor": random.randint(1, 1000),
+                    }, headers=headers)
+                    if mag_resp.status_code == 200:
+                        detail["magnets"] = _parse_javbus_magnets(mag_resp.text)
+                except Exception as exc:
+                    print(f"[{source}] magnet error {url}: {type(exc).__name__}: {exc!r}")
+            return detail
     except Exception as e:
         print(f"[{source}] detail error {url}: {type(e).__name__}: {e!r}")
         return None

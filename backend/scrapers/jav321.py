@@ -33,6 +33,12 @@ def _image_url(value: str) -> str:
     return _abs(raw)
 
 
+def _is_dmm_cover_variant(url: str) -> bool:
+    """JAV321 exposes DMM's `ps`/`pl` poster pair inside the wide media column."""
+    path = (url or "").lower().split("?", 1)[0]
+    return bool(re.search(r"(?:ps|pl)\.(?:jpg|jpeg|png|webp)$", path))
+
+
 def _parse(html: str, query: str = "", url: str = "") -> Optional[dict]:
     soup = BeautifulSoup(html or "", "html.parser")
     title_node = soup.select_one("h3") or soup.select_one("h1") or soup.select_one("title")
@@ -84,7 +90,8 @@ def _parse(html: str, query: str = "", url: str = "") -> Optional[dict]:
                                child.get("data-lazy-src"), child.get("srcset"),
                                child.get("src")])
         full = next((_image_url(value) for value in values if _image_url(value)), "")
-        if full and full != cover and full not in samples:
+        if (full and full != cover and not _is_dmm_cover_variant(full)
+                and full not in samples):
             samples.append(full)
 
     actors = []
