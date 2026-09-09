@@ -12,7 +12,7 @@ import asyncio
 import re
 from typing import Optional
 
-from . import javbus, javdb, avsox, avmoo, fc2, dmm
+from . import javbus, javdb, avsox, avmoo, fc2, dmm, jav321
 from . import _detailcache
 
 SEARCH_MODE_CODE = "code"
@@ -27,6 +27,13 @@ SOURCE_MODULES = {
     "avmoo": avmoo,
     "fc2": fc2,        # V1.4.3：FC2-PPV 专用源（fc2ppvdb.com，无码/素人）
     "dmm": dmm,
+}
+
+DETAIL_FALLBACK_MODULES = {
+    # Detail-only fallback. Config migration intentionally keeps JAV321 out of
+    # normal search/latest source lists; the detail resolver may call it after
+    # JavBus conclusively returns no samples.
+    "jav321": jav321,
 }
 
 # 合并时来源优先级（数字小者优先，作为主条目保留封面/标题）
@@ -181,7 +188,7 @@ async def search_source_status(query: str, mode: str, source: str,
                                proxy: Optional[str] = None,
                                max_results: int = 3) -> tuple[list[dict], str]:
     """Search one source and preserve whether it completed, timed out, or failed."""
-    mod = SOURCE_MODULES.get(source)
+    mod = SOURCE_MODULES.get(source) or DETAIL_FALLBACK_MODULES.get(source)
     if not mod:
         return [], "invalid"
     timeout = (_PER_SOURCE_TIMEOUT_DETAIL
@@ -251,7 +258,7 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
             actual = _normalize_code(value.get("code", ""))
             return bool(actual) and actual == expected_code
 
-        mod = SOURCE_MODULES.get(source)
+        mod = SOURCE_MODULES.get(source) or DETAIL_FALLBACK_MODULES.get(source)
         if not mod or not url:
             return result(None, "invalid")
         # 缓存命中即直接返回——前台预抓/点开详情/刮削回源共用这份缓存，
@@ -263,6 +270,10 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
         if (cached is not None and source == "javbus" and cached.get("actors")
                 and not any((actor.get("avatar") or "").startswith("http")
                             for actor in cached.get("actors") or [])):
+            cached = None
+        # Old JavBus detail-cache entries predate native sample/magnet support.
+        if (cached is not None and source == "javbus"
+                and not cached.get("_javbus_extras_checked")):
             cached = None
         if cached is not None:
             if identity_ok(cached):
