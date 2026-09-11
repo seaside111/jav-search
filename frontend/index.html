@@ -65,6 +65,30 @@
   }
   #searchInput:focus { border-color: var(--accent); }
   #searchInput::placeholder { color: var(--text-dim); }
+  .search-history {
+    display: none; position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 120;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 10px 28px rgba(0,0,0,.35); overflow: hidden;
+  }
+  .search-history.open { display: block; }
+  .search-history-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+    color: var(--text-muted); font-size: 12px;
+  }
+  .search-history-clear {
+    background: none; border: none; color: var(--text-dim); cursor: pointer;
+    font: inherit; padding: 2px 0;
+  }
+  .search-history-clear:hover { color: var(--accent); }
+  .search-history-item {
+    display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 12px;
+    background: transparent; border: none; color: var(--text-main); cursor: pointer;
+    font: inherit; text-align: left;
+  }
+  .search-history-item:hover { background: var(--bg-hover); }
+  .search-history-item .history-query { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .search-history-item .history-mode { color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
 
   .mode-select {
     background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
@@ -602,6 +626,7 @@
         <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
       </svg>
       <input id="searchInput" name="search" type="search" inputmode="search" placeholder="番号 / 演员名 / 关键词…" autocomplete="off">
+      <div id="searchHistory" class="search-history" role="listbox" aria-label="历史搜索"></div>
     </div>
     <select id="modeSelect" class="mode-select">
       <option value="auto">自动</option>
@@ -1352,10 +1377,82 @@ async function doLogout() {
 // ══════════════════════════════════════════
 // SEARCH (影片信息)
 // ══════════════════════════════════════════
+const SEARCH_HISTORY_KEY = 'jav_search_history_v1';
+const SEARCH_HISTORY_LIMIT = 8;
+
+function getSearchHistory() {
+  try {
+    const raw = localStorage.getItem(SEARCH_HISTORY_KEY);
+    const items = JSON.parse(raw || '[]');
+    return Array.isArray(items) ? items.filter(item => item && item.query) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveSearchHistory(query, mode) {
+  const normalized = String(query || '').trim();
+  if (!normalized) return;
+  const history = getSearchHistory().filter(item => !(item.query === normalized && item.mode === mode));
+  history.unshift({ query: normalized, mode: mode || 'auto' });
+  try { localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(history.slice(0, SEARCH_HISTORY_LIMIT))); } catch (e) { /* 忽略存储不可用 */ }
+  renderSearchHistory();
+}
+
+function renderSearchHistory() {
+  const panel = document.getElementById('searchHistory');
+  if (!panel) return;
+  const history = getSearchHistory();
+  if (!history.length) {
+    panel.innerHTML = '';
+    panel.classList.remove('open');
+    return;
+  }
+  const modeLabel = { code: '番号', actor: '演员', keyword: '关键词', auto: '自动' };
+  panel.innerHTML = `
+    <div class="search-history-header">
+      <span>历史搜索</span>
+      <button class="search-history-clear" type="button" onclick="clearSearchHistory(event)">清空</button>
+    </div>
+    ${history.map((item, index) => `
+      <button class="search-history-item" type="button" role="option" onclick="useSearchHistory(${index})">
+        <span class="history-query">${escHtml(item.query)}</span>
+        <span class="history-mode">${escHtml(modeLabel[item.mode] || '自动')}</span>
+      </button>`).join('')}`;
+}
+
+function showSearchHistory() {
+  renderSearchHistory();
+  const panel = document.getElementById('searchHistory');
+  if (panel && panel.innerHTML) panel.classList.add('open');
+}
+
+function hideSearchHistory() {
+  const panel = document.getElementById('searchHistory');
+  if (panel) panel.classList.remove('open');
+}
+
+function useSearchHistory(index) {
+  const item = getSearchHistory()[index];
+  if (!item) return;
+  document.getElementById('searchInput').value = item.query;
+  document.getElementById('modeSelect').value = item.mode || 'auto';
+  hideSearchHistory();
+  doSearch();
+}
+
+function clearSearchHistory(event) {
+  event.stopPropagation();
+  try { localStorage.removeItem(SEARCH_HISTORY_KEY); } catch (e) { /* 忽略存储不可用 */ }
+  hideSearchHistory();
+}
+
 async function doSearch() {
   const query = document.getElementById('searchInput').value.trim();
   if (!query) { showToast('请输入搜索词'); return; }
   const mode = document.getElementById('modeSelect').value;
+  saveSearchHistory(query, mode);
+  hideSearchHistory();
   const btn = document.getElementById('searchBtn');
   const spinner = document.getElementById('spinner');
   const statusText = document.getElementById('statusText');
@@ -3233,11 +3330,21 @@ function showToast(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
 }
 
-document.getElementById('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+const searchInput = document.getElementById('searchInput');
+searchInput.addEventListener('focus', showSearchHistory);
+searchInput.addEventListener('click', showSearchHistory);
+searchInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') doSearch();
+  if (e.key === 'Escape') hideSearchHistory();
+});
+document.addEventListener('click', e => {
+  if (!e.target.closest('.search-input-wrap')) hideSearchHistory();
+});
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     // 灯箱开着时，Esc 只关灯箱、保留详情弹窗，方便继续浏览
     if (lightboxOpen()) { closeLightbox(); return; }
+    hideSearchHistory();
     closeDetail(); closeSettings();
   }
 });
