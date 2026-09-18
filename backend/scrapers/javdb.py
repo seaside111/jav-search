@@ -269,19 +269,21 @@ async def _fetch_html(url: str, proxy: Optional[str], opts: Optional[dict] = Non
 def _parse_list(html: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     items = []
-    for item in soup.select("div.item"):
-        a = item.select_one("a[href]")
+    seen_urls = set()
+    for item in soup.select("div.item, a.box[href*='/v/']"):
+        a = item if item.name == "a" else item.select_one("a[href]")
         if not a:
             continue
         url = _abs(a.get("href", ""))
-        if "/v/" not in url:
+        if "/v/" not in url or url in seen_urls:
             continue
+        seen_urls.add(url)
 
         cover = ""
         cover_thumb = ""
         img = item.select_one("div.cover img") or item.select_one("img")
         if img:
-            cover = img.get("src") or img.get("data-src") or ""
+            cover = img.get("data-src") or img.get("src") or ""
             if cover.startswith("//"):
                 cover = "https:" + cover
             # 列表给的是 thumbs 缩略图：确定性升级为 covers 高清大封面，首页即清晰；
@@ -349,21 +351,31 @@ def _parse_list(html: str) -> list[dict]:
 
 
 async def _fetch_list_only(list_url_builder, proxy, max_results, max_pages=20,
-                           priority=PRIO_LATEST) -> list[dict]:
+                           priority=PRIO_LATEST, with_status=False):
     opts = _runtime_options()
     # 走 FlareSolverr 时每页都很慢（浏览器渲染+过盾），只抓 1 页（约 28-40 条，足够首页/首屏），
     # 避免多页累加超过单源超时被整体丢弃；直连（增强 httpx）则保持原页数上限。
     if opts.get("flaresolverr_url"):
         max_pages = 1
     all_items, seen = [], set()
+    result_status = "ok"
     for page in range(1, max_pages + 1):
         page_url = list_url_builder(page)
         html, status, err = await _fetch_html(page_url, proxy, opts, priority=priority)
         if err:
             print(f"[JavDB] list page{page} 失败: {err} (HTTP {status}) {page_url}")
+            result_status = ("partial" if all_items else
+                             "cf_challenge" if err == "cf_challenge" else "error")
             break
         page_items = _parse_list(html)
         if not page_items:
+            page_kind = _inspect_page(html).get("kind") if html else ""
+            if page_kind:
+                result_status = "partial" if all_items else page_kind
+            elif not html:
+                result_status = "partial" if all_items else "empty_response"
+            elif html and re.search(r'href=["\'][^"\']*/v/', html, re.IGNORECASE):
+                result_status = "partial" if all_items else "parse_error"
             break
         added = 0
         for it in page_items:
@@ -379,7 +391,8 @@ async def _fetch_list_only(list_url_builder, proxy, max_results, max_pages=20,
             break
         if added < 10:
             break
-    return all_items[:max_results]
+    result = all_items[:max_results]
+    return (result, result_status) if with_status else result
 
 
 # ──────────────────────────────────────────────
@@ -395,7 +408,18 @@ async def search_list(query: str, mode: str, proxy: Optional[str] = None, max_re
     # 番号搜索结果通常很少，限制页数
     pages = 2 if mode == "code" else 20
     return await _fetch_list_only(build, proxy, max_results, max_pages=pages,
-                                  priority=PRIO_SEARCH)
+                                   priority=PRIO_SEARCH)
+
+
+async def search_list_status(query: str, mode: str, proxy: Optional[str] = None,
+                             max_results: int = 300) -> tuple[list[dict], str]:
+    """The monitor needs the request/parse outcome when a list is empty."""
+    f = "actor" if mode == "actor" else "all"
+    search_base = f"{JAVDB_BASE}/search?q={query}&f={f}"
+    return await _fetch_list_only(
+        lambda page: search_base if page == 1 else f"{search_base}&page={page}",
+        proxy, max_results, max_pages=2 if mode == "code" else 20,
+        priority=PRIO_SEARCH, with_status=True)
 
 
 # ──────────────────────────────────────────────
@@ -457,7 +481,10 @@ def _parse_detail(html: str, url: str) -> Optional[dict]:
         if value_span:
             # 多个链接（演员/类别）用「, 」拼接，否则取整段文本
             links = value_span.find_all("a")
-            if links:
+            if ("番號" in label or "番号" in label or "ID" in label):
+                # The linked prefix and trailing digits can be separate text nodes.
+                value = value_span.get_text("", strip=True)
+            elif links:
                 value = ", ".join(a.get_text(strip=True) for a in links if a.get_text(strip=True))
             else:
                 value = value_span.get_text(strip=True)
@@ -709,13 +736,13 @@ async def diagnose(proxy: Optional[str] = None) -> dict:
 
     cf_blocked = (err == "cf_challenge") or _is_cf_challenge(html, status)
     items = _parse_list(html) if html and not cf_blocked else []
-    reachable = bool(items)
+    page = _inspect_page(html) if html else {"title": "", "snippet": "", "kind": ""}
+    reachable = bool(html and status == 200 and not err and not cf_blocked
+                     and page.get("kind") not in {"age_gate", "login_wall", "region_block",
+                                                  "geo_block", "captcha", "proxy_error"})
+    parsed = bool(items)
 
     # 解析不到片源时，看看实际拿到的是什么页面
-    page = {"title": "", "snippet": "", "kind": ""}
-    if not reachable and html:
-        page = _inspect_page(html)
-
     # JavDB 因版权封禁所在国家——重点：JavDB 封禁「日本本土 IP」，要换成非日本节点
     _cc = exit_ip.get("country_code", "")
     _country = exit_ip.get("country", "该国家")
@@ -733,8 +760,10 @@ async def diagnose(proxy: Optional[str] = None) -> dict:
         "captcha": "返回的是「人机验证」页面：需要 FlareSolverr 正确过验证或更换 IP。",
     }
 
-    if reachable:
+    if parsed:
         message = f"连接正常，解析到 {len(items)} 条最新片源。"
+    elif reachable:
+        message = "页面已连接，但未解析到影片卡片；页面结构可能变化。"
     elif err and err.startswith("flaresolverr"):
         # 直接回传 FlareSolverr 自身的报错，便于定位（如 cookies 格式 / 过盾失败 / 超时）
         message = f"FlareSolverr 报错：{err.split('flaresolverr:', 1)[-1].strip() or err}"
@@ -785,6 +814,7 @@ async def diagnose(proxy: Optional[str] = None) -> dict:
 
     return {
         "reachable": reachable,
+        "parsed": parsed,
         "cf_blocked": cf_blocked,
         "http_status": status,
         "item_count": len(items),

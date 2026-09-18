@@ -125,6 +125,8 @@ def _merge_lists(lists_by_source: list[tuple[str, list[dict]]]) -> list[dict]:
 _PER_SOURCE_TIMEOUT = 25.0          # 搜索用
 _PER_SOURCE_TIMEOUT_LATEST = 40.0   # 首页最新用
 _PER_SOURCE_TIMEOUT_DETAIL = 75.0   # 后台补图：容纳 FlareSolverr 启动、过盾和代理会话
+_CODE_LOOKUP_FIRST = 50             # Inspect the complete first result page before limiting output.
+_CODE_LOOKUP_MAX = 300              # Same upper bound as the usual frontend search.
 
 
 async def _run_source(label: str, coro, timeout: float):
@@ -186,25 +188,58 @@ async def search(
 
 async def search_source_status(query: str, mode: str, source: str,
                                proxy: Optional[str] = None,
-                               max_results: int = 3) -> tuple[list[dict], str]:
+                               max_results: int = 3,
+                               diagnostics: Optional[dict] = None) -> tuple[list[dict], str]:
     """Search one source and preserve whether it completed, timed out, or failed."""
     mod = SOURCE_MODULES.get(source) or DETAIL_FALLBACK_MODULES.get(source)
     if not mod:
         return [], "invalid"
     timeout = (_PER_SOURCE_TIMEOUT_DETAIL
                if source in _FLARESOLVERR_SOURCES else _PER_SOURCE_TIMEOUT)
+    lookup_limit = (max(max_results, _CODE_LOOKUP_FIRST)
+                    if mode == SEARCH_MODE_CODE else max_results)
+    lookup_limit = min(lookup_limit, _CODE_LOOKUP_MAX) if mode == SEARCH_MODE_CODE else lookup_limit
+
+    async def fetch(limit):
+        if source == "javdb" and hasattr(mod, "search_list_status"):
+            return await mod.search_list_status(query, mode, proxy, limit)
+        return await mod.search_list(query, mode, proxy, limit), "ok"
+
+    started = asyncio.get_running_loop().time()
     try:
-        rows = await asyncio.wait_for(
-            mod.search_list(query, mode, proxy, max_results),
-            timeout=timeout)
+        rows, status = await asyncio.wait_for(fetch(lookup_limit), timeout=timeout)
         if isinstance(rows, list) and mode == SEARCH_MODE_CODE:
-            rows = _exact_code_rows(rows, query)
-        return (rows if isinstance(rows, list) else []), "ok"
+            exact = _exact_code_rows(rows, query)
+            # A source that filled the first window may have the exact item later.
+            # Only crowded searches pay for a second, bounded lookup.
+            if (not exact and status == "ok" and len(rows) >= lookup_limit
+                    and lookup_limit < _CODE_LOOKUP_MAX):
+                remaining = timeout - (asyncio.get_running_loop().time() - started)
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                rows, status = await asyncio.wait_for(fetch(_CODE_LOOKUP_MAX),
+                                                      timeout=remaining)
+                lookup_limit = _CODE_LOOKUP_MAX
+                exact = _exact_code_rows(rows, query)
+            if diagnostics is not None:
+                diagnostics.update(raw_count=len(rows), lookup_limit=lookup_limit,
+                                   exact_count=len(exact), status=status)
+            if not exact and rows and status == "ok":
+                status = "no_exact"
+            return exact[:max_results], status
+        if diagnostics is not None:
+            diagnostics.update(raw_count=len(rows) if isinstance(rows, list) else 0,
+                               lookup_limit=lookup_limit, status=status)
+        return (rows[:max_results] if isinstance(rows, list) else []), status
     except asyncio.TimeoutError:
         print(f"[source] {source} 超时（>{timeout}s），留待有限重试")
+        if diagnostics is not None:
+            diagnostics.update(raw_count=0, lookup_limit=lookup_limit, status="timeout")
         return [], "timeout"
     except Exception as e:
         print(f"[source] {source} 失败: {e!r}")
+        if diagnostics is not None:
+            diagnostics.update(raw_count=0, lookup_limit=lookup_limit, status="error")
         return [], "error"
 
 

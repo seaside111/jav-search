@@ -342,13 +342,13 @@ class JavDbFlareSolverrTests(unittest.TestCase):
         observed = []
 
         async def fake_search(*_args, **_kwargs):
-            return []
+            return [], "ok"
 
         async def fake_wait_for(coro, timeout):
             observed.append(timeout)
             return await coro
 
-        with mock.patch.object(scrapers.javdb, "search_list", fake_search), \
+        with mock.patch.object(scrapers.javdb, "search_list_status", fake_search), \
                 mock.patch.object(scrapers.asyncio, "wait_for", fake_wait_for):
             rows, status = asyncio.run(scrapers.search_source_status(
                 "CLOT-041", "code", "javdb", max_results=3))
@@ -3608,6 +3608,217 @@ class NamingAndTrackerTests(unittest.TestCase):
             found = library._archived_target_for_source(
                 source, source.stat().st_size, "DLDSS-509", idx)
         self.assertEqual(found, target.parent)
+
+
+class ScrapeLookupParityTests(unittest.TestCase):
+    def test_monitor_expands_crowded_code_lookup_once(self):
+        rows = [{"code": f"MXGS-{i}", "source": "JavBus"}
+                for i in range(1, 60)] + [{"code": "MXGS-713", "source": "JavBus"}]
+        limits = []
+
+        async def source_search(_query, _mode, _proxy, limit):
+            limits.append(limit)
+            return rows[:limit]
+
+        with mock.patch.object(scrapers.javbus, "search_list", side_effect=source_search):
+            found, status = asyncio.run(scrapers.search_source_status(
+                "MXGS-713", "code", "javbus", max_results=3))
+        self.assertEqual(limits, [50, 300])
+        self.assertEqual(status, "ok")
+        self.assertEqual([row["code"] for row in found], ["MXGS-713"])
+
+    def test_javdb_diagnostics_separate_page_access_from_card_parsing(self):
+        html = '<html><title>JavDB</title><a href="/v/new-layout">movie</a></html>'
+        with mock.patch.object(javdb, "_fetch_html",
+                               mock.AsyncMock(return_value=(html, 200, ""))), \
+                mock.patch.object(javdb, "_fs_discover",
+                                  mock.AsyncMock(return_value="")), \
+                mock.patch.object(javdb, "_probe_exit_ip",
+                                  mock.AsyncMock(return_value={})):
+            diagnosis = asyncio.run(javdb.diagnose())
+            items, status = asyncio.run(javdb.search_list_status(
+                "HODV-20489", "code", max_results=50))
+        self.assertTrue(diagnosis["reachable"])
+        self.assertFalse(diagnosis["parsed"])
+        self.assertEqual(diagnosis["http_status"], 200)
+        self.assertEqual((items, status), ([], "parse_error"))
+
+    def test_javdb_empty_response_is_retryable_not_a_missing_title(self):
+        with mock.patch.object(javdb, "_fetch_html",
+                               mock.AsyncMock(return_value=("", 200, ""))):
+            items, status = asyncio.run(javdb.search_list_status(
+                "HODV-20489", "code", max_results=50))
+        self.assertEqual((items, status), ([], "empty_response"))
+
+    def test_monitor_finds_exact_item_beyond_short_source_limit(self):
+        rows = [{"code": f"MXGS-{i}", "source": "JavBus"}
+                for i in range(1, 8)] + [{"code": "MXGS-713", "source": "JavBus"}]
+        limits = []
+
+        async def source_search(_query, _mode, _proxy, limit):
+            limits.append(limit)
+            return rows[:limit]
+
+        with mock.patch.object(scrapers.javbus, "search_list", side_effect=source_search):
+            shown = asyncio.run(scrapers.search("MXGS-713", "code",
+                                                sources=["javbus"], max_results=300))
+            diagnostics = {}
+            found, status = asyncio.run(scrapers.search_source_status(
+                "MXGS-713", "code", "javbus", max_results=5,
+                diagnostics=diagnostics))
+        self.assertEqual([item["code"] for item in shown], ["MXGS-713"])
+        self.assertEqual([item["code"] for item in found], ["MXGS-713"])
+        self.assertEqual(status, "ok")
+        self.assertEqual(diagnostics["raw_count"], 8)
+        self.assertEqual(limits, [300, 50])
+
+    def test_javdb_current_cards_and_split_detail_code_scrape_to_artwork(self):
+        list_html = '''<a class="box" href="/v/a833R">
+            <div class="video-title"><strong>HODV-20489</strong> Example movie</div>
+            <img data-src="https://c0.jdbstatic.com/thumbs/a8/a833R.jpg"></a>'''
+        detail_html = '''<h2 class="title"><strong>HODV-20489 Example movie</strong></h2>
+            <a class="video-cover" href="https://c0.jdbstatic.com/covers/a8/a833R.jpg"></a>
+            <nav class="panel movie-panel-info"><div class="panel-block">
+            <strong>番號:</strong><span class="value"><a>HODV</a>-20489</span>
+            </div></nav>'''
+        jpeg = BytesIO()
+        Image.new("RGB", (800, 538), "blue").save(jpeg, format="JPEG")
+
+        async def fetch_html(url, *_args, **_kwargs):
+            return (detail_html if "/v/" in url else list_html), 200, ""
+
+        self.assertEqual(javdb._parse_list(list_html)[0]["code"], "HODV-20489")
+        self.assertEqual(javdb._parse_detail(detail_html, "https://javdb.com/v/a833R")["code"],
+                         "HODV-20489")
+        with tempfile.TemporaryDirectory() as raw:
+            video = Path(raw) / "HODV20489.avi"
+            video.write_bytes(b"test video")
+            config = {**DEFAULT_CONFIG, "sources": ["javdb"],
+                      "scrape_watch_dir": raw, "scrape_translate_enabled": False,
+                      "scrape_actor_images_enabled": False, "emby_actor_sync_enabled": False}
+            with mock.patch.object(javdb, "_fetch_html", side_effect=fetch_html), \
+                    mock.patch.object(library, "_fetch_cover",
+                                      mock.AsyncMock(return_value=jpeg.getvalue())), \
+                    mock.patch.object(scrapers._detailcache, "get", return_value=None), \
+                    mock.patch.object(scrapers._detailcache, "put"):
+                result = asyncio.run(library._scrape_one(str(video), False, config))
+            sidecars = Path(result["sidecar_dir"]) if result["sidecar_dir"] else Path(raw)
+            self.assertTrue(result["success"], result["error"])
+            self.assertTrue((sidecars / "HODV20489.nfo").exists())
+            self.assertTrue((sidecars / "poster.jpg").exists())
+            self.assertTrue((sidecars / "fanart.jpg").exists())
+            self.assertTrue(video.exists())
+
+    def test_direct_scrape_uses_valid_thumb_after_stale_full_cover(self):
+        full = "https://example.test/broken.jpg"
+        thumb = "https://example.test/valid-thumb.jpg"
+        jpeg = BytesIO()
+        Image.new("RGB", (500, 700), "green").save(jpeg, format="JPEG")
+        requested = []
+        item = {"code": "HODV-20489", "source": "JavBus", "title": "Example movie",
+                "cover": full, "cover_thumb": thumb,
+                "url": "https://www.javbus.com/HODV-20489",
+                "detail_loaded": True, "actors": [], "samples": []}
+
+        async def fetch(url, _proxy):
+            requested.append(url)
+            return jpeg.getvalue() if url == thumb else None
+
+        with tempfile.TemporaryDirectory() as raw:
+            video = Path(raw) / "HODV20489.avi"
+            video.write_bytes(b"test video")
+            config = {**DEFAULT_CONFIG, "sources": ["javbus"],
+                      "scrape_watch_dir": raw, "scrape_translate_enabled": False,
+                      "scrape_actor_images_enabled": False, "emby_actor_sync_enabled": False}
+            with mock.patch.object(library, "search_source_status",
+                                   mock.AsyncMock(return_value=([item], "ok"))), \
+                    mock.patch.object(library, "_fetch_cover", side_effect=fetch):
+                result = asyncio.run(library._scrape_one(str(video), False, config))
+            sidecars = Path(result["sidecar_dir"]) if result["sidecar_dir"] else Path(raw)
+            self.assertTrue(result["success"], result["error"])
+            self.assertEqual(requested, [full, thumb])
+            self.assertTrue((sidecars / "poster.jpg").exists())
+            self.assertTrue((sidecars / "fanart.jpg").exists())
+
+    def test_space_filename_and_bndv_identity_guard(self):
+        self.assertEqual(library._code_from_name("MXGS 713"), "MXGS-713")
+        self.assertEqual(library._code_from_name("HODV20480-U"), "HODV-20480")
+        self.assertIsNone(library._source_item_for_code(
+            [{"code": "BNDV-00702"}], "BNDV-702"))
+
+    def test_retry_schedule_is_bounded_and_file_specific(self):
+        with tempfile.TemporaryDirectory() as raw:
+            video = Path(raw) / "HODV20489.avi"
+            video.write_bytes(b"video")
+            signature = library._retry_signature(video, video.stat())
+            task = {"status": "failed", "failure_kind": "network",
+                    "retry_signature": signature, "retry_attempts": 0,
+                    "next_retry_at": 1300}
+            self.assertFalse(library._retry_due(task, signature, 1299))
+            self.assertTrue(library._retry_due(task, signature, 1300))
+            self.assertEqual(library._retry_schedule("network", task, 1300), (1, 2200))
+            task["retry_attempts"] = 2
+            self.assertEqual(library._retry_schedule("network", task, 1300), (3, 0))
+            self.assertFalse(library._retry_due({**task, "next_retry_at": 0}, signature, 9999))
+            self.assertTrue(library._retry_due(task, "new-file-signature", 1299))
+            self.assertFalse(library._retry_due(
+                {**task, "failure_kind": "no_match"}, signature, 9999))
+
+    def test_monitor_retries_transient_failure_after_restart_then_succeeds(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            video = root / "HODV20489.avi"
+            video.write_bytes(b"test video")
+            calls = []
+
+            async def process(*_args, **_kwargs):
+                calls.append(len(calls) + 1)
+                if len(calls) < 3:
+                    return {"file": video.name, "code": "HODV-20489",
+                            "scrape_ok": False, "scrape_error": "JavDB:timeout",
+                            "failure_kind": "network", "moved": False,
+                            "note": "刮削失败，源文件已保留且未规整"}
+                return {"file": video.name, "code": "HODV-20489",
+                        "scrape_ok": True, "scrape_error": "", "failure_kind": "",
+                        "moved": False, "note": "归档已关闭，保留原处"}
+
+            config = {"scrape_watch_dir": raw, "scrape_output_dir": "",
+                      "scrape_min_size_mb": 0, "scrape_keep_size_mb": 1,
+                      "archive_enabled": False}
+            with mock.patch.object(library, "_TASKS_FILE", root / "tasks.json"), \
+                    mock.patch.object(library, "_tasks", {}), \
+                    mock.patch.object(library, "_tasks_loaded", False), \
+                    mock.patch.object(library, "_RETRY_FILE", root / "retries.json"), \
+                    mock.patch.object(library, "_retry_states", {}), \
+                    mock.patch.object(library, "_retry_loaded", False), \
+                    mock.patch.object(library, "_processed", set()), \
+                    mock.patch.object(library, "_processed_sig", {}), \
+                    mock.patch.object(library, "_processed_loaded", True), \
+                    mock.patch.object(library, "_download_state_snapshot",
+                                      mock.AsyncMock(return_value=(True, []))), \
+                    mock.patch.object(library, "_manual_group_stability",
+                                      return_value=(True, 2, 300)), \
+                    mock.patch.object(library, "_manual_file_stability",
+                                      return_value=(True, 2, 300)), \
+                    mock.patch.object(library, "_process_completed_file", side_effect=process):
+                for now, expected_calls in ((1000, 1), (1200, 1), (1300, 2),
+                                            (2000, 2), (2200, 3), (2300, 3)):
+                    # Simulate a process restart before the first scheduled retry.
+                    if now == 1200:
+                        asyncio.run(library.api_tasks_delete(status="failed"))
+                        self.assertFalse(library._tasks)
+                        library._tasks.clear()
+                        library._tasks_loaded = False
+                        library._retry_states.clear()
+                        library._retry_loaded = False
+                        library._processed.clear()
+                    with mock.patch.object(library.time, "time", return_value=now):
+                        asyncio.run(library._scan_once(config))
+                    self.assertEqual(len(calls), expected_calls)
+                task = library._tasks[library._task_storage_key("", str(video))]
+                self.assertEqual(task["status"], "success")
+                self.assertEqual(task["next_retry_at"], 0)
+                self.assertTrue(video.exists())
 
 
 if __name__ == "__main__":

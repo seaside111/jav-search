@@ -30,6 +30,7 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 from xml.dom import minidom
 
 import httpx
@@ -109,7 +110,7 @@ _CODE_PATTERNS = [
     re.compile(r'\b([A-Z]{1,8}\d{1,4}-\d{2,6})\b', re.IGNORECASE),      # T28-304（字母+数字-数字）
     re.compile(r'\b(\d{3,4}[A-Z]{2,6}-\d{2,5})\b', re.IGNORECASE),       # 390JAC-234 / 259LUXU-1234
     re.compile(r'\b([A-Z]{2,8}-\d{2,6})\b', re.IGNORECASE),              # ABP-123
-    re.compile(r'\b([A-Z]{2,8})[-_]?(\d{2,6})\b', re.IGNORECASE),        # ABP123 / ABP_123
+    re.compile(r'\b([A-Z]{2,8})[-_ ]?(\d{2,6})\b', re.IGNORECASE),       # ABP123 / ABP_123 / ABP 123
     # 无码「日期型」番号：10musume 060226_01 / 1pondo 060226_001 / Caribbean 060226-001 等。
     # 放最后、纯数字型，优先级最低，避免误吃文件名里的其它数字串；要求 6 位日期 + 分隔符。
     re.compile(r'\b(\d{6}[-_]\d{2,4})\b'),
@@ -218,9 +219,51 @@ _monitor_state: dict = {
 _TASKS_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "scrape_tasks.json"
 _tasks: dict[str, dict] = {}
 _tasks_loaded = False
+_RETRY_FILE = Path(os.getenv("CONFIG_DIR", "/config")) / "scrape_retries.json"
+_retry_states: dict[str, dict] = {}
+_retry_loaded = False
 _nfo_title_repair_checked: set[tuple[str, str]] = set()
 _TASK_SUCCESS_MAX = 300
 _TASK_FAILURE_MAX = 2000
+_RETRY_DELAYS = (300, 900, 1800)  # First failure, first retry, second retry.
+_RETRYABLE_FAILURES = {"network", "cover"}
+
+
+def _load_retries() -> None:
+    global _retry_loaded
+    if _retry_loaded:
+        return
+    _retry_loaded = True
+    try:
+        data = json.loads(_RETRY_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            _retry_states.update({str(k): v for k, v in data.items() if isinstance(v, dict)})
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        _log(f"加载刮削重试进度失败（忽略）：{exc}")
+
+
+def _save_retries() -> None:
+    try:
+        _RETRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp = _RETRY_FILE.with_suffix(".json.tmp")
+        temp.write_text(json.dumps(_retry_states, ensure_ascii=False), encoding="utf-8")
+        temp.replace(_RETRY_FILE)
+    except Exception as exc:
+        _log(f"保存刮削重试进度失败（忽略）：{exc}")
+
+
+def _set_retry_state(video_path: Path, kind: str, signature: str,
+                     attempts: int, next_at: float) -> None:
+    key = _task_storage_key("", str(video_path))
+    if kind:
+        _retry_states[key] = {"status": "failed", "failure_kind": kind,
+                              "retry_signature": signature,
+                              "retry_attempts": attempts, "next_retry_at": next_at}
+    else:
+        _retry_states.pop(key, None)
+    _save_retries()
 
 
 def _load_tasks() -> None:
@@ -279,6 +322,32 @@ def _task_update(code: str, **changes) -> None:
     _tasks.update({_task_storage_key(x.get("code", "未知番号"), x.get("filepath", "")): x
                    for x in success + failed})
     _save_tasks()
+
+
+def _retry_signature(video_path: Path, file_stat) -> str:
+    """Forget an old failure when the source video has been replaced or edited."""
+    return f"{_file_sig(video_path, file_stat.st_size)}|{file_stat.st_mtime_ns}"
+
+
+def _retry_due(task: dict, signature: str, now: float) -> bool:
+    if task.get("status") != "failed" or not task.get("failure_kind"):
+        return True  # Previous-version records still get a chance after upgrade.
+    if task.get("retry_signature") != signature:
+        return True
+    if task.get("failure_kind") not in _RETRYABLE_FAILURES:
+        return False
+    retry_at = float(task.get("next_retry_at") or 0)
+    return bool(retry_at and now >= retry_at)
+
+
+def _retry_schedule(kind: str, previous: dict, now: float,
+                    manual: bool = False) -> tuple[int, float]:
+    if kind not in _RETRYABLE_FAILURES:
+        return 0, 0.0
+    was_retry = (not manual and previous.get("status") == "failed"
+                 and previous.get("failure_kind") in _RETRYABLE_FAILURES)
+    count = (int(previous.get("retry_attempts") or 0) + 1) if was_retry else 0
+    return count, now + _RETRY_DELAYS[count] if count < len(_RETRY_DELAYS) else 0.0
 
 
 def _rewrite_nfo_title(path: Path, expected_title: str, code: str) -> bool:
@@ -1222,7 +1291,7 @@ def _hard_subtitle_poster_bytes(data: bytes) -> bytes:
 
 
 def _cover_referer(cover_url: str) -> str:
-    if "javdb" in cover_url:
+    if "javdb" in cover_url or "jdbstatic" in cover_url:
         return "https://javdb.com/"
     if "dmm" in cover_url or "fanza" in cover_url:
         return "https://www.dmm.co.jp/"
@@ -1492,7 +1561,8 @@ def _source_item_for_code(rows: list[dict], code: str) -> Optional[dict]:
 
 
 async def _ensure_cover(movie: dict, code: str, config: dict,
-                        proxy: Optional[str]) -> dict:
+                        proxy: Optional[str],
+                        source_attempts: Optional[list[dict]] = None) -> dict:
     """Fill a missing cover from the exact-code automatic source chain.
 
     This is intentionally a one-shot fallback used during the initial scrape.
@@ -1508,8 +1578,14 @@ async def _ensure_cover(movie: dict, code: str, config: dict,
     if preferred in allowed and preferred not in sources:
         sources.insert(0, preferred)
     for source in sources:
+        diagnosis = {}
         rows, status = await search_source_status(
-            code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=3)
+            code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=3,
+            diagnostics=diagnosis)
+        if source_attempts is not None:
+            source_attempts.append({"source": source, "stage": "missing_cover",
+                                    "status": status, "raw_count": diagnosis.get("raw_count", len(rows)),
+                                    "exact": bool(rows)})
         item = _source_item_for_code(rows, code)
         cover = (item or {}).get("cover", "")
         if not cover:
@@ -1527,7 +1603,9 @@ async def _ensure_cover(movie: dict, code: str, config: dict,
 
 
 async def _ensure_downloadable_cover(movie: dict, code: str, config: dict,
-                                      proxy: Optional[str]) -> Optional[bytes]:
+                                      proxy: Optional[str],
+                                      attempts: Optional[list[dict]] = None,
+                                      source_attempts: Optional[list[dict]] = None) -> Optional[bytes]:
     """Resolve an actually downloadable poster, with enabled JavDB as the first repair source.
 
     A non-empty URL is not proof that artwork exists: signed CloudFront URLs expire and
@@ -1548,12 +1626,34 @@ async def _ensure_downloadable_cover(movie: dict, code: str, config: dict,
         _log(f"忽略历史 JAV321 封面并按番号重新取图：{code}")
         movie["cover"] = ""
         current_url = ""
+
+    async def usable(url: str, source: str) -> Optional[bytes]:
+        data = await _fetch_cover(url, proxy)
+        valid = bool(data and _image_dimensions(data) != (0, 0))
+        if attempts is not None:
+            attempts.append({"source": source, "host": urlsplit(url).hostname or "",
+                             "result": "valid" if valid else
+                                       "invalid_image" if data else "unavailable"})
+        return data if valid else None
+
     if current_url:
         tried_urls.add(current_url)
-        current = await _fetch_cover(current_url, proxy)
-        if current and _image_dimensions(current) != (0, 0):
+        current = await usable(current_url, current_source)
+        if current:
             return current
         _log(f"现有封面地址不可用，按番号切换备用来源：{code} ← {current_url[:60]}")
+
+    # A direct monitor lookup receives a single source row, unlike the merged
+    # frontend card. Preserve its thumbnail before trying another search.
+    thumb = (movie.get("cover_thumb") or "").strip() if current_source != "jav321" else ""
+    if thumb and thumb not in tried_urls:
+        tried_urls.add(thumb)
+        data = await usable(thumb, current_source)
+        if data:
+            movie["cover"] = thumb
+            movie["poster_source"] = current_source
+            _log(f"原来源缩略封面恢复成功：{code} ← {current_source}")
+            return data
 
     # A merged search keeps each source's cover separately. Validate those
     # URLs before making another upstream search, so one bad primary source can
@@ -1567,8 +1667,8 @@ async def _ensure_downloadable_cover(movie: dict, code: str, config: dict,
             if not candidate_url or candidate_url in tried_urls:
                 continue
             tried_urls.add(candidate_url)
-            data = await _fetch_cover(candidate_url, proxy)
-            if data and _image_dimensions(data) != (0, 0):
+            data = await usable(candidate_url, source)
+            if data:
                 movie["cover"] = candidate_url
                 movie["poster_source"] = source
                 _log(f"封面候选恢复成功：{code} ← {source or '合并来源'}")
@@ -1579,21 +1679,31 @@ async def _ensure_downloadable_cover(movie: dict, code: str, config: dict,
     priority = {"javdb": 0, "javbus": 1, "dmm": 2, "avsox": 3,
                 "avmoo": 4, "fc2": 5}
     for source in sorted(dict.fromkeys(enabled), key=lambda s: priority.get(s, 99)):
+        diagnosis = {}
         rows, status = await search_source_status(
-            code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=3)
+            code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=3,
+            diagnostics=diagnosis)
+        if source_attempts is not None:
+            source_attempts.append({"source": source, "stage": "cover_retry",
+                                    "status": status, "raw_count": diagnosis.get("raw_count", len(rows)),
+                                    "exact": bool(rows)})
         item = _source_item_for_code(rows, code)
         if not item:
             _log(f"封面备用来源未命中：{code} ← {source}（状态 {status}）")
             continue
 
-        candidates = [(item.get("cover") or "").strip()]
+        candidates = [(item.get("cover") or "").strip(),
+                      (item.get("cover_thumb") or "").strip()]
         detail = None
         detail_url = (item.get("url") or "").strip()
         # The list cover is normally enough. If it is stale, consult the guarded
         # detail endpoint; this is especially important for JavDB's current CDN URL.
         for candidate_url in list(candidates):
-            data = await _fetch_cover(candidate_url, proxy) if candidate_url else None
-            if data and _image_dimensions(data) != (0, 0):
+            if not candidate_url or candidate_url in tried_urls:
+                continue
+            tried_urls.add(candidate_url)
+            data = await usable(candidate_url, source)
+            if data:
                 movie["cover"] = candidate_url
                 movie["poster_source"] = source
                 movie.setdefault("source_urls", {})[source] = detail_url
@@ -1615,9 +1725,10 @@ async def _ensure_downloadable_cover(movie: dict, code: str, config: dict,
                 detail, detail_status = entry if isinstance(entry, tuple) else (
                     entry, "ok" if entry else "empty")
                 detail_cover = (detail or {}).get("cover", "").strip()
-                if detail_cover and detail_cover not in candidates:
-                    data = await _fetch_cover(detail_cover, proxy)
-                    if data and _image_dimensions(data) != (0, 0):
+                if detail_cover and detail_cover not in tried_urls:
+                    tried_urls.add(detail_cover)
+                    data = await usable(detail_cover, source)
+                    if data:
                         movie["cover"] = detail_cover
                         movie["poster_source"] = source
                         movie.setdefault("source_urls", {})[source] = detail_url
@@ -2393,6 +2504,9 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                 **existing}
 
     proxy = config.get("proxy") or None
+    source_attempts: list[dict] = []
+    cover_attempts: list[dict] = []
+    detail_status = "not_requested"
     provider = (config.get("scrape_translate_provider")
                 or config.get("default_translate_provider", "baidu"))
 
@@ -2436,16 +2550,44 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
         _log(f"搜索元数据：{code}（来源 {' → '.join(source_order)}，代理 {'有' if proxy else '无'}）")
         results = []
         for source in source_order:
+            diagnosis = {}
             rows, source_status = await search_source_status(
-                code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=5)
+                code, SEARCH_MODE_CODE, source, proxy=proxy, max_results=5,
+                diagnostics=diagnosis)
             candidate = _source_item_for_code(rows, code)
+            source_attempts.append({"source": source, "stage": "metadata",
+                                    "status": source_status,
+                                    "raw_count": diagnosis.get("raw_count", len(rows)),
+                                    "exact": bool(candidate)})
+            _log(f"来源检索：{code} ← {source}（状态 {source_status}，"
+                 f"卡片 {source_attempts[-1]['raw_count']}，精确命中 {'是' if candidate else '否'}）")
             if candidate:
                 results = [candidate]
                 _log(f"自动刮削命中：{code} ← {source}（状态 {source_status}）")
                 break
         if not results:
-            _log(f"未找到影片信息：{code}（站点不可达或无该番号）")
-            return {"success": False, "filepath": filepath, "code": code, "error": "未找到影片信息"}
+            statuses = {entry["status"] for entry in source_attempts}
+            failure_kind = ("network" if statuses & {"timeout", "error", "cf_challenge",
+                                                  "partial", "empty_response"} else
+                            "parse" if "parse_error" in statuses else
+                            "access" if statuses & {"age_gate", "login_wall", "geo_block",
+                                                    "region_block", "captcha", "proxy_error"} else
+                            "no_match")
+            status_labels = {"ok": "未返回条目（可能无结果或请求失败）",
+                             "no_exact": "有结果但无精确番号",
+                             "timeout": "请求超时", "error": "请求失败",
+                             "partial": "部分页面获取失败", "empty_response": "返回空页面",
+                             "cf_challenge": "遇到站点验证", "parse_error": "页面解析失败",
+                             "age_gate": "年龄验证", "login_wall": "需要登录",
+                             "geo_block": "地区限制", "region_block": "地区限制",
+                             "captcha": "人机验证", "proxy_error": "代理异常"}
+            explanation = "、".join(f"{entry['source']}:{status_labels.get(entry['status'], entry['status'])}"
+                                   for entry in source_attempts)
+            error = f"未找到影片信息（{explanation}）"
+            _log(f"{error}：{code}")
+            return {"success": False, "filepath": filepath, "code": code,
+                    "error": error, "failure_kind": failure_kind,
+                    "source_attempts": source_attempts}
 
         # 列表条目可能缺详情，补全第一条
         movie = results[0]
@@ -2457,23 +2599,34 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
                 from scrapers import enrich
                 enriched = await enrich([{"url": movie["url"],
                                           "source": movie.get("source", ""),
-                                          "code": code}], proxy=proxy)
-                if enriched and enriched[0]:
-                    detail = enriched[0]
+                                          "code": code}], proxy=proxy,
+                                        with_status=True)
+                entry = enriched[0] if enriched else (None, "empty")
+                detail, detail_status = (entry if isinstance(entry, tuple) else
+                                         (entry, "ok" if entry else "empty"))
+                if detail:
                     for k, v in detail.items():
                         if v and not movie.get(k):
                             movie[k] = v
                     _log(f"详情补全完成：{code}（演员 {len(movie.get('actors') or [])} 人）")
+                else:
+                    _log(f"详情补全未完成：{code} ← {movie.get('source', '')}（{detail_status}）")
             except Exception as e:
+                detail_status = "error"
                 _log(f"详情补全失败 {code}: {e}")
+        elif movie.get("detail_loaded"):
+            detail_status = "already_loaded"
+        else:
+            detail_status = "no_url"
 
     # Automatic scraping only falls back for a missing cover. Once a cover is
     # available, poster/fanart are generated locally according to the jacket
     # setting; no background sample-art search is scheduled.
-    await _ensure_cover(movie, code, config, proxy)
+    await _ensure_cover(movie, code, config, proxy, source_attempts)
     # URL 非空仍可能是已过期的签名地址。以真实可解析的图片字节作为成功标准，
     # 并让已启用的 JavDB 通过过盾流程承担首个权威修复来源。
-    resolved_cover_bytes = await _ensure_downloadable_cover(movie, code, config, proxy)
+    resolved_cover_bytes = await _ensure_downloadable_cover(
+        movie, code, config, proxy, cover_attempts, source_attempts)
     # 历史缓存或异常来源偶尔只返回站点占位词（如“JAV321 dmm”）。必须先按
     # 精确番号从已启用的 JavDB/JavBus 校正，之后才能可靠判断是否需要日文翻译。
     await _repair_placeholder_metadata(movie, code, config, proxy)
@@ -2637,12 +2790,22 @@ async def _scrape_one(filepath: str, overwrite: bool, config: dict) -> dict:
     artifact_errors = _main_sidecar_errors(metadata_dir, nfo_path)
     success = not artifact_errors
     error = "；".join(artifact_errors)
+    if not success and not resolved_cover_bytes and cover_attempts:
+        failures = [f"{entry['source'] or '来源'}@{entry['host']}:{entry['result']}"
+                    for entry in cover_attempts if entry["result"] != "valid"]
+        if failures:
+            error += "；封面检查 " + "、".join(failures[:6])
     if success:
         _log(f"刮削结束：{code}（主要文件校验通过）")
     else:
         _log(f"刮削失败：{code}（{error}；保留源视频，不执行规整/归档）")
     return {"success": success, "skipped": False, "filepath": filepath, "code": code,
             "error": error,
+            "failure_kind": ("cover" if not success and not resolved_cover_bytes
+                             and ("poster" in error or "fanart" in error) else
+                             "write" if not success else ""),
+            "source_attempts": source_attempts, "cover_attempts": cover_attempts,
+            "detail_status": detail_status,
             "title_zh": title_for_nfo, "title_original": name_part,
             "folder_title": folder_title, "actors": movie.get("actors") or [],
             "actor_images_saved": actor_images_saved,
@@ -3747,6 +3910,10 @@ async def _process_completed_file(video_path: Path, config: dict,
         "title_zh": scrape_res.get("title_zh", ""),
         "scrape_ok": scrape_res.get("success", False),
         "scrape_error": scrape_res.get("error", ""),
+        "failure_kind": scrape_res.get("failure_kind", ""),
+        "source_attempts": scrape_res.get("source_attempts", []),
+        "cover_attempts": scrape_res.get("cover_attempts", []),
+        "detail_status": scrape_res.get("detail_status", ""),
         "moved": False,
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
@@ -3841,7 +4008,7 @@ def _record_recent(rec: dict):
     _monitor_state["processed_total"] += 1
 
 
-async def _scan_once(config: dict) -> int:
+async def _scan_once(config: dict, force_retry: bool = False) -> int:
     """扫描监控目录一遍：对稳定且完成的文件做处理。返回本轮处理数。"""
     watch = config.get("scrape_watch_dir", "").strip()
     if not watch:
@@ -3854,6 +4021,8 @@ async def _scan_once(config: dict) -> int:
         return 0
 
     _load_processed()   # 重启后从磁盘恢复「已归档」记录，避免 hardlink/copy 保留的原文件被反复处理
+    _load_tasks()       # Show previous task status before processing this scan.
+    _load_retries()     # Retry state is independent of clearable task display history.
     stable_needed = max(2, int(config.get("scrape_stable_checks", 2)))
     settle_seconds = max(300, int(config.get("scrape_settle_seconds", 300)))
     min_bytes = int(config.get("scrape_min_size_mb", 100)) * 1024 * 1024
@@ -3980,9 +4149,22 @@ async def _scan_once(config: dict) -> int:
                     await actor_scraper.notify_emby_folder(folder, config)
             except Exception as exc:
                 _log(f"NFO 标题修复后的 Emby 刷新通知失败（下次媒体库扫描仍会读取）：{exc}")
-        if fp in _processed:
+        previous_retry = dict(_retry_states.get(_task_storage_key("", fp)) or {})
+        observed_stat = scan_file_stats.get(fp)
+        signature = _retry_signature(vf, observed_stat) if observed_stat else ""
+        replaced = bool(previous_retry and previous_retry.get("retry_signature") != signature)
+        due = _retry_due(previous_retry, signature, now)
+        if not force_retry and not due:
             n_done_before += 1
             continue
+        if fp in _processed:
+            if (force_retry or replaced or
+                    (previous_retry.get("status") == "failed" and due
+                     and previous_retry.get("failure_kind") in _RETRYABLE_FAILURES)):
+                _processed.discard(fp)
+            else:
+                n_done_before += 1
+                continue
         download_state, torrent_task = _file_download_state(
             vf, watch_dir, torrent_tasks)
         if download_state == "downloading":
@@ -4133,23 +4315,36 @@ async def _scan_once(config: dict) -> int:
             rec = await _process_completed_file(
                 vf, config, multipart_parts=multipart_snapshots.get(snapshot_key))
             _record_recent(rec)
+            failure_kind = rec.get("failure_kind") or ("archive" if rec.get("archive_error") else "")
+            retry_count, retry_at = _retry_schedule(failure_kind,
+                                                     {} if replaced else previous_retry, now,
+                                                     manual=force_retry)
             final_status = "success" if rec.get("scrape_ok") and (
                 rec.get("moved") or rec.get("note") or not config.get("archive_enabled", True)) else "failed"
             _task_update(rec.get("code") or task_code, file=rec.get("file") or vf.name,
                          filepath=fp, status=final_status,
                          current="completed" if final_status == "success" else "failed",
                          scrape_status="success" if rec.get("scrape_ok") else "failed",
-                         archive_status="success" if rec.get("moved") else ("skipped" if rec.get("note") else "failed"),
-                         error=rec.get("scrape_error") or rec.get("archive_error") or "",
-                         record=rec)
+                          archive_status="success" if rec.get("moved") else ("skipped" if rec.get("note") else "failed"),
+                          error=rec.get("scrape_error") or rec.get("archive_error") or "",
+                          record=rec, failure_kind=failure_kind,
+                          retry_attempts=retry_count, next_retry_at=retry_at,
+                          retry_signature=signature if final_status == "failed" else "")
+            _set_retry_state(vf, failure_kind if final_status == "failed" else "",
+                             signature, retry_count, retry_at)
+            if retry_at:
+                _log(f"临时失败已排定重试：{vf.name}，第 {retry_count + 1}/3 次，"
+                     f"至少 {int(retry_at - now)} 秒后")
         except Exception as e:
             _log(f"处理文件异常：{vf.name} — {e}")
             failed = {"file": vf.name, "scrape_ok": False, "scrape_error": str(e),
                       "moved": False, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
             _record_recent(failed)
             _task_update(task_code, file=vf.name, filepath=fp, status="failed",
-                         current="failed", scrape_status="failed", archive_status="failed",
-                         error=str(e), record=failed)
+                          current="failed", scrape_status="failed", archive_status="failed",
+                          error=str(e), record=failed, failure_kind="internal",
+                          retry_attempts=0, next_retry_at=0, retry_signature=signature)
+            _set_retry_state(vf, "internal", signature, 0, 0)
         # 进程内始终标记，避免本次运行内重复处理；
         # 仅在「确实归档成功」时才持久化落盘（hardlink/copy 保留原文件→重启后据此跳过）。
         # 归档失败/未开启归档时不落盘：留待重启后重试（避免站点临时不可达被永久跳过；
@@ -4180,7 +4375,7 @@ async def _scan_serialized(config: dict, reset_recent: bool = False) -> int:
             # explicit scan; successfully archived files remain protected by
             # the persistent path+size signatures loaded inside _scan_once.
             _processed.clear()
-        return await _scan_once(config)
+        return await _scan_once(config, force_retry=reset_recent)
 
 
 def _monitor_should_run(config: dict) -> bool:

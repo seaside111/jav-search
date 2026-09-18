@@ -65,6 +65,30 @@
   }
   #searchInput:focus { border-color: var(--accent); }
   #searchInput::placeholder { color: var(--text-dim); }
+  .search-history {
+    display: none; position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 120;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 10px 28px rgba(0,0,0,.35); overflow: hidden;
+  }
+  .search-history.open { display: block; }
+  .search-history-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+    color: var(--text-muted); font-size: 12px;
+  }
+  .search-history-clear {
+    background: none; border: none; color: var(--text-dim); cursor: pointer;
+    font: inherit; padding: 2px 0;
+  }
+  .search-history-clear:hover { color: var(--accent); }
+  .search-history-item {
+    display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 12px;
+    background: transparent; border: none; color: var(--text-main); cursor: pointer;
+    font: inherit; text-align: left;
+  }
+  .search-history-item:hover, .search-history-item:focus-visible { background: var(--bg-hover); }
+  .search-history-query { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .search-history-mode { color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
 
   .mode-select {
     background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
@@ -601,7 +625,8 @@
       <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
         <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
       </svg>
-      <input id="searchInput" type="text" placeholder="番号 / 演员名 / 关键词…" autocomplete="off">
+      <input id="searchInput" name="search" type="search" inputmode="search" placeholder="番号 / 演员名 / 关键词…" autocomplete="off" aria-controls="searchHistory" aria-expanded="false">
+      <div id="searchHistory" class="search-history" aria-label="历史搜索"></div>
     </div>
     <select id="modeSelect" class="mode-select">
       <option value="auto">自动</option>
@@ -611,7 +636,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.28</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.29</div>
   <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -1352,10 +1377,74 @@ async function doLogout() {
 // ══════════════════════════════════════════
 // SEARCH (影片信息)
 // ══════════════════════════════════════════
+const SEARCH_HISTORY_KEY = 'jav_search_history_v1';
+const SEARCH_HISTORY_LIMIT = 8;
+const SEARCH_MODES = { code: '番号', actor: '演员', keyword: '关键词', auto: '自动' };
+
+function getSearchHistory() {
+  try {
+    const items = JSON.parse(localStorage.getItem(SEARCH_HISTORY_KEY) || '[]');
+    return Array.isArray(items) ? items.filter(item =>
+      item && typeof item.query === 'string' && item.query.trim() &&
+      Object.prototype.hasOwnProperty.call(SEARCH_MODES, item.mode)).slice(0, SEARCH_HISTORY_LIMIT) : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveSearchHistory(query, mode) {
+  const normalized = String(query || '').trim();
+  if (!normalized) return;
+  const selectedMode = Object.prototype.hasOwnProperty.call(SEARCH_MODES, mode) ? mode : 'auto';
+  const history = getSearchHistory().filter(item =>
+    !(item.query === normalized && item.mode === selectedMode));
+  history.unshift({ query: normalized, mode: selectedMode });
+  try {
+    localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(history.slice(0, SEARCH_HISTORY_LIMIT)));
+  } catch (_) { /* 浏览器禁用本地存储时，搜索本身仍可正常使用 */ }
+}
+
+function hideSearchHistory() {
+  const panel = document.getElementById('searchHistory');
+  panel.classList.remove('open');
+  document.getElementById('searchInput').setAttribute('aria-expanded', 'false');
+}
+
+function showSearchHistory() {
+  const panel = document.getElementById('searchHistory');
+  const history = getSearchHistory();
+  if (!history.length) { hideSearchHistory(); return; }
+  panel.innerHTML = `<div class="search-history-header">
+    <span>历史搜索</span><button class="search-history-clear" type="button">清空</button>
+  </div>${history.map((item, index) => `<button class="search-history-item" type="button" data-index="${index}">
+    <span class="search-history-query">${escHtml(item.query)}</span>
+    <span class="search-history-mode">${SEARCH_MODES[item.mode]}</span>
+  </button>`).join('')}`;
+  panel.classList.add('open');
+  document.getElementById('searchInput').setAttribute('aria-expanded', 'true');
+}
+
+document.getElementById('searchHistory').addEventListener('click', event => {
+  if (event.target.closest('.search-history-clear')) {
+    try { localStorage.removeItem(SEARCH_HISTORY_KEY); } catch (_) { /* 忽略 */ }
+    hideSearchHistory();
+    return;
+  }
+  const button = event.target.closest('.search-history-item');
+  if (!button) return;
+  const item = getSearchHistory()[Number(button.dataset.index)];
+  if (!item) return;
+  document.getElementById('searchInput').value = item.query;
+  document.getElementById('modeSelect').value = item.mode;
+  hideSearchHistory();
+  doSearch();
+});
+
 async function doSearch() {
   const query = document.getElementById('searchInput').value.trim();
   if (!query) { showToast('请输入搜索词'); return; }
   const mode = document.getElementById('modeSelect').value;
+  hideSearchHistory();
   const btn = document.getElementById('searchBtn');
   const spinner = document.getElementById('spinner');
   const statusText = document.getElementById('statusText');
@@ -1377,6 +1466,7 @@ async function doSearch() {
     });
     const data = await safeJson(resp);
     if (!data.success) throw new Error(data.detail || '搜索失败');
+    saveSearchHistory(query, mode);
     const modeLabel = { code:'番号', actor:'演员', keyword:'关键词', auto:'自动' }[data.mode] || data.mode;
     statusText.innerHTML = `找到 <strong>${data.total}</strong> 条结果 · 模式: ${modeLabel} · 详情翻页时自动加载`;
     renderResults(data.results);
@@ -2775,7 +2865,12 @@ async function loadTasks(status) {
         <th>任务</th><th>当前阶段</th><th>总状态</th><th>刮削结果</th><th>归档结果</th><th>更新时间</th><th>结果 / 说明</th>
       </tr></thead><tbody>${data.tasks.map(row => {
         const rowFailed = row.status === 'failed' || row.scrape_status === 'failed' || row.archive_status === 'failed';
-        const rowResult = row.error || (row.status === 'success' ? '任务已完成' : (row.current ? `当前：${row.current}` : '—'));
+        const retryAt = Number(row.next_retry_at || 0);
+        const retryNote = row.status === 'failed' && retryAt > 0
+          ? ` · 下次自动重试：${new Date(retryAt * 1000).toLocaleString()}（${Number(row.retry_attempts || 0) + 1}/3）`
+          : (row.status === 'failed' && Number(row.retry_attempts || 0) >= 3
+             && ['network', 'cover'].includes(row.failure_kind) ? ' · 已达到自动重试上限' : '');
+        const rowResult = (row.error || (row.status === 'success' ? '任务已完成' : (row.current ? `当前：${row.current}` : '—'))) + retryNote;
         return `<tr>
           <td><span class="task-code">${escHtml(row.code || '未知番号')}</span><span class="task-file" title="${escAttr(row.file || '')}">${escHtml(row.file || '')}</span></td>
           <td>${statusBadge(row.current, '—')}</td>
@@ -3233,11 +3328,21 @@ function showToast(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
 }
 
-document.getElementById('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+const searchInput = document.getElementById('searchInput');
+searchInput.addEventListener('focus', showSearchHistory);
+searchInput.addEventListener('click', showSearchHistory);
+searchInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') doSearch();
+  if (e.key === 'Escape') hideSearchHistory();
+});
+document.addEventListener('click', e => {
+  if (!e.target.closest('.search-input-wrap')) hideSearchHistory();
+});
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     // 灯箱开着时，Esc 只关灯箱、保留详情弹窗，方便继续浏览
     if (lightboxOpen()) { closeLightbox(); return; }
+    hideSearchHistory();
     closeDetail(); closeSettings();
   }
 });
@@ -3457,7 +3562,7 @@ async function checkVersion() {
   try {
     const resp = await fetch(`${API}/api/version`, { cache: 'no-store' });
     const d = await safeJson(resp);
-      chip.textContent = 'v' + (d.current || '1.4.6.28');
+      chip.textContent = 'v' + (d.current || '1.4.6.29');
     if (d.update_available && d.latest) {
       chip.classList.add('has-update', 'clickable');
       chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;
