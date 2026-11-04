@@ -1066,7 +1066,8 @@ class VideoClassificationTests(unittest.TestCase):
         self.assertGreater(function.rindex("/api/library/scrape/monitor/refresh"),
                            function.index("/api/library/scrape/run-once"))
         self.assertIn("保存设置并立即扫描", frontend)
-        self.assertIn("扫描目录：${data.watch_dir", function)
+        self.assertIn("data.directory_pairs", function)
+        self.assertIn("扫描目录：${paths || data.watch_dir", function)
 
     def test_settings_uses_full_page_navigation_and_keeps_controls_wired(self):
         frontend = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(

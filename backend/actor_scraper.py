@@ -611,6 +611,22 @@ def _emby_media_paths(folder: Path, config: dict) -> tuple[list[str], str]:
     local_folder = folder.resolve()
     local_root_value = (config.get("scrape_output_dir") or "").strip()
     emby_root = (config.get("emby_media_root") or "").strip()
+    if config.get("scrape_multi_enabled", False):
+        # Retry jobs load the global configuration after restart. Resolve by
+        # the archived folder instead of reusing a different group's root.
+        matches = []
+        for pair in config.get("scrape_directory_pairs") or []:
+            output = (pair.get("output_dir") or "").strip()
+            if not output:
+                continue
+            root = Path(output).resolve()
+            if local_folder == root or root in local_folder.parents:
+                matches.append((len(root.parts), root,
+                                (pair.get("emby_media_root") or "").strip()))
+        if not matches:
+            return [], f"当前目录不在多文件夹归档目录内，无法映射到 Emby：{local_folder}"
+        _depth, local_root, emby_root = max(matches, key=lambda item: item[0])
+        local_root_value = str(local_root)
     if emby_root:
         if not local_root_value:
             return [], "配置了 Emby 归档根路径，但本项目归档目录为空"

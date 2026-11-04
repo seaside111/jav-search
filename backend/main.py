@@ -44,8 +44,8 @@ _VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
 try:
     _IMAGE_VERSION = _VERSION_FILE.read_text(encoding="utf-8").strip()
 except (OSError, UnicodeError):
-    _IMAGE_VERSION = "1.4.6.29"
-APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.29"
+    _IMAGE_VERSION = "1.4.6.30"
+APP_VERSION = _IMAGE_VERSION.lstrip("vV") or "1.4.6.30"
 # 版本更新检测用的 GitHub 仓库（owner/repo）
 GITHUB_REPO = "seaside111/jav-search"
 
@@ -294,6 +294,8 @@ class ConfigUpdateRequest(BaseModel):
     log_verbose: Optional[bool] = None
     # V1.4 刮削
     scrape_enabled: Optional[bool] = None
+    scrape_multi_enabled: Optional[bool] = None
+    scrape_directory_pairs: Optional[list[dict[str, str]]] = None
     scrape_watch_dir: Optional[str] = None
     scrape_output_dir: Optional[str] = None
     scrape_interval: Optional[int] = None
@@ -983,7 +985,7 @@ async def api_get_config():
 
 
 @app.post("/api/config")
-async def api_set_config(req: ConfigUpdateRequest):
+async def api_set_config(req: ConfigUpdateRequest, refresh_monitor: bool = True):
     config = load_config()
 
     update = req.dict(exclude_none=True)
@@ -1011,15 +1013,20 @@ async def api_set_config(req: ConfigUpdateRequest):
         update["translate_provider_configs"] = restore_masked(update["translate_provider_configs"], current_nested)
 
     config.update(update)
+    try:
+        library._directory_configs(config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     ok = save_config(config)
     # 配置变更后同步日志详略
     try:
         logbus.set_verbose(config.get("log_verbose", True))
     except Exception:
         pass
-    # 配置变更后启停后台监控（刮削/归档任一开启即运行）
+    # 按总开关刷新后台监控；手动扫描可延后刷新，避免抢占扫描锁。
     try:
-        library.ensure_monitor()
+        if ok and refresh_monitor:
+            library.ensure_monitor()
     except Exception as e:
         print(f"[config] 刷新刮削监控失败: {e}")
     return {"success": ok}

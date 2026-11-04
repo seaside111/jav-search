@@ -16,6 +16,7 @@ import asyncio
 import array
 import difflib
 import errno
+import filecmp
 import json
 import os
 import re
@@ -23,6 +24,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -197,6 +199,7 @@ def _mark_processed(video_path: Path, size: int) -> None:
     _save_processed()
 
 _monitor_task: Optional[asyncio.Task] = None
+_monitor_wakeup = asyncio.Event()
 _scan_lock = asyncio.Lock()
 _jav321_retry_task: Optional[asyncio.Task] = None
 _jav321_retry_state: dict = {
@@ -3385,7 +3388,8 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
                   multipart_parts: Optional[list] = None,
                   subfolder_name: str = "",
                   require_sidecars: bool = False,
-                  keep_actor_images: bool = True) -> dict:
+                  keep_actor_images: bool = True,
+                  refresh_sidecars: bool = False) -> dict:
     """
     把视频归档到 归档目录/年月/番号/ 子目录下（Emby 单片单目录布局）。
     rename：开（刮削开）= 视频改名「番号.后缀」、随带番号命名的 NFO/封面；
@@ -3459,6 +3463,14 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
     else:
         video_name = video_path.name
     video_dst = target_dir / video_name
+    if not video_dst.exists():
+        # Emby treats CD1/cd1 as the same segment even on Linux. Reuse the
+        # existing spelling so collision protection cannot be bypassed by case.
+        case_match = next((path for path in target_dir.iterdir()
+                           if path.is_file() and path.name.casefold() == video_name.casefold()), None)
+        if case_match is not None:
+            video_dst = case_match
+            video_name = case_match.name
     # A later-arriving unproven segment may find an earlier normalized file in
     # the archive (common when Thunder creates parts minutes apart). Never
     # abort or overwrite: retain the incoming original stem as a safe fallback.
@@ -3466,19 +3478,26 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
         original_stem = _safe_name(_preserved_code_stem(video_path, code))
         fallback = target_dir / f"{original_stem}{video_path.suffix.lower()}"
         try:
-            same_file = video_path.resolve() == video_dst.resolve()
+            same_file = (video_path.resolve() == video_dst.resolve()
+                         or os.path.samefile(video_path, video_dst)
+                         or (refresh_sidecars and filecmp.cmp(video_path, video_dst, shallow=False)))
         except Exception:
             same_file = False
         if (not same_file and original_stem and fallback != video_dst
+                and fallback.name.casefold() != video_dst.name.casefold()
                 and not fallback.exists()):
             video_dst = fallback
             video_name = fallback.name
             _log(f"分段证据不足且标准名已存在，保留原名避免冲突：{video_path.name} → {video_name}")
-    if not _transfer(video_path, video_dst, mode):
+    reuse_video = (refresh_sidecars and video_dst.is_file()
+                   and (os.path.samefile(video_path, video_dst)
+                        or filecmp.cmp(video_path, video_dst, shallow=False)))
+    if not reuse_video and not _transfer(video_path, video_dst, mode):
         return {"archived": False, "moved_original": False,
                 "error": "视频归档失败", "target_dir": str(target_dir)}
     video_source_removed = mode == "move" and not video_path.exists() and video_dst.exists()
-    done.append(video_dst.name)
+    if not reuse_video:
+        done.append(video_dst.name)
     # 本次落地的是某个 -cdN 分集时，纠正同番号中先到、曾被命名成无后缀的分集（补齐缺失号）。
     if rename and code and part:
         _heal_archived_parts(target_dir, safe_code)
@@ -3527,8 +3546,21 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
     except Exception as e:
         _log(f"扫描刮削附属文件失败：{folder} — {e}")
     sub_mode = "move" if mode == "move" else "copy"
+    refreshed_names = set()
     for lower_name, dst_name in expected.items():
         extra = found_extras.get(lower_name)
+        if refresh_sidecars and extra and dst_name not in refreshed_names:
+            target = target_dir / dst_name
+            temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                shutil.copy2(extra, temporary)
+                os.replace(temporary, target)
+                refreshed_names.add(dst_name)
+            finally:
+                temporary.unlink(missing_ok=True)
+            continue
+        if dst_name in refreshed_names:
+            continue
         if extra and _transfer(extra, target_dir / dst_name, sub_mode):
             done.append(dst_name)
         elif (target_dir / dst_name).exists():
@@ -3596,8 +3628,9 @@ def _archive_file(video_path: Path, output_dir: str, code: str,
                     "target_dir": str(target_dir), "files": done}
 
     how = {"move": "移动", "copy": "复制", "hardlink": "硬链接"}.get(mode, mode)
-    _log(f"归档（{how}）：{len(done)} 个文件 → {target_dir} （{', '.join(done)}）")
-    return {"archived": bool(done), "moved_original": video_source_removed,
+    reported_files = done + sorted(refreshed_names)
+    _log(f"归档（{how}）：{len(reported_files)} 个文件 → {target_dir} （{', '.join(reported_files)}）")
+    return {"archived": bool(done or reuse_video or refreshed_names), "moved_original": video_source_removed,
             "target_dir": str(target_dir), "files": done}
 
 
@@ -3649,7 +3682,7 @@ def _cleanup_source(video_parent: Path, watch_dir: Path, min_bytes: int,
 # ─────────────────────────────────────────
 
 _INCOMPLETE_MARKERS = (
-    ".!qb", ".!ut", ".part", ".partial", ".crdownload",
+    ".!qb", ".!qB", ".!ut", ".!uT", ".part", ".partial", ".crdownload",
     ".download", ".tmp", ".td", ".xltd",
 )
 
@@ -3889,7 +3922,7 @@ async def _process_completed_file(video_path: Path, config: dict,
 
     if scrape_meta:
         try:
-            scrape_res = await _scrape_one(fp, overwrite=False, config=config)
+            scrape_res = await _scrape_one(fp, overwrite=bool(config.get("_force_rescrape")), config=config)
         except Exception as e:
             # 刮削过程意外报错也不应阻止归档（符合「刮削正常运行但刮不到也归档」）
             _log(f"刮削过程异常（将按失败处理）：{video_path.name} — {e}")
@@ -3958,7 +3991,8 @@ async def _process_completed_file(video_path: Path, config: dict,
                            min_bytes=min_bytes, keep_bytes=keep_bytes,
                            multipart_parts=multipart_parts,
                            require_sidecars=scrape_meta,
-                           keep_actor_images=config.get("scrape_actor_images_in_movie_dir", True))
+                           keep_actor_images=config.get("scrape_actor_images_in_movie_dir", True),
+                           refresh_sidecars=bool(config.get("_force_rescrape")))
         if mv.get("archived") and mode == "move":
             try:
                 video_path.unlink()
@@ -4008,6 +4042,41 @@ def _record_recent(rec: dict):
     _monitor_state["processed_total"] += 1
 
 
+def _directory_configs(config: dict) -> list[dict]:
+    """Expand each mapping into the same single-directory processing configuration."""
+    if not config.get("scrape_multi_enabled", False):
+        return [config]
+    pairs = config.get("scrape_directory_pairs") or []
+    if not pairs:
+        raise ValueError("多文件夹模式请至少添加一组下载目录和归档目录")
+    result = []
+    roots = []
+    emby_roots = {}
+    for index, pair in enumerate(pairs, 1):
+        watch = (pair.get("watch_dir") or "").strip()
+        output = (pair.get("output_dir") or "").strip()
+        if not watch or not output:
+            raise ValueError(f"第 {index} 组请填写下载目录和归档目录")
+        watch_root, output_root = Path(watch).resolve(), Path(output).resolve()
+        if watch_root == output_root or output_root in watch_root.parents:
+            raise ValueError(f"第 {index} 组下载目录不能等于归档目录或位于归档目录内")
+        if any(watch_root == root or root in watch_root.parents or watch_root in root.parents
+               for root in roots):
+            raise ValueError("下载目录不能重复或相互包含，以免重复处理")
+        roots.append(watch_root)
+        emby_root = (pair.get("emby_media_root") or "").strip()
+        emby_key = (emby_root.replace("\\", "/").rstrip("/") or "/") if emby_root else ""
+        if output_root in emby_roots and emby_roots[output_root] != emby_key:
+            raise ValueError("共用同一归档目录的分组必须填写相同的 Emby 对应目录（或全部留空）")
+        emby_roots[output_root] = emby_key
+        result.append({**config, "scrape_watch_dir": watch, "scrape_output_dir": output,
+                       "emby_media_root": emby_root})
+    outputs = [Path(row["scrape_output_dir"]).resolve() for row in result]
+    if any(root == output or output in root.parents for root in roots for output in outputs):
+        raise ValueError("下载目录不能位于任意一组归档目录内")
+    return result
+
+
 async def _scan_once(config: dict, force_retry: bool = False) -> int:
     """扫描监控目录一遍：对稳定且完成的文件做处理。返回本轮处理数。"""
     watch = config.get("scrape_watch_dir", "").strip()
@@ -4031,7 +4100,7 @@ async def _scan_once(config: dict, force_retry: bool = False) -> int:
                              config.get("scrape_meta_enabled", True))
     delete_extras = bool(config.get("scrape_delete_extras", False))
     out_dir = config.get("scrape_output_dir", "").strip()
-    excluded_roots = set()
+    excluded_roots = {Path(path).resolve() for path in config.get("_exclude_outputs", [])}
     if out_dir:
         try:
             output_root = Path(out_dir).resolve()
@@ -4136,6 +4205,9 @@ async def _scan_once(config: dict, force_retry: bool = False) -> int:
             multipart_snapshots[key] = parts
 
     for vf in initial_videos:
+        if config.get("_automatic") and not _monitor_should_run(load_config()):
+            _log("总开关已关闭，本轮停止处理后续文件")
+            break
         n_total += 1
         fp = str(vf)
         repaired_dirs = _repair_recorded_nfo_title(vf, config)
@@ -4203,14 +4275,14 @@ async def _scan_once(config: dict, force_retry: bool = False) -> int:
             continue
         # 持久化「已归档」去重：hardlink/copy 模式原文件保留在监控目录，重启后内存 _processed 清空，
         # 靠落盘签名（路径|大小）识别出早已归档的文件并跳过，不再重复刮削/重复归档到新月份目录。
-        if _file_sig(vf, size) in _processed_sig:
+        if not config.get("_force_rescrape") and _file_sig(vf, size) in _processed_sig:
             _processed.add(fp)        # 回填内存，后续轮次走最快路径
             n_done_before += 1
             _size_history.pop(fp, None)
             continue
         # 兜底去重：签名文件对该文件为空（旧版本归档 / /config 重置 / 归档路径变更）时，
         # 若它已存在于归档目录则补登签名并跳过，避免重启后重新识别/重刮/重复归档（含 -cd 错号）。
-        if archive_idx:
+        if archive_idx and not config.get("_force_rescrape"):
             _code_arc = _recognize_code(vf, watch)
             if _is_already_archived(vf, size, _code_arc, archive_idx):
                 _processed.add(fp)                          # 内存去重
@@ -4375,15 +4447,24 @@ async def _scan_serialized(config: dict, reset_recent: bool = False) -> int:
             # explicit scan; successfully archived files remain protected by
             # the persistent path+size signatures loaded inside _scan_once.
             _processed.clear()
-        return await _scan_once(config, force_retry=reset_recent)
+        rows = _directory_configs(config)
+        if not config.get("scrape_multi_enabled"):
+            return await _scan_once(config, force_retry=reset_recent)
+        total = 0
+        outputs = [row["scrape_output_dir"] for row in rows]
+        for row in rows:
+            if config.get("_automatic") and not _monitor_should_run(load_config()):
+                break
+            total += await _scan_once({**row, "_exclude_outputs": outputs}, force_retry=reset_recent)
+        return total
 
 
 def _monitor_should_run(config: dict) -> bool:
-    """监控是否该运行：刮削、规整、归档任一开启即运行。"""
+    """总开关开启且至少有一项处理功能开启时运行。"""
     scrape_meta = config.get("scrape_meta_enabled", True)
     organize_on = config.get("scrape_organize_enabled", scrape_meta)
     archive_on = config.get("archive_enabled", True)
-    return bool(scrape_meta or organize_on or archive_on)
+    return bool(config.get("scrape_enabled", False) and (scrape_meta or organize_on or archive_on))
 
 
 async def _monitor_loop():
@@ -4393,16 +4474,17 @@ async def _monitor_loop():
         config = load_config()
         if not _monitor_should_run(config):
             _monitor_state["enabled"] = False
-            _monitor_state["message"] = "未启用（刮削、规整、归档都关闭）"
+            _monitor_state["message"] = "已停止（总开关关闭或未开启处理功能）"
             _monitor_state["running"] = False
-            _log("检测到刮削、规整与归档均关闭，监控协程退出")
+            _log("总开关关闭或无处理功能，监控协程退出")
             return
         _monitor_state["enabled"] = True
         _monitor_state["watch_dir"] = config.get("scrape_watch_dir", "")
         _monitor_state["output_dir"] = config.get("scrape_output_dir", "")
         _monitor_state["scanning"] = True
         try:
-            n = await _scan_serialized(config)
+            _monitor_wakeup.clear()
+            n = await _scan_serialized({**config, "_automatic": True})
             _monitor_state["last_scan"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             _monitor_state["message"] = f"上次扫描处理 {n} 个文件" if n else "空闲中"
         except Exception as e:
@@ -4413,16 +4495,19 @@ async def _monitor_loop():
 
         interval = max(30, int(config.get("scrape_interval", 300)))
         _log(f"本轮结束，{interval} 秒后再次扫描")
-        await asyncio.sleep(interval)
+        try:
+            await asyncio.wait_for(_monitor_wakeup.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
 
 
 def start_monitor():
-    """主程序启动事件中调用；刮削或归档任一开启则拉起监控协程。"""
+    """主程序启动时按持久保存的总开关启动监控。"""
     global _monitor_task
     config = load_config()
     if not _monitor_should_run(config):
-        _log("启动：刮削与归档均关闭，监控未启用")
-        _monitor_state["message"] = "未启用（刮削、归档都关闭）"
+        _log("启动：总开关关闭或无处理功能，监控未启用")
+        _monitor_state["message"] = "已停止，点击开始刮削启用"
         return
     if _monitor_task and not _monitor_task.done():
         _log("启动：监控已在运行，跳过")
@@ -4437,6 +4522,8 @@ def ensure_monitor():
     """配置变更后调用：按最新配置启动或保持监控。"""
     global _monitor_task
     config = load_config()
+    _monitor_state["enabled"] = _monitor_should_run(config)
+    _monitor_wakeup.set()
     if _monitor_should_run(config):
         if not _monitor_task or _monitor_task.done():
             _log(f"配置变更：刮削/归档已开，拉起监控协程（监控目录 {config.get('scrape_watch_dir') or '未配置'}）")
@@ -4444,12 +4531,16 @@ def ensure_monitor():
         else:
             _log("配置变更：监控已在运行，沿用现有协程（新配置下轮扫描生效）")
     else:
-        _log("配置变更：刮削与归档均关闭，监控将停止")
-    # 停用时由循环自身检测后退出
+        _log("配置变更：总开关关闭或无处理功能，监控将停止")
+    if not _monitor_should_run(config):
+        _monitor_state["message"] = "已停止；当前文件处理完毕后停止后续扫描"
 
 
 def _jav321_cover_retry_candidates(config: dict) -> list[tuple[dict, Path, str]]:
     """Select failed source files that are still in the watch tree and lack poster."""
+    if config.get("scrape_multi_enabled"):
+        return [candidate for row in _directory_configs(config)
+                for candidate in _jav321_cover_retry_candidates({**row, "scrape_multi_enabled": False})]
     _load_tasks()
     watch_text = (config.get("scrape_watch_dir") or "").strip()
     if not watch_text:
@@ -4493,9 +4584,13 @@ async def _retry_failed_covers_with_jav321(config: dict,
                   "recovered": 0, "failed": 0,
                   "message": f"准备重试 {len(candidates)} 个封面失败任务"})
     proxy = config.get("proxy") or None
+    directory_configs = _directory_configs(config)
     try:
         async with _scan_lock:
             for _old_task, video, code in candidates:
+                if config.get("scrape_multi_enabled"):
+                    config = next(row for row in directory_configs
+                                  if Path(row["scrape_watch_dir"]).resolve() in video.resolve().parents)
                 state["message"] = f"正在用 JAV321 重试 {code}"
                 source_size = video.stat().st_size
                 _task_update(code, filepath=str(video), file=video.name,
@@ -4569,7 +4664,13 @@ async def _retry_failed_covers_with_jav321(config: dict,
 @router.get("/scrape/monitor")
 async def api_monitor_status():
     """查看后台刮削监控状态"""
-    return dict(_monitor_state)
+    config = load_config()
+    return {**_monitor_state, "enabled": _monitor_should_run(config),
+            "scrape_enabled": bool(config.get("scrape_enabled", False)),
+            "directory_pairs": [{"watch_dir": row.get("scrape_watch_dir", ""),
+                                 "output_dir": row.get("scrape_output_dir", ""),
+                                 "emby_media_root": row.get("emby_media_root", "")}
+                                for row in _directory_configs(config)]}
 
 
 @router.get("/tasks")
@@ -4611,18 +4712,76 @@ async def api_monitor_refresh():
 
 
 @router.post("/scrape/run-once")
-async def api_run_once():
+async def api_run_once(mapping_index: Optional[int] = None, force: bool = False):
     """立即手动触发一次扫描（按已保存设置，不依赖监控开关）。"""
     config = load_config()
+    try:
+        rows = _directory_configs(config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if mapping_index is not None:
+        if not config.get("scrape_multi_enabled") or not 0 <= mapping_index < len(rows):
+            raise HTTPException(status_code=400, detail="目录映射不存在，请刷新设置")
+        config = {**rows[mapping_index], "scrape_multi_enabled": False,
+                  "_exclude_outputs": [row.get("scrape_output_dir", "") for row in rows
+                                       if row.get("scrape_output_dir")]}
+        rows = [config]
+    for row in rows:
+        source = row.get("scrape_watch_dir", "").strip()
+        if not source or not Path(source).is_dir():
+            raise HTTPException(status_code=400, detail=f"监控目录不存在或不可访问: {source}")
+    if force:
+        config = {**config, "_force_rescrape": True}
     watch = (config.get("scrape_watch_dir") or "").strip()
     output = (config.get("scrape_output_dir") or "").strip()
-    if not watch:
+    if not watch and not config.get("scrape_multi_enabled"):
         raise HTTPException(status_code=400, detail="未配置监控目录")
-    if not Path(watch).is_dir():
+    if not config.get("scrape_multi_enabled") and not Path(watch).is_dir():
         raise HTTPException(status_code=400, detail=f"监控目录不存在或不可访问: {watch}")
     n = await _scan_serialized(config, reset_recent=True)
     return {"success": True, "processed": n, "watch_dir": watch,
+            "directory_pairs": [{"watch_dir": row.get("scrape_watch_dir", ""),
+                                 "output_dir": row.get("scrape_output_dir", ""),
+                                 "emby_media_root": row.get("emby_media_root", "")} for row in rows],
             "output_dir": output, "recent": _monitor_state["recent"][:10]}
+
+
+class HardlinkTestRequest(BaseModel):
+    watch_dir: str
+    output_dir: str
+
+
+def _test_hardlink(watch: str, output: str) -> dict:
+    """Probe the actual mounted paths, rather than infer support from volume names."""
+    source = target = None
+    linked = False
+    try:
+        if not watch.strip() or not output.strip():
+            raise ValueError("请填写下载目录和归档目录")
+        if not Path(watch).is_dir() or not Path(output).is_dir():
+            raise ValueError("目录不存在或不可访问，请先创建目录并检查容器挂载")
+        with tempfile.NamedTemporaryFile(prefix=".jav-hardlink-", dir=watch, delete=False) as probe:
+            source = Path(probe.name)
+            probe.write(b"JAV Search hardlink test\n")
+        target = Path(output) / f".jav-hardlink-{uuid.uuid4().hex}"
+        os.link(source, target)
+        linked = True
+        if not os.path.samefile(source, target):
+            raise OSError("未能验证硬链接")
+        return {"success": True, "supported": True, "message": "支持硬链接：实际创建并验证成功"}
+    except (OSError, ValueError) as exc:
+        return {"success": True, "supported": False,
+                "message": f"硬链接测试失败：{exc}。群晖/Docker 的不同挂载点或跨卷可能无法硬链接；请使用同一挂载根目录，或选择复制/移动。当前硬链接失败时会退化为复制并占用额外空间。"}
+    finally:
+        if linked and target is not None:
+            target.unlink(missing_ok=True)
+        if source is not None:
+            source.unlink(missing_ok=True)
+
+
+@router.post("/scrape/test-hardlink")
+async def api_test_hardlink(req: HardlinkTestRequest):
+    return await asyncio.to_thread(_test_hardlink, req.watch_dir.strip(), req.output_dir.strip())
 
 
 @router.get("/scrape/retry-jav321-covers")
@@ -4638,9 +4797,10 @@ async def api_retry_failed_covers_with_jav321():
         return {"success": True, "started": False, "already_running": True,
                 **_jav321_retry_state}
     config = load_config()
-    watch = (config.get("scrape_watch_dir") or "").strip()
-    if not watch or not Path(watch).is_dir():
-        raise HTTPException(status_code=400, detail="监控目录未配置、不存在或不可访问")
+    for row in _directory_configs(config):
+        watch = (row.get("scrape_watch_dir") or "").strip()
+        if not watch or not Path(watch).is_dir():
+            raise HTTPException(status_code=400, detail="监控目录未配置、不存在或不可访问")
     candidates = _jav321_cover_retry_candidates(config)
     if not candidates:
         _jav321_retry_state.update({
@@ -4660,14 +4820,14 @@ async def api_retry_failed_covers_with_jav321():
 async def api_sync_archive_sidecars():
     """Manually repair archived NFO/artwork names without touching videos."""
     config = load_config()
-    output_dir = (config.get("scrape_output_dir") or "").strip()
-    if not output_dir:
-        raise HTTPException(status_code=400, detail="未配置归档目录")
-    root = Path(output_dir)
-    if not root.exists() or not root.is_dir():
-        raise HTTPException(status_code=400, detail=f"归档目录不存在：{output_dir}")
-    changed = _sync_archive_sidecars(output_dir)
-    return {"success": True, "changed": changed, "directory": output_dir}
+    outputs = list(dict.fromkeys((row.get("scrape_output_dir") or "").strip()
+                                for row in _directory_configs(config)))
+    for output in outputs:
+        if not output or not Path(output).is_dir():
+            raise HTTPException(status_code=400, detail=f"归档目录未配置或不存在：{output}")
+    async with _scan_lock:
+        changed = sum(_sync_archive_sidecars(output) for output in outputs)
+    return {"success": True, "changed": changed, "directory": "; ".join(outputs)}
 
 
 @router.post("/scan")

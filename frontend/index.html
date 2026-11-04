@@ -636,7 +636,7 @@
     </select>
     <button class="btn" id="searchBtn" onclick="doSearch()">搜索</button>
   </div>
-  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.29</div>
+  <div class="version-chip" id="versionChip" title="当前版本">v1.4.6.30</div>
   <button class="btn-icon" onclick="openTasks()">任务</button>
   <button class="btn-icon" onclick="openSettings()">
     <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -1033,9 +1033,11 @@
       <div class="settings-pane" id="pane-scrape">
         <div class="setting-group">
           <h3>刮削 &amp; 归档（全局统一·所有文件通用）</h3>
+          <button type="button" id="btnScrapeToggle" class="jackett-test-btn" aria-pressed="false" style="margin:0 0 14px;padding:12px 32px;font-size:16px;font-weight:700;background:var(--green);color:#fff" onclick="toggleScraping()">开始刮削</button>
+          <div class="setting-hint" id="scrapeToggleMsg">总开关默认关闭，点击后立即保存状态；重启后保持。停止时会等待当前文件处理完毕。</div>
           <div class="setting-hint" style="margin:-4px 0 10px;line-height:1.7">
             <b>刮削</b>负责 NFO 与图片，<b>规整</b>控制视频文件规整，<b>归档</b>负责落入媒体库；视频改名、封套裁图和广告清理另有独立选项。<br>
-            后台会自动监控下载目录——刮削、规整、归档任一开启即运行；三项都关时停止监控。
+            点击上方“开始刮削”后，后台按下面选中的功能监控下载目录；手动扫描可在总开关关闭时单独执行。
           </div>
           <div class="jackett-status-row">
             <div class="jackett-status-dot" id="scrapeDot"></div>
@@ -1081,6 +1083,15 @@
             <span class="setting-hint">开：成品按下面的「归档方式」放进归档目录（手动放入的文件也照此归档）；关：只执行已开启的刮削/规整操作，不写入归档目录。</span>
           </div>
           <div class="setting-row">
+            <label class="source-chk"><input type="checkbox" id="cfgScrapeMultiEnabled" onchange="toggleScrapeDirectories()"> 多文件夹模式</label>
+            <span class="setting-hint">每组填写一个下载目录和一个归档目录；多组可填写相同的归档目录。下载目录不能重复或相互包含。</span>
+          </div>
+          <div id="scrapeDirectoryPairs" hidden>
+            <div id="scrapeDirectoryRows"></div>
+            <button type="button" class="jackett-test-btn" style="margin:8px 0" onclick="addScrapeDirectory()">+ 添加文件夹</button>
+          </div>
+          <div id="scrapeSingleDirectories">
+          <div class="setting-row">
             <label class="setting-label">下载/工作目录（监控目录）</label>
             <input class="setting-input" id="cfgScrapeWatch" type="text" placeholder="/data/media/qb/jpav">
             <span class="setting-hint">本容器内、实际指向<b>下载器保存数据同一物理目录</b>的挂载名。监控会扫描这里并执行刮削、规整和归档；务必与下载器保存目录指向同一块盘。</span>
@@ -1088,8 +1099,12 @@
           <div class="setting-row">
             <label class="setting-label">归档目录（供 EMBY 扫描）</label>
             <input class="setting-input" id="cfgScrapeOutput" type="text" placeholder="/data/media/emby">
-            <span class="setting-hint">刮削归档后按所选文件夹命名规则在此生成目录。硬链接需与下载目录<b>同一卷</b>（跨卷自动退化为复制）。</span>
+            <span class="setting-hint">刮削归档后按所选文件夹命名规则在此生成目录。</span>
           </div>
+          <button type="button" class="jackett-test-btn" style="margin:0 0 8px" onclick="testScrapeHardlink(this)">测试硬链接</button>
+          <span class="setting-hint" id="singleHardlinkMsg" role="status"></span>
+          </div>
+          <div class="setting-hint" style="margin:8px 0;line-height:1.7">硬链接要求目录支持同一文件系统链接。群晖/Docker 即使在同一存储池，不同挂载点也可能无法硬链接；建议映射共同的父目录，并测试每组路径。硬链接失败会退化为复制，占用额外空间。测试目录须已存在。</div>
           <div class="setting-row">
             <label class="setting-label">历史归档配套文件修复</label>
             <button type="button" class="jackett-test-btn" style="margin-left:0" onclick="syncArchiveSidecars()">手动同步 NFO/图片文件名</button>
@@ -1147,13 +1162,17 @@
             <label class="setting-label">Emby API 同步</label>
             <input class="setting-input" id="cfgEmbyUrl" type="text" placeholder="例如 http://192.168.1.100:8096">
             <input class="setting-input" id="cfgEmbyApiKey" type="password" placeholder="Emby API Key">
-            <input class="setting-input" id="cfgEmbyMediaRoot" type="text" placeholder="Emby 容器内归档根路径；路径相同可留空，例如 /media/av/jp">
+            <div id="embySingleMapping">
+              <label class="setting-label" for="cfgEmbyMediaRoot">Emby 对应目录（单目录模式，可选）</label>
+              <input class="setting-input" id="cfgEmbyMediaRoot" type="text" placeholder="Emby 内看到的归档根路径；路径相同可留空，例如 /media/av/jp">
+            </div>
+            <span class="setting-hint" id="embyMultiMappingHint" hidden>多文件夹模式：请在上方每组目录中分别填写“Emby 对应目录”；这里的单目录路径不参与映射。Emby 的一个媒体库可包含多组文件夹。</span>
             <label class="source-chk"><input type="checkbox" id="cfgEmbyActorSync"> 头像刮削成功后自动更新 Emby 演员主图</label>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="jackett-test-btn" style="margin-left:0" onclick="testEmby()">测试 Emby 连接</button>
               <span class="setting-hint" id="embyTestStatus"></span>
             </div>
-            <span class="setting-hint">使用 Emby 管理员 Key。影片归档完成后只通知当前影片目录，不扫描其他媒体库；若两端归档根路径不同，请填写上方 Emby 路径。同步仅从当前影片 People 关联取得 Person ID 并上传本地 actors 图片；影片尚未入库时会持久化低频重试，不枚举全局人物库。</span>
+            <span class="setting-hint">使用 Emby 管理员 Key。影片归档完成后只通知当前影片目录，不扫描其他媒体库；若两端路径不同，单目录模式在这里填写 Emby 对应目录，多文件夹模式在每组中分别填写。同步仅从当前影片 People 关联取得 Person ID 并上传本地 actors 图片；影片尚未入库时会持久化低频重试，不枚举全局人物库。</span>
           </div>
           <div class="setting-row">
             <label class="source-chk"><input type="checkbox" id="cfgActorThumbInNfo" checked> 将演员头像远程地址写入 NFO</label>
@@ -2705,7 +2724,13 @@ async function openSettings() {
     document.getElementById('cfgLogVerbose').checked = cfg.log_verbose !== false;
     // V1.4 刮削
     document.getElementById('cfgScrapeWatch').value       = cfg.scrape_watch_dir || '';
+    renderScrapeToggle(cfg.scrape_enabled === true);
+    document.getElementById('cfgScrapeMultiEnabled').checked = cfg.scrape_multi_enabled === true;
+    document.getElementById('scrapeDirectoryRows').replaceChildren();
+    (cfg.scrape_directory_pairs || []).forEach(addScrapeDirectory);
     document.getElementById('cfgScrapeOutput').value      = cfg.scrape_output_dir || '';
+    document.getElementById('cfgEmbyMediaRoot').value = cfg.emby_media_root || '';
+    toggleScrapeDirectories();
     document.getElementById('cfgScrapeInterval').value    = cfg.scrape_interval || 300;
     document.getElementById('cfgScrapeSettle').value      = Math.max(300, cfg.scrape_settle_seconds ?? 300);
     document.getElementById('cfgScrapeMinSize').value     = cfg.scrape_min_size_mb ?? 100;
@@ -2737,7 +2762,6 @@ async function openSettings() {
     document.getElementById('cfgActorJavdbDirectoryHours').value = cfg.actor_javdb_directory_interval_hours ?? 12;
     document.getElementById('cfgEmbyUrl').value = cfg.emby_url || '';
     document.getElementById('cfgEmbyApiKey').value = cfg.emby_api_key || '';
-    document.getElementById('cfgEmbyMediaRoot').value = cfg.emby_media_root || '';
     document.getElementById('cfgEmbyActorSync').checked = cfg.emby_actor_sync_enabled === true;
     document.getElementById('cfgArchiveEnabled').checked = cfg.archive_enabled !== false;
     // 检测 Jackett 状态
@@ -2794,12 +2818,116 @@ async function refreshTrackers() {
 }
 
 // ── 刮削监控状态 ──
+let scrapeEnabled = false;
+function renderScrapeToggle(enabled) {
+  scrapeEnabled = enabled;
+  const btn = document.getElementById('btnScrapeToggle');
+  btn.textContent = enabled ? '停止刮削' : '开始刮削';
+  btn.style.background = enabled ? 'var(--red)' : 'var(--green)';
+  btn.setAttribute('aria-pressed', String(enabled));
+}
+async function toggleScraping() {
+  const btn = document.getElementById('btnScrapeToggle');
+  const previous = scrapeEnabled;
+  btn.disabled = true;
+  try {
+    if (previous) {
+      // 停止只保存总开关，未填写完整的目录也不能阻止停机。
+      const resp = await fetch(`${API}/api/config`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({scrape_enabled:false})});
+      const data = await safeJson(resp);
+      if (!resp.ok || !data.success) throw new Error(data.detail || '停止失败');
+      renderScrapeToggle(false);
+    } else {
+      renderScrapeToggle(true);
+      if (!await saveSettings()) throw new Error('设置保存失败，请检查目录配置');
+    }
+    document.getElementById('scrapeToggleMsg').textContent = scrapeEnabled ? '已保存：后台刮削已开启' : '已保存：刮削已停止；当前文件处理完毕后停止后续扫描';
+    await refreshScrapeStatus();
+  } catch (e) {
+    renderScrapeToggle(previous);
+    document.getElementById('scrapeToggleMsg').textContent = e.message;
+  } finally { btn.disabled = false; }
+}
+function scrapeDirectoryPairs() {
+  return [...document.querySelectorAll('.scrape-directory-row')].map(row => ({
+    watch_dir: row.querySelector('.scrape-watch').value.trim(),
+    output_dir: row.querySelector('.scrape-output').value.trim(),
+    emby_media_root: row.querySelector('.scrape-emby-root').value.trim(),
+  }));
+}
+function addScrapeDirectory(pair = {}) {
+  const row = document.createElement('div');
+  row.className = 'scrape-directory-row';
+  row.style.cssText = 'border:1px solid var(--border);border-radius:8px;padding:12px;margin:8px 0';
+  row.innerHTML = `<div class="setting-row"><label class="setting-label">下载目录</label><input class="setting-input scrape-watch" aria-label="下载目录" placeholder="/data/downloads"><button type="button" class="jackett-test-btn scrape-force">强制重新刮削</button></div>
+    <div class="setting-row"><label class="setting-label">归档目录</label><input class="setting-input scrape-output" aria-label="归档目录" placeholder="/data/library"></div>
+    <div class="setting-row"><label class="setting-label">Emby 对应目录（可选）</label><input class="setting-input scrape-emby-root" aria-label="Emby 对应目录" placeholder="例如 /media/movies；两端路径相同则留空"><span class="setting-hint">填写 Emby 看到的本组归档根路径，用于影片通知和演员头像同步；留空使用本组归档路径，不使用单目录模式的 Emby 路径。共用归档目录的分组请填写相同值。</span></div>
+    <button type="button" class="jackett-test-btn scrape-link" style="margin-left:0">测试硬链接</button><button type="button" class="jackett-test-btn scrape-remove">移除</button>
+    <div class="setting-hint scrape-pair-msg" role="status"></div>`;
+  row.querySelector('.scrape-watch').value = pair.watch_dir || '';
+  row.querySelector('.scrape-output').value = pair.output_dir || '';
+  row.querySelector('.scrape-emby-root').value = pair.emby_media_root || '';
+  row.querySelector('.scrape-remove').onclick = () => row.remove();
+  row.querySelector('.scrape-link').onclick = () => testScrapeHardlink(row.querySelector('.scrape-link'), row);
+  row.querySelector('.scrape-force').onclick = () => forceScrapeDirectory(row);
+  document.getElementById('scrapeDirectoryRows').append(row);
+}
+function toggleScrapeDirectories() {
+  const multi = document.getElementById('cfgScrapeMultiEnabled').checked;
+  document.getElementById('scrapeSingleDirectories').hidden = multi;
+  document.getElementById('scrapeDirectoryPairs').hidden = !multi;
+  document.getElementById('embySingleMapping').hidden = multi;
+  document.getElementById('cfgEmbyMediaRoot').disabled = multi;
+  document.getElementById('embyMultiMappingHint').hidden = !multi;
+  if (multi && !document.querySelector('.scrape-directory-row')) addScrapeDirectory({
+    watch_dir: document.getElementById('cfgScrapeWatch').value,
+    output_dir: document.getElementById('cfgScrapeOutput').value,
+    emby_media_root: document.getElementById('cfgEmbyMediaRoot').value,
+  });
+}
+async function testScrapeHardlink(btn, row = null) {
+  const msg = row ? row.querySelector('.scrape-pair-msg') : document.getElementById('singleHardlinkMsg');
+  const pair = row ? {watch_dir:row.querySelector('.scrape-watch').value.trim(), output_dir:row.querySelector('.scrape-output').value.trim()} :
+    {watch_dir:document.getElementById('cfgScrapeWatch').value.trim(), output_dir:document.getElementById('cfgScrapeOutput').value.trim()};
+  btn.disabled = true;
+  msg.textContent = '正在测试实际目录…';
+  try {
+    const resp = await fetch(`${API}/api/library/scrape/test-hardlink`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(pair)});
+    const data = await safeJson(resp);
+    if (!resp.ok) throw new Error(data.detail || '测试失败');
+    msg.textContent = data.message;
+    msg.style.color = data.supported ? 'var(--green)' : 'var(--red)';
+  } catch (e) { msg.textContent = e.message; }
+  finally { btn.disabled = false; }
+}
+async function forceScrapeDirectory(row) {
+  const btn = row.querySelector('.scrape-force');
+  const msg = row.querySelector('.scrape-pair-msg');
+  const index = [...document.querySelectorAll('.scrape-directory-row')].indexOf(row);
+  btn.disabled = true;
+  let saved = false;
+  msg.textContent = '保存设置并等待扫描；跳过已归档记录，仍检查下载完成和文件稳定性…';
+  try {
+    saved = await saveSettings(false);
+    if (!saved) throw new Error('设置保存失败');
+    const resp = await fetch(`${API}/api/library/scrape/run-once?mapping_index=${index}&force=true`, {method:'POST'});
+    const data = await safeJson(resp);
+    if (!resp.ok || !data.success) throw new Error(data.detail || '重新刮削失败');
+    msg.textContent = `重新扫描完成：处理 ${data.processed} 个文件；未完成或尚未稳定的文件会保留等待。`;
+  } catch (e) { msg.textContent = e.message; }
+  finally {
+    if (saved) await fetch(`${API}/api/library/scrape/monitor/refresh`, {method:'POST'}).catch(() => {});
+    btn.disabled = false;
+    refreshScrapeStatus();
+  }
+}
 async function refreshScrapeStatus() {
   const dot  = document.getElementById('scrapeDot');
   const text = document.getElementById('scrapeStatusText');
   try {
     const resp = await fetch(`${API}/api/library/scrape/monitor`, { cache: 'no-store' });
     const s = await safeJson(resp);
+    renderScrapeToggle(s.scrape_enabled === true);
     dot.className = 'jackett-status-dot';
     if (s.running && s.enabled) { dot.classList.add('online'); }
     else if (s.enabled) { dot.classList.add('offline'); }
@@ -2906,7 +3034,8 @@ async function runScrapeOnce() {
     const data = await safeJson(resp);
     if (resp.ok && data.success) {
       msg.style.color = 'var(--green)';
-      msg.textContent = `扫描目录：${data.watch_dir || '-'}；输出目录：${data.output_dir || '未配置'}；本次处理 ${data.processed} 个文件`;
+      const paths = (data.directory_pairs || []).map(p => `${p.watch_dir} → ${p.output_dir || '未配置'}`).join('；');
+      msg.textContent = `扫描目录：${paths || data.watch_dir || '-'}；本次处理 ${data.processed} 个文件`;
       renderScrapeRecent(data.recent || []);
       refreshScrapeStatus();
     } else { throw new Error(data.detail || '扫描失败'); }
@@ -3236,8 +3365,11 @@ async function saveSettings(refreshMonitor = true) {
     tr_save_path: document.getElementById('cfgTrSavePath').value.trim(),
     tr_category: document.getElementById('cfgTrCategory').value.trim(),
     log_verbose: document.getElementById('cfgLogVerbose').checked,
-    // 刮削 & 归档（监控由 刮削/归档 任一开启自动运行，无单独监控开关）
+    // 刮削总开关与单目录/多目录配置。
     scrape_watch_dir: document.getElementById('cfgScrapeWatch').value.trim(),
+    scrape_enabled: scrapeEnabled,
+    scrape_multi_enabled: document.getElementById('cfgScrapeMultiEnabled').checked,
+    scrape_directory_pairs: scrapeDirectoryPairs(),
     scrape_output_dir: document.getElementById('cfgScrapeOutput').value.trim(),
     scrape_interval: Math.max(30, parseInt(document.getElementById('cfgScrapeInterval').value) || 300),
     scrape_settle_seconds: Math.max(300, parseInt(document.getElementById('cfgScrapeSettle').value) || 300),
@@ -3279,7 +3411,7 @@ async function saveSettings(refreshMonitor = true) {
   msg.style.color = 'var(--text-muted)';
   msg.textContent = '保存中…';
   try {
-    const resp = await fetch(`${API}/api/config`, {
+    const resp = await fetch(`${API}/api/config?refresh_monitor=${refreshMonitor}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
@@ -3299,7 +3431,7 @@ async function saveSettings(refreshMonitor = true) {
       return true;
     } else {
       msg.style.color = 'var(--red)';
-      msg.textContent = '保存失败';
+      msg.textContent = data.detail || '保存失败';
       return false;
     }
   } catch (e) {
@@ -3562,7 +3694,7 @@ async function checkVersion() {
   try {
     const resp = await fetch(`${API}/api/version`, { cache: 'no-store' });
     const d = await safeJson(resp);
-      chip.textContent = 'v' + (d.current || '1.4.6.29');
+      chip.textContent = 'v' + (d.current || '1.4.6.30');
     if (d.update_available && d.latest) {
       chip.classList.add('has-update', 'clickable');
       chip.title = `发现新版本 ${d.latest}（当前 v${d.current}）— 点击查看`;
