@@ -285,6 +285,8 @@ async def enrich(items: list[dict], proxy: Optional[str] = None,
 
         url = item.get("url", "")
         source = (item.get("source", "") or "").lower()
+        if source == dmm.SOURCE.lower():
+            source = "dmm"
         expected_code = _normalize_code(item.get("code", ""))
 
         def identity_ok(value: Optional[dict]) -> bool:

@@ -38,7 +38,7 @@ services:
       # 命中即零上游请求。超上限按最旧访问淘汰(LRU)。默认 500；设 0 关闭磁盘缓存（仅内存）。
       # - IMG_DISK_CACHE_MB=500
       # ── 新增数据源域名（AVSOX/AVMOO 域名常变，失效时改这里）──
-      # - AVSOX_BASE=https://avsox.click
+      # - AVSOX_BASE=https://www.avsox.click
       # - AVMOO_BASE=https://avmoo.website
     # 若 Jackett / 代理跑在群晖宿主机上，用 host.docker.internal 访问宿主机
     extra_hosts:

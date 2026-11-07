@@ -4,6 +4,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from unittest import mock
@@ -2188,17 +2189,45 @@ class VideoClassificationTests(unittest.TestCase):
         self.assertTrue(item["detail_loaded"])
 
     def test_dmm_code_search_rejects_nonmatching_first_result(self):
-        original = dmm._api
-
-        async def fake_api(params, proxy):
-            return [{"content_id": "other00999", "title": "OTHER-999"}]
-
-        dmm._api = fake_api
-        try:
+        with mock.patch.object(dmm, "_credentials", return_value=("id", "affiliate")), \
+             mock.patch.object(dmm, "_api", return_value=[
+                 {"content_id": "other00999", "title": "OTHER-999"},
+             ]):
             result = asyncio.run(dmm.search_list("ABC-123", "code"))
-        finally:
-            dmm._api = original
         self.assertEqual(result, [])
+
+    def test_dmm_graphql_code_search_checks_content_id_and_maps_samples(self):
+        rows = [
+            {"id": "other00814", "title": "JRZD-814"},
+            {"id": "h_086jrzd00814", "sampleImages": [{"largeUrl": "https://pics.test/sample.jpg"}]},
+        ]
+        with mock.patch.object(dmm, "_credentials", return_value=("", "")), \
+             mock.patch.object(dmm, "_graphql", return_value=rows) as graphql:
+            results = asyncio.run(scrapers.search("JRZD-814", "code", sources=["dmm"]))
+        self.assertIn('queryWord: "jrzd00814"', graphql.call_args.args[2])
+        self.assertEqual([item["code"] for item in results], ["JRZD-814"])
+        self.assertEqual(results[0]["samples"], ["https://pics.test/sample.jpg"])
+
+    def test_dmm_home_latest_only_requests_enabled_source_and_skips_future(self):
+        now = datetime(2026, 11, 7, 12, tzinfo=dmm._JST)
+        rows_by_day = [
+            [{"id": "abc00100", "deliveryStartAt": "2026-11-07T20:00:00+09:00"},
+             {"id": "abc00099", "deliveryStartAt": "2026-11-06T23:00:00+08:00"}],
+            [{"id": "abc00098", "deliveryStartAt": "2026-11-06T09:00:00+09:00"}],
+        ]
+        config = {"show_latest": True, "latest_sources": ["javbus"], "latest_limits": {"dmm": 2}}
+        with mock.patch.object(main, "load_config", return_value=config), \
+             mock.patch.object(dmm, "datetime", wraps=datetime) as clock, \
+             mock.patch.object(dmm, "_graphql", side_effect=rows_by_day) as graphql:
+            clock.now.return_value = now
+            disabled = asyncio.run(main.api_latest("dmm"))
+            self.assertFalse(disabled["success"])
+            graphql.assert_not_called()
+            config["latest_sources"].append("dmm")
+            latest = asyncio.run(main.api_latest("dmm"))
+        self.assertEqual([item["code"] for item in latest["results"]], ["ABC-099", "ABC-098"])
+        self.assertEqual(latest["results"][0]["release_date"], "2026-11-07")
+        self.assertIn('deliveryStartDate: "2026-11-07"', graphql.call_args_list[0].args[2])
 
 
 class NamingAndTrackerTests(unittest.TestCase):

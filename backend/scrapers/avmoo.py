@@ -9,13 +9,13 @@ HTML 网格失效。本文件仅提供域名与来源名，逻辑全在 _javu_ba
 import os
 from typing import Optional
 from . import _javu_base as javu
+from .avsox import AVSOX_BASE
 
 AVMOO_BASE = os.getenv("AVMOO_BASE", "https://avmoo.website")
 SOURCE = "AVMOO"
 
-# 与 AVSOX 互为备份：主域名 avmoo.website 不可达时自动切到 avsox.click（同一 javu 后端）。
-_AVSOX_BACKUP = os.getenv("AVSOX_BASE", "https://avsox.click")
-BASES = [AVMOO_BASE, _AVSOX_BACKUP]
+# 与 AVSOX 互为备份（同一 javu 后端）。
+BASES = [AVMOO_BASE, AVSOX_BASE]
 
 
 async def search_list(query: str, mode: str, proxy: Optional[str] = None,
