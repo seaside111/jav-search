@@ -3738,10 +3738,20 @@ def _manual_group_key(video_path: Path, watch_dir: Path) -> str:
         relative = resolved.relative_to(root)
         if len(relative.parts) <= 1:
             code = _code_from_name(video_path.stem)
-            return f"root-code:{_norm(code)}" if code else f"file:{resolved}"
+            return f"root-code:{root}:{_norm(code)}" if code else f"file:{resolved}"
         return f"dir:{root / relative.parts[0]}"
     except Exception:
         return f"file:{video_path}" if video_path.parent == watch_dir else f"dir:{video_path.parent}"
+
+
+def _root_download_artifact_groups(watch_dir: Path) -> Optional[set[str]]:
+    """Match unfinished root files to their movie groups before final names exist."""
+    try:
+        return {_manual_group_key(path.with_suffix(""), watch_dir)
+                for path in watch_dir.iterdir()
+                if path.suffix.lower() in _INCOMPLETE_MARKERS and path.is_file()}
+    except OSError:
+        return None
 
 
 def _manual_group_stability(group_key: str, entries: list[tuple[Path, object]],
@@ -4153,18 +4163,20 @@ async def _scan_once(config: dict, force_retry: bool = False) -> int:
         group_key = _manual_group_key(candidate, watch_dir)
         manual_groups.setdefault(group_key, []).append((candidate, candidate_stat))
 
+    root_artifact_groups = _root_download_artifact_groups(watch_dir)
+    blocked_groups = set()
     manual_ready = set()
     for group_key, entries in manual_groups.items():
         states = {candidate_states.get(str(path), "unmatched") for path, _st in entries}
         # A downloader-reported incomplete file or a temporary marker blocks
-        # every sibling in the directory, including deletion candidates.
-        if states & {"downloading", "marked_incomplete"}:
+        # its download group, including deletion candidates.
+        if group_key.startswith("dir:"):
+            has_artifact = _has_download_artifact(Path(group_key[4:]))
+        else:
+            has_artifact = root_artifact_groups is None or group_key in root_artifact_groups
+        if states & {"downloading", "marked_incomplete"} or has_artifact:
             _folder_history.pop(group_key, None)
-            continue
-        group_root = (Path(group_key[4:]) if group_key.startswith("dir:")
-                      else watch_dir)
-        if _has_download_artifact(group_root):
-            _folder_history.pop(group_key, None)
+            blocked_groups.add(group_key)
             continue
         group_stable, _group_count, _group_age = _manual_group_stability(
             group_key, entries, stable_needed, settle_seconds, now=now)
@@ -4269,9 +4281,12 @@ async def _scan_once(config: dict, force_retry: bool = False) -> int:
         if download_state in {"unmatched", "completed"} and fp not in manual_ready:
             n_waiting += 1
             group_key = _manual_group_key(vf, watch_dir)
+            if group_key in blocked_groups:
+                _log(f"等待同批下载完成：{vf.parent.name} / {vf.name}（检测到未完成下载或无法确认下载状态）")
+                continue
             hist = _folder_history.get(group_key) or [None, 0, now]
             observed = max(0, now - hist[2])
-            _log(f"等待混合下载目录整体写入完成：{vf.parent.name} / {vf.name}（整批稳定 {int(observed)}/300s）")
+            _log(f"等待同批文件写入稳定：{vf.parent.name} / {vf.name}（整批稳定 {int(observed)}/{settle_seconds}s）")
             continue
         # 持久化「已归档」去重：hardlink/copy 模式原文件保留在监控目录，重启后内存 _processed 清空，
         # 靠落盘签名（路径|大小）识别出早已归档的文件并跳过，不再重复刮削/重复归档到新月份目录。

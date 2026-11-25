@@ -1948,6 +1948,10 @@ class VideoClassificationTests(unittest.TestCase):
             self.assertEqual(
                 library._manual_group_key(first, watch),
                 library._manual_group_key(second, watch))
+            other_watch = watch / "other-watch"
+            self.assertNotEqual(
+                library._manual_group_key(first, watch),
+                library._manual_group_key(other_watch / first.name, other_watch))
 
     def test_unfinished_artifact_blocks_batch_before_final_video_appears(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -1955,6 +1959,46 @@ class VideoClassificationTests(unittest.TestCase):
             folder.mkdir()
             (folder / "ABC-123-CD2.mp4.xltd").write_bytes(b"downloading")
             self.assertTrue(library._has_download_artifact(folder))
+
+    def test_scan_isolates_root_download_markers_by_movie(self):
+        with tempfile.TemporaryDirectory() as raw:
+            watch = Path(raw)
+            movie = watch / "JUR-032.UC-LTX.4k.x265.mp4"
+            other_movie = watch / "XYZ-456.mp4"
+            for video in (movie, other_movie):
+                video.write_bytes(b"movie")
+            same_code = watch / "JUR-032-CD2.mp4.!qB"
+            same_code.write_bytes(b"downloading")
+            (watch / "ABC-123.mp4.xltd").write_bytes(b"unrelated root download")
+            subfolder = watch / "JUR-032"
+            subfolder.mkdir()
+            (subfolder / "JUR-032.mp4.part").write_bytes(b"separate download")
+            config = {"scrape_watch_dir": str(watch), "scrape_min_size_mb": 0}
+            process = mock.AsyncMock(return_value={"scrape_ok": True, "moved": False})
+            with mock.patch.object(library, "_download_state_snapshot",
+                                   new=mock.AsyncMock(return_value=(True, []))), \
+                    mock.patch.object(library, "_process_completed_file", process), \
+                    mock.patch.object(library, "_load_processed"), \
+                    mock.patch.object(library, "_load_tasks"), \
+                    mock.patch.object(library, "_load_retries"), \
+                    mock.patch.object(library, "_save_processed"), \
+                    mock.patch.object(library, "_save_retries"), \
+                    mock.patch.object(library, "_task_update"), \
+                    mock.patch.object(library, "_record_recent"), \
+                    mock.patch.multiple(library, _size_history={}, _folder_history={},
+                                        _processed=set(), _processed_sig={}, _retry_states={}), \
+                    mock.patch.object(library.time, "time", return_value=1000) as now:
+                self.assertEqual(asyncio.run(library._scan_once(config)), 0)
+                now.return_value = 1300
+                self.assertEqual(asyncio.run(library._scan_once(config)), 1)
+                process.assert_awaited_once_with(other_movie, config, multipart_parts=None)
+
+                same_code.unlink()
+                now.return_value = 1301
+                self.assertEqual(asyncio.run(library._scan_once(config)), 0)
+                now.return_value = 1601
+                self.assertEqual(asyncio.run(library._scan_once(config)), 1)
+                process.assert_awaited_with(movie, config, multipart_parts=None)
 
     def test_scan_never_deletes_extra_before_manual_folder_is_stable(self):
         with tempfile.TemporaryDirectory() as raw:
